@@ -35,10 +35,9 @@ exec python -m sglang.launch_server \
     --cuda-graph-bs 1 2 4 8 16 \
     --max-running-requests 32 \
     --chunked-prefill-size 8192 \
-    --disable-radix-cache \
     --attention-backend triton \
     --num-continuous-decode-steps 32 \
-    --disable-custom-all-reduce \
+    --disable-custom-all-reduce \ # Required: QuickReduce uses hipIpcGetMemHandle which crashes on gfx1201
     --trust-remote-code \
     --port "$PORT" \
     --host 0.0.0.0 \
