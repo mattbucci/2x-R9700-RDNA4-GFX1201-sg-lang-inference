@@ -1,0 +1,9 @@
+# Cloned and built by setup.sh
+components/sglang/
+components/triton-build/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+*.jsonl

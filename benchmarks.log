@@ -1,0 +1,70 @@
+=============================================
+BENCH: 0-baseline (stock v0.5.9 + minimal fixes only)  2026-03-21 23:03
+=============================================
+  conc=1: TPOT=39.28ms  throughput=71.55 tok/s
+  conc=8: TPOT=50.66ms  throughput=208.07 tok/s
+  conc=16: TPOT=54.52ms  throughput=238.29 tok/s
+
+=============================================
+BENCH: 1-attention-tuning (decode BLOCK=32 + extend RDNA4 blocks)  2026-03-21 23:07
+=============================================
+  conc=1: TPOT=39.32ms  throughput=71.24 tok/s
+  conc=8: TPOT=51.38ms  throughput=210.77 tok/s
+  conc=16: TPOT=54.95ms  throughput=244.88 tok/s
+
+=============================================
+BENCH: 2-disable-rowwise-scaled-mm (force triton GEMM on RDNA4)  2026-03-21 23:10
+=============================================
+  conc=1: TPOT=39.31ms  throughput=71.24 tok/s
+  conc=8: TPOT=50.54ms  throughput=209.36 tok/s
+  conc=16: TPOT=54.97ms  throughput=245.84 tok/s
+
+=============================================
+BENCH: 3-kv-splits-32 (triton_attention_num_kv_splits=32)  2026-03-21 23:13
+=============================================
+  conc=1: TPOT=39.32ms  throughput=71.22 tok/s
+  conc=8: TPOT=50.30ms  throughput=210.70 tok/s
+  conc=16: TPOT=54.80ms  throughput=241.61 tok/s
+
+=============================================
+BENCH: 4-AWQ-4bit (stock AWQ GEMM, max-running=32, cuda-graph-bs 1-16)  2026-03-21 23:30
+=============================================
+  conc=1: TPOT=112.33ms  throughput=25.17 tok/s
+  conc=8: TPOT=124.10ms  throughput=132.41 tok/s
+  conc=16: TPOT=150.48ms  throughput=147.55 tok/s
+
+=============================================
+BENCH: 5-AWQ-fused-GEMM (split_k=2/8 + FP32 accum + BSN=64 BSK=64)  2026-03-21 23:47
+=============================================
+  conc=1: TPOT=27.89ms  throughput=99.06 tok/s
+  conc=8: TPOT=41.52ms  throughput=318.59 tok/s
+  conc=16: TPOT=64.46ms  throughput=330.98 tok/s
+
+=============================================
+BENCH: 6-AWQ-autotune-variants (4 split_k kernels + scales cache + waves_per_eu=4)  2026-03-22 00:58
+=============================================
+  conc=1: TPOT=33.89ms  throughput=70.12 tok/s
+  conc=8: TPOT=131.55ms  throughput=139.22 tok/s
+  conc=16: TPOT=178.87ms  throughput=152.64 tok/s
+
+=============================================
+BENCH: 7-AWQ-fused-GEMM-reverted (simple split_k + FP32 accum, no autotune)  2026-03-22 01:09
+=============================================
+  conc=1: TPOT=27.76ms  throughput=99.57 tok/s
+  conc=8: TPOT=41.68ms  throughput=317.34 tok/s
+  conc=16: TPOT=65.71ms  throughput=325.71 tok/s
+
+=============================================
+BENCH: 8-AWQ-sweep-tuned (BSM=16 BSN=128 BSK=64 SK=8, triton 3.6 optimal)  2026-03-22 03:39
+=============================================
+  conc=1: TPOT=25.69ms  throughput=105.58 tok/s
+  conc=8: TPOT=48.96ms  throughput=260.67 tok/s
+  conc=16: TPOT=80.90ms  throughput=266.42 tok/s
+
+=============================================
+BENCH: 9-AWQ-adaptive-SK (BSM=16 BSN=64 BSK=64, SK=8 small batch / SK=2 large+bigN)  2026-03-22 03:42
+=============================================
+  conc=1: TPOT=25.72ms  throughput=105.34 tok/s
+  conc=8: TPOT=49.08ms  throughput=266.50 tok/s
+  conc=16: TPOT=78.11ms  throughput=262.22 tok/s
+
