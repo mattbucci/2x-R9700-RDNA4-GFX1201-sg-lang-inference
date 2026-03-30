@@ -76,10 +76,38 @@ An estimated **7-10 patches still needed**, but the total patch surface is signi
 
 Down from 19 files / ~290 lines to ~10 files / ~190 lines (35% reduction).
 
-## Action Plan
+## Unpatched v0.5.10rc0 Test Results (2026-03-29)
 
-1. Create a new worktree from `v0.5.10rc0`
-2. Apply the "still needed" patches to the new codebase
-3. Test unpatched first to confirm what breaks
-4. Test with minimal patches to verify correctness
-5. Run benchmark suite to compare performance with v0.5.9 patched
+Tested unpatched v0.5.10rc0 with Devstral AWQ on 2x R9700. Crash sequence:
+
+| Order | File | Error | Fix needed |
+|-------|------|-------|-----------|
+| 1 | `quark_w4a4_mxfp4.py` | `ModuleNotFoundError: No module named 'aiter'` | `try/except` around aiter imports |
+| 2 | `quark_int4fp8_moe.py` | `ModuleNotFoundError: No module named 'aiter'` | `try/except` around aiter imports |
+| 3 | `token_dispatcher/__init__.py` | `AssertionError: libcudart is not loaded` (via flashinfer) | `try/except` around flashinfer import |
+| 4 | `fused_moe_triton/layer.py` | Same flashinfer crash | `try/except` around flashinfer import |
+| 5 | transformers `auto_factory.py` | `ValueError: Could not find VoxtralRealtimeTextModel` | Patch transformers `auto_factory.py` |
+| 6 | `llava.py` | `KeyError: 'model.multi_modal_projector.linear_1.weight'` | Weight key prefix remapping |
+
+**After fixing #1-#5:** Server starts, loads model weights, but crashes on #6 (weight key mapping).
+The weight prefix fix (`model.layers.*` → `model.language_model.layers.*`) from v0.5.9 is NOT upstreamed.
+
+**Conclusion:** v0.5.10rc0 requires at minimum 6 import/compatibility fixes before the server even starts on RDNA4.
+The 9 patches we thought were upstreamed include llava.py, but the weight loading part of that fix was NOT upstreamed.
+
+## Revised Patch Count
+
+| Category | v0.5.9 (19 files) | v0.5.10rc0 (needed) |
+|----------|-------------------|---------------------|
+| Import guards (aiter, flashinfer) | 6 files | 4 files (2 still broken) |
+| Transformers compat | 0 | 1 (auto_factory.py) |
+| Weight loading | 1 (llava.py) | 1 (llava.py, same fix) |
+| Performance (AWQ fused GEMM, FP8 num_stages) | 2 | 2 |
+| Correctness (DeltaNet, float32 allreduce, FP8 utils) | 4 | 3-4 |
+| Compatibility (sgl-kernel, warmup) | 2 | 2 |
+| **Total** | **19** | **~13** |
+
+## Status
+
+The RDNA4 patches are stashed on branch `rdna4-v0.5.10rc0`. Apply with `git stash pop`.
+Additional fixes for import guards and llava.py weight loading still need to be applied.
