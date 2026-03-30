@@ -213,3 +213,21 @@ The 34ms TPOT on v0.5.10rc0 is the current floor. The 5ms gap from v0.5.9 (29ms)
 is from v0.5.10rc0's scheduler/runtime overhead, not from kernel performance.
 The AWQ Triton GEMM compiles and runs identically — the overhead is in the
 Python/C++ scheduling between kernel launches.
+
+### Updated Benchmark (no CUDA graphs, fresh cache, 2026-03-30 15:49)
+
+| Concurrency | v0.5.10rc0 TPOT | v0.5.10rc0 throughput | v0.5.9 TPOT | v0.5.9 throughput |
+|------------|----------------|----------------------|-------------|-------------------|
+| 1 | 34ms | 80 tok/s | 29ms | 96 tok/s |
+| 8 | 144ms | 291 tok/s | 44ms | 310 tok/s |
+| 16 | 129ms | 380 tok/s | 65ms | 396 tok/s |
+| 32 | 166ms | **513 tok/s** | 57ms | 458 tok/s |
+
+**v0.5.10rc0 WITHOUT CUDA graphs achieves 513 tok/s at conc=32 — 12% higher than v0.5.9 WITH CUDA graphs (458 tok/s).**
+
+The trade-off: higher per-request latency but higher total throughput. This is the v0.5.10rc0
+scheduler batching more requests together, reducing scheduling overhead per batch at the cost
+of individual request latency.
+
+Single-request TPOT remains 34ms vs 29ms (17% gap). This is the real regression — for latency-sensitive
+single-user scenarios, v0.5.9 is still faster.
