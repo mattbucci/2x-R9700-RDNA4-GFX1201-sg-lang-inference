@@ -111,3 +111,32 @@ The 9 patches we thought were upstreamed include llava.py, but the weight loadin
 
 The RDNA4 patches are stashed on branch `rdna4-v0.5.10rc0`. Apply with `git stash pop`.
 Additional fixes for import guards and llava.py weight loading still need to be applied.
+
+## Runtime Test Progress (2026-03-30)
+
+### Devstral AWQ: WORKING
+- Server starts and serves requests
+- TPOT: 34ms (v0.5.9: 29ms, 17% regression)
+- Throughput at conc=32: 186 tok/s (v0.5.9: 458 tok/s, significant regression)
+- CUDA graphs capture but don't seem to improve perf
+- Chat template works via /generate endpoint; /v1/chat/completions returns null (BOS issue)
+
+### Qwen3.5 AWQ: PARTIALLY WORKING
+- Model loads with replicated DeltaNet (tp_size=1)
+- Weight loading fixed (override_tp_rank, quant_config=None for in_proj_ba)
+- MambaPool state cache fixed (tp_world_size=1)
+- Triton kernel compilation fixed (num_stages=0 in seg_la.py and causal_conv1d_triton.py)
+- Server starts ("fired up and ready to roll!")
+- Crashes on first inference request — likely segfault in Triton GDN kernel
+
+### Additional Patches Applied (beyond initial analysis)
+| File | Change |
+|------|--------|
+| `seg_la.py` | `num_stages=0` for RDNA4 (DeltaNet Triton kernel) |
+| `causal_conv1d_triton.py` | `num_stages=0` for RDNA4 |
+| `qwen3_next.py` | `tp_world_size=1` for MambaPool SSM state |
+| `weight_utils.py` | `sharded_weight_loader` override_tp_rank parameter |
+| `qwen3_5.py` | DeltaNet replication + quant_config=None for in_proj_ba |
+
+### Total Patch Count
+15 files modified, 170 insertions, 40 deletions (vs v0.5.9: 19 files, ~290 lines)
