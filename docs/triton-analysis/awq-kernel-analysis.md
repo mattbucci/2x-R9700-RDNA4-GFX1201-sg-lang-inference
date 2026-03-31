@@ -44,3 +44,20 @@ There is NO native C++ AWQ kernel for ROCm. vLLM's 27ms benchmark used BF16
 
 If vLLM loaded our AWQ model, it would use the same Triton kernel and get
 the same ~30ms TPOT.
+
+## A/B Test: Fused Triton vs Dequant+hipBLASLt (2026-03-31)
+
+| Path | TPOT | Method |
+|------|------|--------|
+| **Fused Triton GEMM** | **30.1ms** | Dequant in registers → WMMA, no VRAM round-trip |
+| Dequant + hipBLASLt | 114ms | Triton dequant → write FP16 to VRAM → hipBLASLt read + GEMM |
+| vLLM BF16 (no quant) | 27ms | hipBLASLt GEMM directly on BF16 weights |
+
+**Conclusion:** The fused Triton GEMM is 3.8x faster than dequant+hipBLASLt because it
+avoids the memory round-trip. The 30ms fused TPOT is only 3ms slower than BF16 (27ms),
+which is the irreducible cost of AWQ dequantization compute (256 ALU ops per 8 WMMA ops).
+
+The fused kernel is the optimal AWQ path on RDNA4. Further optimization would require:
+1. Reducing dequant ALU ops (e.g., precomputed lookup tables)
+2. Better Triton codegen for the shift/mask/scale pattern
+3. Native HIP AWQ GEMM kernel with hand-optimized dequant + WMMA interleaving
