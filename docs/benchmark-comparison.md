@@ -34,27 +34,33 @@ with `sglang.bench_serving` (256 random input, 256 random output).
 
 ### Single request (latency)
 
-| Backend | Quant | bytes/param | TPOT (ms) | tok/s | CUDA graphs |
-|---------|-------|-------------|-----------|-------|-------------|
-| **vLLM Docker** | BF16+FP8 auto | 2.0 | **27** | **37** | yes |
-| **SGLang** | AWQ-4bit | 0.5 | 29 | 34 | yes |
-| **llama.cpp** | Q4_K_M | 0.5 | 30 | 35 | n/a (Vulkan) |
-| **SGLang** | FP8 | 1.0 | 39 | 26 | no (hangs) |
-| **llama.cpp** | Q8_0 | 1.0 | 50 | 20 | n/a (Vulkan) |
-| **Ollama** | — | — | N/A | N/A | GPU broken |
+| Backend | Quant | bytes/param | TPOT (ms) | tok/s | Max context | CUDA graphs |
+|---------|-------|-------------|-----------|-------|-------------|-------------|
+| **vLLM Docker** | BF16 (unquantized) | 2.0 | **27** | 37 | 32K | yes |
+| **SGLang v0.5.10rc0** | AWQ-4bit | 0.5 | **30** | **96** | 256K | no |
+| **SGLang v0.5.9** | AWQ-4bit | 0.5 | 29 | 96 | 256K | yes |
+| **llama.cpp** | Q4_K_M | 0.5 | 30 | 35 | 256K | n/a (Vulkan) |
+| **SGLang** | FP8 | 1.0 | 39 | 26 | 32K | no (hangs) |
+| **llama.cpp** | Q8_0 | 1.0 | 50 | 20 | 256K | n/a (Vulkan) |
+| **Ollama** | — | — | N/A | N/A | — | GPU broken |
+
+> **Note:** vLLM's 27ms uses BF16 (unquantized) via hipBLASLt GEMM — not AWQ.
+> This requires 4x the VRAM of AWQ-4bit, limiting context to ~32K tokens.
+> vLLM has no native C++ AWQ kernel on ROCm — it uses the same Triton AWQ
+> kernel as SGLang. See [triton-analysis/awq-kernel-analysis.md](triton-analysis/awq-kernel-analysis.md).
 
 ### Throughput (concurrent requests)
 
-| Backend | Quant | conc=2 | conc=4 | conc=8 | conc=16 | conc=32 | conc=64 |
-|---------|-------|--------|--------|--------|---------|---------|---------|
-| **vLLM Docker** | BF16+FP8 auto | 72 | 136 | 248 | 415 | 641 | **887** |
-| **SGLang** | AWQ-4bit | — | — | 310 | 396 | 458 | — |
-| **SGLang** | FP8 | — | — | 208 | 246 | — | — |
-| **llama.cpp** | Q8_0 | — | — | 105 | 153 | 241 | — |
-| **llama.cpp** | Q4_K_M | — | — | 89 | 141 | 231 | — |
+| Backend | Quant | conc=8 | conc=16 | conc=32 | conc=64 |
+|---------|-------|--------|---------|---------|---------|
+| **vLLM Docker** | BF16 (32K ctx only) | 248 | 415 | 641 | **887** |
+| **SGLang v0.5.10rc0** | AWQ-4bit (256K ctx) | 295 | 380 | **513** | — |
+| **SGLang v0.5.9** | AWQ-4bit (256K ctx) | 310 | 396 | 458 | — |
+| **llama.cpp** | Q8_0 (256K ctx) | 105 | 153 | 241 | — |
+| **llama.cpp** | Q4_K_M (256K ctx) | 89 | 141 | 231 | — |
 
-All values are output tok/s. vLLM achieved 100% request success at all concurrency levels.
-llama.cpp had ~30% request failure rate at conc>=8 (slot exhaustion/timeout).
+All values are output tok/s. vLLM results are BF16 unquantized (limited to 32K context).
+SGLang and llama.cpp results use quantized models supporting 256K context.
 
 ### llama.cpp raw kernel performance (llama-bench, 2-GPU Vulkan)
 
