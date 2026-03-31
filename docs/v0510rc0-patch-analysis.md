@@ -231,3 +231,21 @@ of individual request latency.
 
 Single-request TPOT remains 34ms vs 29ms (17% gap). This is the real regression — for latency-sensitive
 single-user scenarios, v0.5.9 is still faster.
+
+### BREAKTHROUGH: 29.6ms TPOT (2026-03-30 22:25)
+
+Applied missing v0.5.9 performance patches:
+1. **decode_attention.py BLOCK=32** (was 8) — 4x fewer iterations per decode step
+2. **AWQ block sizes 32x64x64** (was 32x32x32) — 4x fewer tiles per GEMM
+3. **AWQ split_k keyed on N** (split_k=2 for large N, 8 for small N)
+4. **vLLM env vars**: HSA_NO_SCRATCH_RECLAIM=1, TORCH_BLAS_PREFER_HIPBLASLT=1
+
+| Concurrency | v0.5.10rc0 optimized | v0.5.10rc0 unoptimized | v0.5.9 |
+|------------|---------------------|------------------------|--------|
+| 1 | **29.6ms / 96 tok/s** | 34ms / 80 | 29ms / 96 |
+| 8 | 38ms / 295 | 144ms / 291 | 44ms / 310 |
+| 32 | 39ms / 355 | 166ms / 513 | 57ms / 458 |
+
+Single-request TPOT matches v0.5.9 (29.6ms vs 29ms). The throughput at high concurrency
+is lower than unoptimized (355 vs 513) because larger AWQ block sizes use more VGPRs,
+reducing occupancy. Could be solved with adaptive block sizes based on batch size.
