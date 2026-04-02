@@ -45,18 +45,28 @@ Decode speed is constant at **57ms/token** regardless of context length — Delt
 recurrent state replaces KV cache for 48 of 64 layers. Prefill throughput is ~1.3K tok/s
 (chunked at 8192 tokens).
 
-### Qwen3-Coder-30B-A3B FP8 (standard MoE, 128 experts)
+### Qwen3-Coder-30B-A3B (standard MoE, 128 experts)
 
-**Status: Not yet working on SGLang/RDNA4** — the FP8 block-quantized MoE Triton kernel
-crashes with `hipErrorLaunchFailure` on gfx1201. vLLM has a [merged fix](https://github.com/vllm-project/vllm/pull/38086)
-with tuned kernel configs for R9700, but SGLang's Triton MoE kernel needs additional
-porting work. MoE configs from vLLM have been added to this repo.
+| Backend | Quantization | Prefill (tok/s) | Decode (tok/s) | Status |
+|---------|-------------|-----------------|----------------|--------|
+| llama.cpp Vulkan | Q4_K_M | 2360 | **122** | Working |
+| SGLang FP8 | FP8 block | — | — | `hipErrorLaunchFailure` |
+| vLLM Docker | FP8 block | — | — | Needs PR #38086 (merged, no Docker yet) |
+
+SGLang's Triton FP8 MoE kernel crashes on gfx1201. vLLM [merged a fix](https://github.com/vllm-project/vllm/pull/38086)
+with R9700-tuned kernel configs, but SGLang needs kernel porting work.
+MoE configs from vLLM have been added to this repo.
 
 ### Qwen3-Coder-Next (80B/3B hybrid DeltaNet + MoE, 512 experts)
 
-**Status: Blocked** — FP8 (80GB) doesn't fit in 64GB VRAM. Compressed-tensors AWQ
-uses Marlin MoE repack (CUDA-only JIT kernel). Same arch as Qwen3.5 — our DeltaNet
-patches would apply once the MoE quantized path is solved.
+| Backend | Quantization | Prefill (tok/s) | Decode (tok/s) | Status |
+|---------|-------------|-----------------|----------------|--------|
+| llama.cpp Vulkan | Q4_K_M | 1687 | **79** | Working |
+| SGLang FP8 | FP8 | — | — | Too large (80GB for 64GB VRAM) |
+| SGLang AWQ | compressed-tensors | — | — | Marlin MoE (CUDA-only) |
+
+Same architecture as Qwen3.5 — our DeltaNet patches would apply once the MoE
+quantized path is solved for SGLang.
 
 ### Devstral FP8 (for comparison)
 
