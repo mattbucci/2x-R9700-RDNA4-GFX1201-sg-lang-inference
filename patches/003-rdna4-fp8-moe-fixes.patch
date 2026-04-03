@@ -51,7 +51,7 @@ index 90a6a31c7..56badb210 100644
  def get_config_file_name(
      E: int,
 diff --git a/python/sglang/srt/layers/moe/fused_moe_triton/fused_moe_triton_kernels.py b/python/sglang/srt/layers/moe/fused_moe_triton/fused_moe_triton_kernels.py
-index b80e1827b..a5ad86c10 100644
+index b80e1827b..cfce01401 100644
 --- a/python/sglang/srt/layers/moe/fused_moe_triton/fused_moe_triton_kernels.py
 +++ b/python/sglang/srt/layers/moe/fused_moe_triton/fused_moe_triton_kernels.py
 @@ -42,6 +42,18 @@ _is_cpu_amx_available = cpu_has_amx_support()
@@ -73,7 +73,19 @@ index b80e1827b..a5ad86c10 100644
  if _is_cuda:
      pass
  elif _is_cpu and _is_cpu_amx_available:
-@@ -546,8 +558,6 @@ def fused_moe_kernel(
+@@ -491,10 +503,7 @@ def fused_moe_kernel(
+                 a_scale_ptrs = a_scale_ptr + offs_token_id * stride_asm
+             else:
+                 a_scale_ptrs = a_scale_ptr + (offs_token // top_k) * stride_asm
+-            if BLOCK_SIZE_N > group_n:
+-                offs_bsn = offs_bn // group_n
+-            else:
+-                offs_bsn = pid_n * BLOCK_SIZE_N // group_n
++            offs_bsn = offs_bn // group_n
+             b_scale_ptrs = (
+                 b_scale_ptr + off_experts * stride_bse + offs_bsn * stride_bsn
+             )
+@@ -546,8 +555,6 @@ def fused_moe_kernel(
                  .reshape(BLOCK_SIZE_N, BLOCK_SIZE_K)
                  .T
              )
@@ -82,7 +94,32 @@ index b80e1827b..a5ad86c10 100644
          else:
              b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k_start, other=0.0)
  
-@@ -778,6 +788,15 @@ def invoke_fused_moe_kernel(
+@@ -556,18 +563,17 @@ def fused_moe_kernel(
+             accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
+         elif use_fp8_w8a8 or use_int8_w8a8:
+             if group_k > 0 and group_n > 0:
+-                offs_ks = k_start // group_k
++                k_start_idx = k_start // group_k
+                 a_scale = tl.load(
+-                    a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0
++                    a_scale_ptrs + k_start_idx * stride_ask,
++                    mask=token_mask,
++                    other=0.0,
+                 )
+-                b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
++                b_scale = tl.load(b_scale_ptrs + k_start_idx * stride_bsk)
+                 if swap_ab:
+                     a, b = tl.trans(b, (1, 0)), tl.trans(a, (1, 0))
+                     a_scale, b_scale = b_scale, a_scale
+-                if BLOCK_SIZE_N > group_n:
+-                    accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
+-                else:
+-                    accumulator += tl.dot(a, b) * (a_scale[:, None] * b_scale)
++                accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
+             else:
+                 if use_fp8_w8a8:
+                     if swap_ab:
+@@ -778,6 +784,15 @@ def invoke_fused_moe_kernel(
          * triton.cdiv(B.shape[1], META["BLOCK_SIZE_N"]),
      )
  
@@ -98,3 +135,14 @@ index b80e1827b..a5ad86c10 100644
      K = B.shape[2] - padded_size
      if K % config["BLOCK_SIZE_K"] == 0:
          even_Ks = True
+@@ -906,6 +921,10 @@ def invoke_fused_moe_kernel(
+             **config,
+         )
+ 
++    # DEBUG: synchronize to catch async kernel errors at the right location
++    if _is_rdna4:
++        torch.cuda.synchronize()
++
+ 
+ @triton.jit
+ def tanh(x):
