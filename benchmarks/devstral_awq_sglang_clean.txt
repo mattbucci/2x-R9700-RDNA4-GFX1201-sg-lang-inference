@@ -1,7 +1,9 @@
-Devstral-24B AWQ (calibrated) - SGLang v0.5.10rc0 - sglang-clean env
-torch 2.12.0.dev20260403+rocm7.2, Triton 3.6.0, ROCm 7.2.1
-2x AMD Radeon AI PRO R9700 (gfx1201, RDNA4), TP=2
-Context: 4096, FP8 KV cache, AWQ 4-bit
+Devstral-24B AWQ (calibrated) - Custom patched SGLang v0.5.10rc0
+Engine: SGLang (custom RDNA4 patches: BLOCK_SIZE_M=16, torch.compile disabled,
+        fused AWQ GEMM, MoE configs) - editable install from components/sglang/
+Env: sglang-clean conda (torch 2.12.0.dev20260403+rocm7.2, Triton 3.6.0)
+Hardware: 2x AMD Radeon AI PRO R9700 (gfx1201, RDNA4), TP=2
+Settings: context=4096, FP8 KV cache, AWQ 4-bit, triton attention
 
 Single Request (200 tokens): 35.8 tok/s (28ms TPOT)
 
