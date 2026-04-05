@@ -270,7 +270,7 @@ index e4960bdb4..c3544c41b 100644
 +    def forward_hip(self, x: torch.Tensor) -> torch.Tensor:
 +        return self.forward_native(x)
 diff --git a/python/sglang/srt/layers/moe/fused_moe_triton/fused_moe.py b/python/sglang/srt/layers/moe/fused_moe_triton/fused_moe.py
-index f2621473c..11a316d3a 100644
+index f2621473c..b3d601968 100644
 --- a/python/sglang/srt/layers/moe/fused_moe_triton/fused_moe.py
 +++ b/python/sglang/srt/layers/moe/fused_moe_triton/fused_moe.py
 @@ -290,13 +290,13 @@ def fused_experts(
@@ -297,19 +297,26 @@ index f2621473c..11a316d3a 100644
  def _swiglu_gpt_oss_sigmoid_alpha(x, gemm1_alpha, gemm1_limit):
      # NOTE: This variant uses gemm1_alpha, unlike _swiglu_silu_clamp_mul.
      # At present, only GPT-OSS uses this variant.
-@@ -480,6 +479,16 @@ def fused_experts_impl(
+@@ -480,6 +479,23 @@ def fused_experts_impl(
              curr_topk_ids, config["BLOCK_SIZE_M"], E
          )
  
 +        # DEBUG: sync before MoE kernel to separate prior async errors
 +        import os as _os
-+        if not hasattr(fused_experts_impl, '_dbg_done'):
-+            fused_experts_impl._dbg_done = True
++        if not hasattr(fused_experts_impl, '_dbg_done_v2'):
++            fused_experts_impl._dbg_done_v2 = True
 +            torch.cuda.synchronize()
 +            with open(f"/tmp/sglang_moe_dbg_rank{_os.environ.get('RANK','?')}.log", 'a') as _f:
-+                _f.write(f"PRE-MoE sync OK: hidden={curr_hidden_states.shape}/{curr_hidden_states.dtype} "
-+                         f"w1={w1.shape}/{w1.dtype} scale={w1_scale.shape if w1_scale is not None else None}\n")
++                _f.write(f"PRE-MoE: hidden={curr_hidden_states.shape} w1={w1.shape} OK\n")
 +                _f.flush()
++                # Now try stats (might crash if NaN)
++                try:
++                    h = curr_hidden_states
++                    _f.write(f"  h_range=[{h.float().min():.2f}, {h.float().max():.2f}] nan={h.isnan().any()}\n")
++                    _f.flush()
++                except Exception as e:
++                    _f.write(f"  h_stats FAILED: {e}\n")
++                    _f.flush()
 +
          invoke_fused_moe_kernel(
              curr_hidden_states,
