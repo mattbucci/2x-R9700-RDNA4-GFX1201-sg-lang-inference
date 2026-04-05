@@ -344,7 +344,7 @@ index 90a6a31c7..e2f840e12 100644
                  "num_stages": 2 if _is_hip else 3,
              }
 diff --git a/python/sglang/srt/layers/moe/fused_moe_triton/fused_moe_triton_kernels.py b/python/sglang/srt/layers/moe/fused_moe_triton/fused_moe_triton_kernels.py
-index b80e1827b..d1b48d07e 100644
+index b80e1827b..eaf025838 100644
 --- a/python/sglang/srt/layers/moe/fused_moe_triton/fused_moe_triton_kernels.py
 +++ b/python/sglang/srt/layers/moe/fused_moe_triton/fused_moe_triton_kernels.py
 @@ -42,6 +42,18 @@ _is_cpu_amx_available = cpu_has_amx_support()
@@ -517,29 +517,25 @@ index b80e1827b..d1b48d07e 100644
              else:
                  if use_fp8_w8a8:
                      if swap_ab:
-@@ -743,7 +847,21 @@ def invoke_fused_moe_kernel(
+@@ -743,6 +847,17 @@ def invoke_fused_moe_kernel(
              if _is_cuda:
                  A, A_scale = sglang_per_token_group_quant_fp8(A, block_k)
              else:
-+                # DEBUG: sync before and after per_token_group_quant_fp8
-+                if _is_rdna4 and not hasattr(invoke_fused_moe_kernel, '_quant_dbg'):
-+                    invoke_fused_moe_kernel._quant_dbg = True
++                # DEBUG: save pre-quant hidden states for replay
++                if _is_rdna4 and not hasattr(invoke_fused_moe_kernel, '_pre_saved'):
++                    invoke_fused_moe_kernel._pre_saved = True
 +                    torch.cuda.synchronize()
 +                    import os
-+                    with open(f"/tmp/moe_quant_rank{os.environ.get('RANK','?')}.log", 'w') as _f:
-+                        _f.write(f"PRE-QUANT: A={A.shape}/{A.dtype} block_k={block_k}\n")
++                    rank = os.environ.get('RANK', '?')
++                    # Save the BF16 hidden states BEFORE quantization (safe to .cpu())
++                    torch.save(A.detach().cpu().clone(), f"/tmp/moe_hidden_rank{rank}.pt")
++                    with open(f"/tmp/moe_quant_rank{rank}.log", 'w') as _f:
++                        _f.write(f"SAVED hidden to /tmp/moe_hidden_rank{rank}.pt: {A.shape}/{A.dtype}\n")
 +                        _f.flush()
                  A, A_scale = per_token_group_quant_fp8(A, block_k)
-+                if hasattr(invoke_fused_moe_kernel, '_quant_dbg') and not hasattr(invoke_fused_moe_kernel, '_quant_ok'):
-+                    invoke_fused_moe_kernel._quant_ok = True
-+                    torch.cuda.synchronize()
-+                    with open(f"/tmp/moe_quant_rank{os.environ.get('RANK','?')}.log", 'a') as _f:
-+                        _f.write(f"POST-QUANT SYNC OK: A={A.shape}/{A.dtype} A_scale={A_scale.shape}\n")
-+                        _f.flush()
              assert triton.cdiv(A.shape[-1], block_k) == A_scale.shape[-1]
              assert triton.cdiv(B.shape[-2], block_n) == B_scale.shape[-2]
-             assert triton.cdiv(B.shape[-1], block_k) == B_scale.shape[-1]
-@@ -778,12 +896,51 @@ def invoke_fused_moe_kernel(
+@@ -778,12 +893,51 @@ def invoke_fused_moe_kernel(
          * triton.cdiv(B.shape[1], META["BLOCK_SIZE_N"]),
      )
  
@@ -591,7 +587,7 @@ index b80e1827b..d1b48d07e 100644
      if fuse_sum_all_reduce:
          assert not c_sorted, "fuse_sum_all_reduce only supports c_sorted=False"
  
-@@ -837,6 +994,45 @@ def invoke_fused_moe_kernel(
+@@ -837,6 +991,45 @@ def invoke_fused_moe_kernel(
              **config,
          )
  
@@ -637,7 +633,7 @@ index b80e1827b..d1b48d07e 100644
      else:
          if a_use_tma or b_use_tma:
              _set_triton_tma_allocator()
-@@ -906,6 +1102,8 @@ def invoke_fused_moe_kernel(
+@@ -906,6 +1099,8 @@ def invoke_fused_moe_kernel(
              **config,
          )
  
@@ -687,10 +683,26 @@ index 892dcebae..36f432ec2 100644
      topk_ids, expert_location_dispatch_info, num_token_non_padded
  ):
 diff --git a/python/sglang/srt/layers/quantization/fp8_kernel.py b/python/sglang/srt/layers/quantization/fp8_kernel.py
-index fece08ce5..94860ac3a 100644
+index fece08ce5..c4f9e5490 100644
 --- a/python/sglang/srt/layers/quantization/fp8_kernel.py
 +++ b/python/sglang/srt/layers/quantization/fp8_kernel.py
-@@ -1197,6 +1197,8 @@ def w8a8_block_fp8_matmul_triton(
+@@ -1145,11 +1145,13 @@ def w8a8_block_fp8_matmul_triton(
+     else:
+         # Default config
+         # Block-wise quant: BLOCK_SIZE_K must be divisible by block_size[1]
++        # RDNA4: BLOCK_SIZE_M=64 causes GPU hangs. Use 16 for RDNA4.
++        _rdna4_dense = _is_hip and get_device_capability()[0] >= 12
+         config = {
+-            "BLOCK_SIZE_M": 64,
++            "BLOCK_SIZE_M": 16 if _rdna4_dense else 64,
+             "BLOCK_SIZE_N": block_size[0],
+             "BLOCK_SIZE_K": block_size[1],
+-            "GROUP_SIZE_M": 32,
++            "GROUP_SIZE_M": 1 if _rdna4_dense else 32,
+             "num_warps": 4,
+             "num_stages": 3,
+         }
+@@ -1197,6 +1199,8 @@ def w8a8_block_fp8_matmul_triton(
  
  
  # universal entry point, for testing purposes
@@ -699,7 +711,7 @@ index fece08ce5..94860ac3a 100644
  def w8a8_block_fp8_matmul(
      A: torch.Tensor,
      B: torch.Tensor,
-@@ -1205,14 +1207,27 @@ def w8a8_block_fp8_matmul(
+@@ -1205,14 +1209,27 @@ def w8a8_block_fp8_matmul(
      block_size: List[int],
      output_dtype: torch.dtype = torch.float16,
  ) -> torch.Tensor:
