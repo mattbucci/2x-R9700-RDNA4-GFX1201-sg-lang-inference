@@ -654,6 +654,51 @@ index 892dcebae..36f432ec2 100644
  def _biased_grouped_topk_postprocess(
      topk_ids, expert_location_dispatch_info, num_token_non_padded
  ):
+diff --git a/python/sglang/srt/layers/quantization/fp8_kernel.py b/python/sglang/srt/layers/quantization/fp8_kernel.py
+index fece08ce5..94860ac3a 100644
+--- a/python/sglang/srt/layers/quantization/fp8_kernel.py
++++ b/python/sglang/srt/layers/quantization/fp8_kernel.py
+@@ -1197,6 +1197,8 @@ def w8a8_block_fp8_matmul_triton(
+ 
+ 
+ # universal entry point, for testing purposes
++_fp8_matmul_call_count = 0
++
+ def w8a8_block_fp8_matmul(
+     A: torch.Tensor,
+     B: torch.Tensor,
+@@ -1205,14 +1207,27 @@ def w8a8_block_fp8_matmul(
+     block_size: List[int],
+     output_dtype: torch.dtype = torch.float16,
+ ) -> torch.Tensor:
++    global _fp8_matmul_call_count
++    _fp8_matmul_call_count += 1
++
+     if output_dtype == torch.bfloat16 and deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM:
+-        return w8a8_block_fp8_matmul_deepgemm(
++        result = w8a8_block_fp8_matmul_deepgemm(
++            A, B, As, Bs, block_size, output_dtype=output_dtype
++        )
++    else:
++        result = w8a8_block_fp8_matmul_triton(
+             A, B, As, Bs, block_size, output_dtype=output_dtype
+         )
+ 
+-    return w8a8_block_fp8_matmul_triton(
+-        A, B, As, Bs, block_size, output_dtype=output_dtype
+-    )
++    # DEBUG: sync first 10 calls to catch async errors
++    if _fp8_matmul_call_count <= 10:
++        torch.cuda.synchronize()
++        import os
++        with open(f"/tmp/sglang_fp8_dbg_rank{os.environ.get('RANK','?')}.log", 'a') as f:
++            f.write(f"fp8_matmul #{_fp8_matmul_call_count}: A={A.shape} B={B.shape} -> {result.shape} OK\n")
++            f.flush()
++
++    return result
+ 
+ 
+ # Copied and adapted from https://github.com/triton-lang/triton/blob/main/python/tutorials/10-block-scaled-matmul.py
 diff --git a/python/sglang/srt/layers/rotary_embedding/factory.py b/python/sglang/srt/layers/rotary_embedding/factory.py
 index e95e9543f..633023dbf 100644
 --- a/python/sglang/srt/layers/rotary_embedding/factory.py
@@ -848,7 +893,7 @@ index 7bc66f08d..c1aa42b02 100644
                  self.token_to_kv_pool = SWAKVPool(
                      size=self.full_max_total_num_tokens,
 diff --git a/python/sglang/srt/models/qwen3_moe.py b/python/sglang/srt/models/qwen3_moe.py
-index c0e2d284e..614ccd2a8 100644
+index c0e2d284e..a38105f0f 100644
 --- a/python/sglang/srt/models/qwen3_moe.py
 +++ b/python/sglang/srt/models/qwen3_moe.py
 @@ -803,6 +803,14 @@ class Qwen3MoeDecoderLayer(nn.Module):
@@ -892,6 +937,21 @@ index c0e2d284e..614ccd2a8 100644
          if should_allreduce_fusion:
              hidden_states._sglang_needs_allreduce_fusion = True
          else:
+@@ -977,6 +997,14 @@ class Qwen3MoeForCausalLM(nn.Module):
+                     forward_batch.seq_lens_cpu.tolist(),
+                 )
+ 
++        # DEBUG: log top-level forward entry
++        if not hasattr(self, '_top_fwd_dbg'):
++            self._top_fwd_dbg = True
++            import os
++            with open(f"/tmp/sglang_topfwd_rank{os.environ.get('RANK','?')}.log", 'a') as _f:
++                _f.write(f"TOP FORWARD: input_ids={input_ids.shape} positions={positions.shape}\n")
++                _f.flush()
++
+         hidden_states = self.model(
+             input_ids,
+             positions,
 diff --git a/python/sglang/srt/utils/hf_transformers_utils.py b/python/sglang/srt/utils/hf_transformers_utils.py
 index 318b2e186..1f4fc56e6 100644
 --- a/python/sglang/srt/utils/hf_transformers_utils.py
