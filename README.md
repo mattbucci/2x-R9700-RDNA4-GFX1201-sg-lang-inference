@@ -2,85 +2,63 @@
 
 High-throughput LLM inference on AMD Radeon AI PRO R9700 (gfx1201, RDNA4) with ROCm 7.2.
 
-## Performance (2x R9700, SGLang v0.5.10rc0)
+## Performance (2x R9700, SGLang v0.5.10rc0, updated 2026-04-05)
 
-### Devstral-24B AWQ (Mistral 3, standard transformer, TP=2)
+### Devstral-24B AWQ-4bit (Mistral 3, 384K context, TP=2)
 
-| Concurrency | TPOT (calibrated) | Throughput (calibrated) | TPOT (community) | Throughput (community) |
-|-------------|-------------------|------------------------|-------------------|-----------------------|
-| 1 | **26.9ms** | 103 tok/s | 28.0ms | 97 tok/s |
-| 2 | 28.3ms | 177 tok/s | 28.3ms | 175 tok/s |
-| 4 | 30.3ms | 275 tok/s | 30.8ms | 270 tok/s |
-| 8 | 36.0ms | 443 tok/s | 55.4ms | 334 tok/s |
-| 16 | 52.0ms | 486 tok/s | 72.7ms | 370 tok/s |
-| 32 | 46.9ms | **576 tok/s** | 68.1ms | 405 tok/s |
+**Single user decode:** 36.0 tok/s (27.8ms TPOT)
+**Peak throughput:** 1,266 tok/s at 64 concurrent
 
-The calibrated model (GPTQ with FP8→BF16 dequantization) achieves **42% higher throughput** at
-high concurrency vs the community AWQ conversion. The key difference: proper FP8 dequantization
-before GPTQ calibration produces better weight quantization quality.
+| Concurrency | Throughput (tok/s) |
+|:-----------:|:------------------:|
+| 1           | 35.8               |
+| 2           | 67.7               |
+| 4           | 110.6              |
+| 8           | 250.2              |
+| 16          | 422.0              |
+| 32          | 810.6              |
+| 64          | **1,266**          |
 
-### Qwen3.5-27B AWQ (hybrid DeltaNet + attention, TP=2 replicated)
+**Long context (single user, 256K max):**
 
-| Concurrency | TPOT | Throughput | TTFT |
-|-------------|------|-----------|------|
-| 1 | 54.3ms | 48 tok/s | 2.3s |
-| 2 | 56.7ms | 49 tok/s | 6.8s |
-| 4 | 55.6ms | 49 tok/s | 17.6s |
-| 8 | 58.7ms | 48 tok/s | 42.4s |
-| 16 | 59.3ms | 47 tok/s | 65.0s |
-| 32 | 60.8ms | 47 tok/s | 167s |
+| Context Length | Time (100 tok) | Throughput |
+|:--------------:|:--------------:|:----------:|
+| 128            | 2.8s           | 36.0 tok/s |
+| 1K             | 3.2s           | 31.3 tok/s |
+| 4K             | 4.5s           | 22.1 tok/s |
+| 16K            | 10.2s          | 9.8 tok/s  |
+| 64K            | 39.4s          | 2.5 tok/s  |
+| 131K           | 7.9s (50 tok) | 6.3 tok/s  |
+| 262K           | 189s (50 tok)  | 0.3 tok/s  |
 
-Qwen3.5 with TP=2 replicates all layers to avoid DeltaNet precision errors,
-so each GPU computes the full model. Throughput is limited by this replication.
-Quality is perfect: 39/39 tests pass (text + vision).
+Quality: **38/39** tests (math, code, reasoning, vision, parallel)
 
-#### Long-context decode (DeltaNet = O(1) decode)
+### Qwen3.5-27B AWQ-4bit (DeltaNet hybrid, 256K context, TP=2)
 
-| Context length | Prefill time | Decode TPOT |
-|----------------|-------------|-------------|
-| 256 tokens | 0.5s | **57ms** |
-| 4K tokens | 4s | 57ms |
-| 16K tokens | 20s | 57ms |
-| 64K tokens | 45s | 57ms |
-| 128K tokens | 100s | 57ms |
-| 250K tokens | 85s | 57ms |
+**Single user decode:** 19.2 tok/s (52ms TPOT)
+**Peak throughput:** 129 tok/s at 8+ concurrent (bandwidth-limited at 27B)
 
-Decode speed is constant at **57ms/token** regardless of context length — DeltaNet's
-recurrent state replaces KV cache for 48 of 64 layers. Prefill throughput is ~1.3K tok/s
-(chunked at 8192 tokens).
+DeltaNet provides constant decode speed regardless of context length.
+Quality: **39/39** tests (text + vision + thinking mode)
 
-### Qwen3-Coder-30B-A3B (standard MoE, 128 experts)
+### Qwen3-Coder-30B FP8 MoE (128 experts)
 
-| Backend | Quantization | Prefill (tok/s) | Decode (tok/s) | Status |
-|---------|-------------|-----------------|----------------|--------|
-| llama.cpp Vulkan | Q4_K_M | 2360 | **122** | Working |
-| SGLang FP8 | FP8 block | — | — | `hipErrorLaunchFailure` |
-| vLLM Docker | FP8 block | — | — | Needs PR #38086 (merged, no Docker yet) |
+| Backend | Decode (single) | Peak Throughput | Status |
+|---------|:---------------:|:---------------:|:------:|
+| **vLLM Docker** | 93.9 tok/s | **1,185 tok/s** @ 32 | Working |
+| llama.cpp Vulkan | 122 tok/s | — | Working |
+| SGLang FP8 | — | — | Blocked (Arch comgr bug) |
 
-SGLang's Triton FP8 MoE kernel crashes on gfx1201. vLLM [merged a fix](https://github.com/vllm-project/vllm/pull/38086)
-with R9700-tuned kernel configs, but SGLang needs kernel porting work.
-MoE configs from vLLM have been added to this repo.
+FP8 on SGLang is blocked by an Arch Linux `comgr` package bug that generates
+invalid `.hsaco` binaries for FP8 WMMA instructions. Same kernel works in Docker
+(Ubuntu ROCm). Use `vllm/vllm-openai-rocm:gemma4` Docker image for FP8 MoE.
 
-### Qwen3-Coder-Next (80B/3B hybrid DeltaNet + MoE, 512 experts)
+### Qwen3-Coder-Next-80B (512 experts)
 
-| Backend | Quantization | Prefill (tok/s) | Decode (tok/s) | Status |
-|---------|-------------|-----------------|----------------|--------|
-| llama.cpp Vulkan | Q4_K_M | 1687 | **79** | Working |
-| SGLang FP8 | FP8 | — | — | Too large (80GB for 64GB VRAM) |
-| SGLang AWQ | compressed-tensors | — | — | Marlin MoE (CUDA-only) |
-
-Same architecture as Qwen3.5 — our DeltaNet patches would apply once the MoE
-quantized path is solved for SGLang.
-
-### Devstral FP8 (for comparison)
-
-| Concurrency | TPOT | Throughput |
-|-------------|------|-----------|
-| 1 | 39ms (26 tok/s) | — |
-| 16 | — | 246 tok/s |
-
-AWQ-4bit reads 0.5 bytes/param (half the bandwidth of FP8), enabling higher throughput
-through batching. FP8 is bandwidth-bound at ~39ms — near the hardware floor.
+| Backend | Decode | Status |
+|---------|:------:|:------:|
+| llama.cpp Vulkan | 79 tok/s | Working |
+| SGLang | — | Too large for 32GB×2 |
 
 ## Key Findings
 
@@ -93,10 +71,11 @@ through batching. FP8 is bandwidth-bound at ~39ms — near the hardware floor.
 
 | Component | Version | Source |
 |-----------|---------|--------|
-| SGLang | v0.5.10rc0 | stock + ~200-line patch (18 files) |
-| Triton | 3.6.0 | upstream triton-lang, built from source |
+| SGLang | v0.5.10rc0 | stock + RDNA4 patches (branch `rdna4-v0.5.10rc0`) |
+| Triton | 3.6.0 | upstream triton-lang |
 | RCCL | system ROCm 7.2 (2.27.7) | no custom build |
-| PyTorch | 2.12.0.dev20260310+rocm7.2 | nightly |
+| PyTorch | 2.11.0+rocm7.2 | stable release |
+| ROCm | 7.2.1 | Arch Linux packages |
 
 ## Prerequisites
 
