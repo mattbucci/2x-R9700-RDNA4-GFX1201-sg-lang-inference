@@ -2,9 +2,9 @@
 
 High-throughput LLM inference on AMD Radeon AI PRO R9700 (gfx1201, RDNA4) with ROCm 7.2.
 
-## Performance (2x R9700, SGLang v0.5.10, updated 2026-04-05)
+## Performance (2x R9700, updated 2026-04-06)
 
-### Devstral-24B AWQ-4bit (Mistral 3, 384K context, TP=2)
+### Devstral-24B AWQ-4bit (Mistral 3, 256K context, TP=2, SGLang v0.5.10)
 
 **Single user decode:** 36.0 tok/s (27.8ms TPOT)
 **Peak throughput:** 1,266 tok/s at 64 concurrent
@@ -19,39 +19,85 @@ High-throughput LLM inference on AMD Radeon AI PRO R9700 (gfx1201, RDNA4) with R
 | 32          | 810.6              |
 | 64          | **1,266**          |
 
-**Long context (single user, 256K max):**
+**Long context (single user, 100 output tokens):**
 
-| Context Length | Time (100 tok) | Throughput |
-|:--------------:|:--------------:|:----------:|
-| 128            | 2.8s           | 36.0 tok/s |
-| 1K             | 3.2s           | 31.3 tok/s |
-| 4K             | 4.5s           | 22.1 tok/s |
-| 16K            | 10.2s          | 9.8 tok/s  |
-| 64K            | 39.4s          | 2.5 tok/s  |
-| 131K           | 7.9s (50 tok) | 6.3 tok/s  |
-| 262K           | 189s (50 tok)  | 0.3 tok/s  |
+| Context Length | Time | Throughput |
+|:--------------:|:----:|:----------:|
+| 128            | 2.8s | 36.0 tok/s |
+| 1K             | 3.2s | 31.3 tok/s |
+| 4K             | 4.5s | 22.1 tok/s |
+| 16K            | 10.2s| 9.8 tok/s  |
+| 64K            | 39.4s| 2.5 tok/s  |
+| 131K           | 7.9s | 6.3 tok/s  |
+| 262K           | 189s | 0.3 tok/s  |
 
 Quality: **38/39** tests (math, code, reasoning, vision, parallel)
 
-### Qwen3.5-27B AWQ-4bit (DeltaNet hybrid, 256K context, TP=2)
+### Qwen3.5-27B AWQ-4bit (DeltaNet hybrid, 256K context, TP=2, SGLang v0.5.10)
 
-**Single user decode:** 19.2 tok/s (52ms TPOT)
-**Peak throughput:** 129 tok/s at 8+ concurrent (bandwidth-limited at 27B)
+**Single user decode:** 21.3 tok/s (46.9ms TPOT)
+**Peak throughput:** ~55 tok/s (bandwidth-limited at 27B dense params)
 
-DeltaNet provides constant decode speed regardless of context length.
-Quality: **39/39** tests (text + vision + thinking mode)
+| Concurrency | Throughput (tok/s) | TPOT (ms) |
+|:-----------:|:------------------:|:---------:|
+| 1           | 53.5               | 48.6      |
+| 2           | 49.6               | 49.8      |
+| 4           | 55.1               | 50.4      |
+| 8           | 55.5               | 51.1      |
+| 16          | 54.9               | 51.6      |
 
-### Qwen3-Coder-30B FP8 MoE (128 experts)
+**Long context (single user, 100 output tokens):**
+
+| Context Length | Time | Throughput |
+|:--------------:|:----:|:----------:|
+| 256            | 4.7s | 21.3 tok/s |
+| 1K             | 5.2s | 19.3 tok/s |
+| 4K             | 7.2s | 13.9 tok/s |
+| 16K            | 15.7s| 6.4 tok/s  |
+| 64K            | 32.3s| 3.1 tok/s  |
+| 128K           | 68.3s| 1.5 tok/s  |
+| 250K           | 68.0s| 1.5 tok/s  |
+
+DeltaNet provides constant decode TPOT (~47ms) regardless of context length.
+Throughput drop at longer contexts is entirely from prefill time.
+Quality: **35/39** tests (text + vision + thinking mode)
+
+### Qwen3-Coder-30B FP8 MoE (128 experts, 32K context, vLLM Docker)
+
+**Single user decode:** 93.9 tok/s (10.6ms TPOT)
+**Peak throughput:** 1,882 tok/s at 64 concurrent
+
+| Concurrency | Throughput (tok/s) | TPOT (ms) |
+|:-----------:|:------------------:|:---------:|
+| 1           | 94                 | 10.6      |
+| 2           | 149                | 13.2      |
+| 4           | 266                | 14.8      |
+| 8           | 387                | 18.1      |
+| 16          | 740                | 21.3      |
+| 32          | 1,215              | 25.9      |
+| 64          | **1,882**          | 33.4      |
+
+**Long context (single user, 100 output tokens):**
+
+| Context Length | Time | Throughput |
+|:--------------:|:----:|:----------:|
+| 128            | 1.1s | 92.5 tok/s |
+| 1K             | 1.1s | 90.4 tok/s |
+| 4K             | 1.3s | 79.2 tok/s |
+| 8K             | 1.5s | 66.2 tok/s |
+| 16K            | 2.4s | 41.1 tok/s |
+| 28K            | 3.7s | 27.2 tok/s |
+
+FP8 MoE on SGLang is blocked by Arch Linux `comgr` package issue
+([similar to NVIDIA SM121a](https://github.com/sgl-project/sglang/issues/18203)).
+Use `vllm/vllm-openai-rocm:gemma4` Docker image for FP8 MoE models.
+Quality: Verified correct (math, code, knowledge)
 
 | Backend | Decode (single) | Peak Throughput | Status |
 |---------|:---------------:|:---------------:|:------:|
-| **vLLM Docker** | 93.9 tok/s | **1,185 tok/s** @ 32 | Working |
+| **vLLM Docker** | 93.9 tok/s | **1,882 tok/s** @ 64 | Working |
 | llama.cpp Vulkan | 122 tok/s | — | Working |
-| SGLang FP8 | — | — | Blocked (Arch comgr bug) |
-
-FP8 on SGLang is blocked by an Arch Linux `comgr` package bug that generates
-invalid `.hsaco` binaries for FP8 WMMA instructions. Same kernel works in Docker
-(Ubuntu ROCm). Use `vllm/vllm-openai-rocm:gemma4` Docker image for FP8 MoE.
+| SGLang FP8 | — | — | Blocked (Arch comgr) |
 
 ### Qwen3-Coder-Next-80B (512 experts)
 
@@ -124,7 +170,7 @@ fall back to SHM transport (check NCCL_DEBUG=INFO output for `SHM` vs `P2P/IPC`)
 
 3 patches on top of SGLang v0.5.10 (see `patches/README.md` for details):
 
-1. **001-rdna4-core** — Core RDNA4 support: fused AWQ GEMM (4x decode speedup), torch.compile disabled on HIP, Triton 3.6 support, sgl-kernel gfx12xx build, Qwen3.5 TP=2 layer replication, Devstral chat template fix, FP8 torch-native fallbacks, Gemma4 model, CUDA-only import guards
+1. **001-rdna4-core** — Core RDNA4 support: fused AWQ GEMM (4x decode speedup), torch.compile disabled on HIP, Triton 3.6 support, sgl-kernel import guards (CUDA-only ops gracefully degrade), Qwen3.5 TP=2 layer replication, Devstral chat template fix, FP8 torch-native fallbacks, Gemma4 model
 2. **002-awq-performance** — Batch-size-dependent AWQ dispatch: M=1 split_k=16, M>32 split_k=2/bm=64 (+6% decode, +13% throughput)
 3. **003-hip-awq-gemv** — Native HIP AWQ GEMV kernel (optional, experimental, same speed as Triton)
 
@@ -280,6 +326,7 @@ GPTQ was chosen over AWQ because it processes layers independently — no smooth
 
 ## Known Issues
 
+- **sgl_kernel on ROCm/RDNA4**: The pip `sgl-kernel` package ships CUDA-only `.so` files. Our patches add graceful degradation with torch-based fallback implementations for activation functions (silu_and_mul, gelu_and_mul, rmsnorm). Same issue affects [NVIDIA SM121a/DGX Spark](https://github.com/sgl-project/sglang/issues/18203).
 - **FP8 MoE on SGLang**: Blocked by Arch Linux `comgr` package generating invalid `.hsaco` binaries for FP8 WMMA on gfx1201. Same kernel runs correctly in Docker (Ubuntu ROCm). Use vLLM Docker for FP8 MoE models.
 - **Gemma 4**: Triton attention crash with mixed head_dim (SWA=256, full=512). Model code ported but blocked.
 - **AWQ GEMV**: Native HIP kernel compiled and working, but same speed as Triton GEMM (AWQ matmul is only 11% of TPOT — bottleneck is attention and NCCL allreduce).
