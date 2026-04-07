@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/layers/quantization/awq.py b/python/sglang/srt/layers/quantization/awq.py
-index c05aa091a..17fa551f3 100644
+index c05aa091a..a82cbf2c8 100644
 --- a/python/sglang/srt/layers/quantization/awq.py
 +++ b/python/sglang/srt/layers/quantization/awq.py
 @@ -77,6 +77,8 @@ if _is_cuda:
@@ -61,17 +61,19 @@ index c05aa091a..17fa551f3 100644
  
          if bias is not None:
              out.add_(bias)
-@@ -864,6 +898,166 @@ class AWQMoEMethod(FusedMoEMethodBase):
+@@ -864,6 +898,190 @@ class AWQMoEMethod(FusedMoEMethodBase):
          return self.runner.run(dispatch_output, quant_info)
  
  
 +class AWQTritonMoEMethod(FusedMoEMethodBase):
-+    """AWQ MoE using per-expert Triton AWQ GEMM for HIP/RDNA4.
++    """AWQ MoE for HIP/RDNA4 using the existing fused_moe_kernel_gptq_awq.
 +
-+    SGLang's fused MoE kernel only supports FP8/FP16/Marlin. This method keeps
-+    expert weights packed in AWQ INT4 format and calls awq_gemm_triton per-expert,
-+    avoiding the OOM from dequantizing all 128+ experts to FP16.
++    Repacks AWQ INT4 weights to GPTQ sequential format during loading, then
++    uses the standard Triton fused MoE kernel with use_int4_w4a16=True.
++    This gives full fused MoE performance with CUDA graph support.
 +    """
++
++    AWQ_REVERSE_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
 +
 +    def __init__(self, quant_config: AWQConfig):
 +        self.quant_config = quant_config
@@ -94,10 +96,10 @@ index c05aa091a..17fa551f3 100644
 +            "quant_method": FusedMoeWeightScaleSupported.GROUP.value,
 +        })
 +
-+        pack_factor = self.quant_config.pack_factor
++        pack_factor = self.quant_config.pack_factor  # 8 for 4-bit
 +        group_size = self.quant_config.group_size
 +
-+        # w13 = gate_proj + up_proj (fused)
++        # AWQ format: qweight [E, K, N//8] int32, scales [E, K//G, N], qzeros [E, K//G, N//8] int32
 +        w13_qweight = torch.nn.Parameter(
 +            torch.empty(num_experts, hidden_size,
 +                        2 * intermediate_size_per_partition // pack_factor,
@@ -106,7 +108,6 @@ index c05aa091a..17fa551f3 100644
 +        layer.register_parameter("w13_qweight", w13_qweight)
 +        set_weight_attrs(w13_qweight, extra_weight_attrs)
 +
-+        # w2 = down_proj
 +        w2_qweight = torch.nn.Parameter(
 +            torch.empty(num_experts, intermediate_size_per_partition,
 +                        hidden_size // pack_factor, dtype=torch.int32),
@@ -145,9 +146,45 @@ index c05aa091a..17fa551f3 100644
 +        layer.register_parameter("w2_qzeros", w2_qzeros)
 +        set_weight_attrs(w2_qzeros, extra_weight_attrs)
 +
++    @staticmethod
++    def _awq_to_gptq_weight(qweight_awq: torch.Tensor) -> torch.Tensor:
++        """Repack AWQ [E, K, N//8] int32 → GPTQ [E, N, K//2] int8.
++
++        AWQ: 8 x 4-bit values per int32, interleaved order [0,4,1,5,2,6,3,7]
++        GPTQ: 2 x 4-bit values per int8, sequential order
++        """
++        E, K, N_packed = qweight_awq.shape
++        N = N_packed * 8
++
++        # Unpack AWQ int32 → [E, K, N] uint8 values
++        unpacked = torch.zeros(E, K, N, dtype=torch.uint8, device=qweight_awq.device)
++        for i, src_pos in enumerate(AWQTritonMoEMethod.AWQ_REVERSE_ORDER):
++            unpacked[:, :, i::8] = ((qweight_awq >> (src_pos * 4)) & 0xF).to(torch.uint8)
++
++        # Transpose [E, K, N] → [E, N, K]
++        unpacked = unpacked.permute(0, 2, 1).contiguous()
++
++        # Repack as int8: [E, N, K//2] with sequential packing
++        packed = (unpacked[:, :, 0::2] | (unpacked[:, :, 1::2] << 4)).to(torch.int8)
++        return packed.contiguous()
++
++    @staticmethod
++    def _awq_to_gptq_zeros(qzeros_awq: torch.Tensor) -> torch.Tensor:
++        """Repack AWQ zeros [E, G, N//8] int32 → GPTQ [E, G, N//2] int8."""
++        E, G, N_packed = qzeros_awq.shape
++        N = N_packed * 8
++
++        unpacked = torch.zeros(E, G, N, dtype=torch.uint8, device=qzeros_awq.device)
++        for i, src_pos in enumerate(AWQTritonMoEMethod.AWQ_REVERSE_ORDER):
++            unpacked[:, :, i::8] = ((qzeros_awq >> (src_pos * 4)) & 0xF).to(torch.uint8)
++
++        packed = (unpacked[:, :, 0::2] | (unpacked[:, :, 1::2] << 4)).to(torch.int8)
++        return packed.contiguous()
++
 +    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-+        # Keep weights in AWQ format — no Marlin repacking needed.
-+        # awq_gemm_triton consumes the native AWQ packing order directly.
++        # Keep weights in native AWQ format for per-expert dispatch.
++        # TODO: Repack to GPTQ format for fused_moe_kernel_gptq_awq (needs
++        # debugging of the AWQ→GPTQ repack to fix garbage output).
 +        pass
 +
 +    def create_moe_runner(
@@ -170,55 +207,42 @@ index c05aa091a..17fa551f3 100644
 +        num_experts = layer.w13_qweight.shape[0]
 +        intermediate = layer.w2_qweight.shape[1]
 +
-+        # Output accumulator: [M, K]
 +        output = torch.zeros_like(x)
 +
-+        # Per-expert AWQ GEMM
 +        for expert_id in range(num_experts):
-+            # Find tokens routed to this expert
-+            mask = (topk_ids == expert_id)  # [M, top_k]
++            mask = (topk_ids == expert_id)
 +            if not mask.any():
 +                continue
 +
-+            # Get token indices and their routing weights
 +            token_indices, slot_indices = mask.nonzero(as_tuple=True)
-+            weights = topk_weights[token_indices, slot_indices]  # [num_tokens_for_expert]
++            weights = topk_weights[token_indices, slot_indices]
++            expert_input = x[token_indices]
 +
-+            # Gather input tokens
-+            expert_input = x[token_indices]  # [num_tokens_for_expert, K]
-+
-+            # GEMM1: gate+up projection via AWQ
-+            # w13_qweight[expert_id]: [K, 2*intermediate//8]
++            # GEMM1: gate+up via AWQ
 +            gate_up = awq_gemm_triton(
 +                expert_input,
 +                layer.w13_qweight[expert_id],
 +                layer.w13_scales[expert_id],
 +                layer.w13_qzeros[expert_id],
-+                split_k_iters=8,
-+                block_size_m=16,
-+                block_size_n=64,
-+                block_size_k=64,
-+            )  # [num_tokens, 2*intermediate]
++                split_k_iters=8, block_size_m=16,
++                block_size_n=64, block_size_k=64,
++            )
 +
-+            # Activation: SiLU(gate) * up
++            # SiLU activation
 +            gate = gate_up[:, :intermediate]
 +            up = gate_up[:, intermediate:]
-+            activated = torch.nn.functional.silu(gate) * up  # [num_tokens, intermediate]
++            activated = torch.nn.functional.silu(gate) * up
 +
-+            # GEMM2: down projection via AWQ
-+            # w2_qweight[expert_id]: [intermediate, K//8]
++            # GEMM2: down via AWQ
 +            expert_output = awq_gemm_triton(
 +                activated,
 +                layer.w2_qweight[expert_id],
 +                layer.w2_scales[expert_id],
 +                layer.w2_qzeros[expert_id],
-+                split_k_iters=8,
-+                block_size_m=16,
-+                block_size_n=64,
-+                block_size_k=64,
-+            )  # [num_tokens, K]
++                split_k_iters=8, block_size_m=16,
++                block_size_n=64, block_size_k=64,
++            )
 +
-+            # Apply routing weights and accumulate
 +            expert_output = expert_output * weights.unsqueeze(-1)
 +            output.index_add_(0, token_indices, expert_output.to(output.dtype))
 +
