@@ -28,10 +28,23 @@ Each issue includes root cause, impact, and proposed fix.
 **Build:** `cd sgl-kernel && AMDGPU_TARGET=gfx1201 python setup_rocm.py build_ext --inplace && cp python/sgl_kernel/common_ops.*.so $CONDA_PREFIX/lib/python3.12/site-packages/sgl_kernel/`
 
 ### 3. Torch 2.12 nightly breaks dense AWQ on RDNA4
-**Status:** Active — env split required
-**Root cause:** Torch 2.12.0.dev20260310+rocm7.2 generates incorrect Triton HSACO for dense AWQ dequantization kernels on gfx1201. Output is garbled (repetitive fragments). Same code works correctly on torch 2.11.0+rocm7.2. Fresh Triton cache does not help — the issue is in the Triton/comgr toolchain bundled with torch 2.12 nightly.
+**Status:** ROOT CAUSE IDENTIFIED — Triton attention kernel regression
+**Root cause:** The Triton attention kernel (`extend_attention`/`decode_attention`) in torch 2.12's bundled `libtriton.so` produces numerically different results compared to torch 2.11's build. Both report Triton 3.6.0 but have **different C++ backends** (different md5 hashes, ~200KB size difference). The per-layer attention error is small (~3-4% relative on the sum of attention output) but compounds exponentially through 56 transformer layers via residual connections, producing garbage output by the final layer.
+**Key finding:** AWQ GEMM kernels are **bit-identical** between torch versions — verified with real Devstral weights, synthetic data, multiprocess context, and all real model dimensions. The divergence occurs specifically in the attention operation between QKV projection output and O projection input.
+**Diagnosis method:** AWQ debug instrumentation showed layer 0 QKV output is identical (`out_sum=-1146.7246` on both), but attention output diverges (`-8.72` vs `-9.05`). By layer 1, gate_up input differs by 97.8 (47× amplification). By layer 4, diff is 178.0.
+**What was tested and eliminated:**
+- AWQ GEMM kernel: PASS (identical on both, with real weights and synthetic data)
+- Multiprocess AWQ: PASS (identical in mp.spawn context)
+- FP8 KV cache: NOT the cause (garbled with and without fp8_e4m3)
+- Triton attention vs torch_native attention: both garbled (both still use Triton-generated code internally on ROCm)
+- torch.compile/inductor: NOT involved (disabled, verified)
+- Embedding/RMSNorm/SiLU: PASS (basic torch ops identical)
 **Impact:** Dense AWQ models (Devstral-24B, Qwen3.5-27B) must use `sglang-clean` (torch 2.11). MoE AWQ models (Coder-30B) must use `sglang-triton36` (torch 2.12) because MoE kernels crash on torch 2.11. No single torch version works for both.
-**Proposed fix:** Wait for a torch nightly that fixes both. Or investigate which specific Triton kernel is affected and find workaround.
+**Proposed fix options:**
+1. **Cross-compile Triton attention from 2.11's libtriton.so into 2.12 env** — extract the specific attention HSACO from a torch 2.11 triton cache and inject it into the 2.12 cache
+2. **Build Triton from source** with the correct LLVM/comgr to get correct codegen for BOTH attention and MoE kernels
+3. **Use torch_native SDPA attention backend** — but this also uses Triton-generated code on ROCm; a pure eager fallback might work
+4. **Wait for torch nightly fix** — report the bug upstream with the specific libtriton.so difference
 
 ### FP8 MoE on SGLang — Arch Linux comgr bug
 **Status:** Blocked, workaround via vLLM Docker
