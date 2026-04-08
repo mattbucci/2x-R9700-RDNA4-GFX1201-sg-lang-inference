@@ -34,7 +34,7 @@ exec python -m sglang.launch_server \
     --kv-cache-dtype fp8_e4m3 \
     --context-length 262144 \
     --mem-fraction-static 0.85 \
-    --cuda-graph-bs 1 2 4 8 16 32 \
+    --disable-cuda-graph \
     --max-running-requests 64 \
     --chunked-prefill-size 8192 \
     --attention-backend triton \

@@ -6,77 +6,103 @@ Each issue includes root cause, impact, and proposed fix.
 ## Critical: Performance
 
 ### 1. AWQ MoE per-expert dispatch is slow (~3.5 tok/s)
-**Status:** Working but slow
+**Status:** Optimized — sort-based dispatch + adaptive split_k. Fused kernel still blocked.
 **Model:** Qwen3-Coder-30B-A3B AWQ
-**Root cause:** `AWQTritonMoEMethod.apply()` loops over experts in Python, calling `awq_gemm_triton` per-expert. This creates 768+ kernel launches per decode step (8 active experts × 2 GEMMs × 48 layers). No CUDA graph support.
+**Root cause:** `AWQTritonMoEMethod.apply()` calls `awq_gemm_triton` per-expert. The fused Triton kernel crashes on RDNA4 (gfx1201 comgr bug).
 **Impact:** ~3.5 tok/s vs ~94 tok/s (FP8 vLLM Docker)
-**Proposed fix:** Two approaches:
-1. **Fused AWQ MoE Triton kernel** — modify `fused_moe_kernel_gptq_awq` to support AWQ packing order. Requires debugging the AWQ→GPTQ weight repack (current repack produces garbage output — likely bit ordering mismatch).
-2. **Graph-compatible dispatch** — replace Python loop with batched torch operations (gather tokens per expert, batched AWQ GEMM). Less optimal than fused kernel but enables CUDA graphs.
+**Investigation:**
+- AWQ→GPTQ weight repack is **mathematically verified correct** (unit test passes)
+- `fused_moe_kernel_gptq_awq` with repacked weights crashes on RDNA4: `hipErrorLaunchFailure` — same Triton codegen bug class as FP8 MoE (gfx1201 comgr generates invalid HSACO)
+- The fused kernel works on CUDA but NOT on RDNA4
+**Optimizations applied:**
+1. **Sort-based expert dispatch** — pre-sort tokens by expert using `argsort` + `unique_consecutive`, single GPU→CPU sync instead of 64 per-expert `.any()` syncs per layer (eliminates ~3072 syncs per decode step)
+2. **Adaptive split_k** — `split_k_iters=1` for decode (M≤4), `split_k_iters=8` for prefill. Reduces kernel instances 8× during decode.
+**Remaining:** Fused Triton kernel blocked by comgr bug. Docker workaround may enable fused kernel.
 
 ### 2. sgl_kernel not available on RDNA4
-**Status:** Mitigated with torch fallbacks
-**Root cause:** pip `sgl-kernel` package ships CUDA-only `.so` files. Same issue affects [NVIDIA SM121a/DGX Spark](https://github.com/sgl-project/sglang/issues/18203).
-**Impact:** Activation functions (silu_and_mul, gelu_and_mul), MoE routing (topk_softmax, moe_align_block_size), and memory ops (weak_ref_tensor) use torch fallbacks instead of optimized kernels. Performance impact: ~5-10% on dense models, major on MoE (moe_align_block_size fallback uses Python loops).
-**Proposed fix:** Build sgl-kernel from source for ROCm/gfx1201 using `pyproject_rocm.toml`. Requires HIP compilation infrastructure.
+**Status:** FIXED — built from source for gfx1201
+**Root cause:** pip `sgl-kernel` package ships CUDA-only `.so` files.
+**Fix applied:** Built sgl-kernel from source using `setup_rocm.py` with .hip source files for gfx1201. Fixed `transfer.hip` missing `C10_HIP_KERNEL_LAUNCH_CHECK` macro.
+**Result:** 6 native HIP ops now active: `silu_and_mul`, `gelu_and_mul`, `gelu_tanh_and_mul`, `gelu_quick`, `topk_softmax`, `moe_align_block_size`. 4 ops still use torch fallbacks: `rmsnorm`, `fused_add_rmsnorm`, `rotary_embedding`, `topk_sigmoid` (not in ROCm build yet).
+**Impact:** `moe_align_block_size` now uses native C++ kernel instead of Python-loop fallback — major MoE routing speedup. Dense model activation functions use native HIP kernels instead of torch fallbacks.
+**Build:** `cd sgl-kernel && AMDGPU_TARGET=gfx1201 python setup_rocm.py build_ext --inplace && cp python/sgl_kernel/common_ops.*.so $CONDA_PREFIX/lib/python3.12/site-packages/sgl_kernel/`
 
-### 3. FP8 MoE on SGLang — Arch Linux comgr bug
+### 3. Torch 2.12 nightly breaks dense AWQ on RDNA4
+**Status:** Active — env split required
+**Root cause:** Torch 2.12.0.dev20260310+rocm7.2 generates incorrect Triton HSACO for dense AWQ dequantization kernels on gfx1201. Output is garbled (repetitive fragments). Same code works correctly on torch 2.11.0+rocm7.2. Fresh Triton cache does not help — the issue is in the Triton/comgr toolchain bundled with torch 2.12 nightly.
+**Impact:** Dense AWQ models (Devstral-24B, Qwen3.5-27B) must use `sglang-clean` (torch 2.11). MoE AWQ models (Coder-30B) must use `sglang-triton36` (torch 2.12) because MoE kernels crash on torch 2.11. No single torch version works for both.
+**Proposed fix:** Wait for a torch nightly that fixes both. Or investigate which specific Triton kernel is affected and find workaround.
+
+### FP8 MoE on SGLang — Arch Linux comgr bug
 **Status:** Blocked, workaround via vLLM Docker
 **Root cause:** Arch Linux `comgr` package generates invalid `.hsaco` binaries for FP8 WMMA instructions on gfx1201. Same kernel ISA works in Docker (Ubuntu ROCm).
 **Impact:** All FP8 Triton kernels hang on SGLang. FP8 MoE models must use vLLM Docker.
-**Proposed fix:** Build ROCm from source, or wait for Arch package fix. Docker workaround is proven (1,882 tok/s peak for Coder-30B).
+**Proposed fix:** Build ROCm from source, or wait for Arch package fix. Docker workaround is proven (1,185 tok/s peak for Coder-30B).
 
 ## Critical: Model Support
 
-### 4. Gemma 4 — Triton attention crash with mixed head_dim
-**Status:** Blocked
-**Root cause:** Gemma 4 uses SWA head_dim=256 and full attention head_dim=512. SGLang's Triton attention backend assumes uniform head_dim. When both attention types are used in the same model, the head_dim mismatch causes a crash.
-**Model code:** `gemma4_causal.py` — ported but untested due to attention crash.
-**Impact:** Gemma 4 (26B MoE and 31B dense) cannot run on SGLang.
-**Proposed fix:** Modify Triton attention backend to handle per-layer head_dim. Or split attention calls by head_dim group.
+### 4. Gemma 4 — Mixed head_dim and community weight quality
+**Status:** Infrastructure FIXED, blocked on weight quality
+**Root cause (original):** Gemma 4 uses SWA head_dim=256 and full attention head_dim=512. SGLang's Triton attention backend assumed uniform head_dim.
+**Fix applied:**
+- `hf_transformers_utils.py` remaps config: `head_dim=global_head_dim(512)`, `swa_head_dim=256`
+- `model_config.py` reads remapped values → SWAKVPool allocates separate pools (K=6.19GB SWA, K=0.77GB full)
+- `gemma4_causal.py` fixed: per-layer head_dim (SWA=256, full=512), per-layer num_kv_heads (SWA=16, full=4), K=V weight duplication for full attention layers
+- `convert_gemma4_ct_to_awq.py` fixed: cross-shard weight handling for split packed/scale tensors
+- Triton attention backend: `swa_attn_logits` buffer (256-dim) separate from `attn_logits` (512-dim)
+**Status:** Model loads (11.13 GB/GPU TP=2), SWAKVPool works, inference runs without crash.
+**Remaining issue:** Community compressed-tensors weights (cyankiwi) produce garbage output. Verified in BOTH SGLang AND vLLM Docker — same degenerate output. The minmax/mse RTN-style quantization is too lossy for Gemma 4.
+**Impact:** Need properly calibrated GPTQ weights or find a better community AWQ conversion.
+**Proposed fix:** Download BF16 base model and run GPTQ calibration, or wait for Google/community to release properly calibrated INT4 weights.
 
-### 5. Coder-Next-80B AWQ — DeltaNet conv1d cache assertion
-**Status:** Partially working (loads at 23.13 GB/GPU, crashes on first inference)
-**Root cause:** `causal_conv1d_fn` asserts `dim == conv_states.shape[1]` but the DeltaNet conv states have wrong dimensions with AWQ. Likely the conv1d weight or state initialization doesn't account for the AWQ weight format.
-**File:** `causal_conv1d_triton.py:467`
-**Impact:** Coder-Next-80B AWQ loads but can't run inference.
-**Proposed fix:** Debug conv_states initialization in `qwen3_next.py` — check if `self.conv1d.weight.squeeze(1)` produces correct dimensions when the module uses AWQ quantization. May need to pass conv1d weight through a different path.
+### 5. Coder-Next-80B AWQ — FIXED (loads and runs, blocked on weight quality)
+**Status:** Infrastructure FIXED, blocked on community AWQ weight quality
+**Fixes applied:**
+1. `--max-mamba-cache-size` must be >= 3 × `max_running_requests` (DeltaNet scheduler uses `MAMBA_CACHE_SIZE_MAX_RUNNING_REQUESTS_RATIO=3`)
+2. `qwen3_next.py` config: Fixed conv_state TP mismatch — `Mamba2StateShape.create(tp_world_size=get_attention_tp_size())` instead of hardcoded `tp_world_size=1`
+3. `sgl_kernel/__init__.py`: Added `rotary_embedding` torch fallback for RDNA4
+**Status:** Model loads at 23.14 GB/GPU (fits in 32 GB VRAM), conv1d assertion fixed, inference runs.
+**Remaining:** Community AWQ weights (stelterlab) produce garbage output ("!!!!..."). Same pattern as Gemma 4 — RTN-style quantization without GPTQ calibration. Coder-30B AWQ (same architecture, different model) produces correct output, confirming code is correct.
+**Proposed fix:** Run GPTQ calibration on BF16 base model (149 GB, downloaded to /data/models/).
 
 ## Medium: Quality
 
 ### 6. Community AWQ conversions may produce lower quality
-**Status:** Documented, GPTQ pipeline ready as alternative
-**Root cause:** Community models (stelterlab, bullpoint) use compressed-tensors with `minmax`/`mse` observers — simple RTN-style quantization without GPTQ calibration. For DeltaNet models (Qwen3.5, Coder-Next), this produces garbage output. For standard MoE (Coder-30B), quality appears acceptable but unverified against GPTQ baseline.
-**Impact:** Unknown quality degradation for Coder-30B AWQ. Coder-Next community model quality untested.
-**Proposed fix:** Run GPTQ calibration pipeline (`scripts/quantize_moe_llmcompressor.py`) on BF16 base models. Both base models downloaded to `/data/models/`:
-- `Qwen3-Coder-30B-A3B-BF16` (57GB)
-- `Qwen3-Coder-Next-BF16` (149GB)
+**Status:** Confirmed garbage for Gemma 4, GPTQ pipeline ready as alternative
+**Root cause:** Community models (cyankiwi, stelterlab, bullpoint) use compressed-tensors with `minmax`/`mse` observers — simple RTN-style quantization without GPTQ calibration. For DeltaNet models (Qwen3.5, Coder-Next) and **Gemma 4 (26B and 31B)**, this produces garbage output — verified in both SGLang and vLLM Docker. For standard MoE (Coder-30B), quality appears acceptable but unverified against GPTQ baseline.
+**Impact:** Gemma 4 31B community AWQ produces degenerate repetitive output ("France is France is France is..."). Our AWQ conversion script is mathematically correct (verified via dequantization comparison), the problem is upstream quantization quality.
+**Proposed fix:** Run GPTQ calibration pipeline (`scripts/quantize_moe_llmcompressor.py`) on BF16 base models, or download BF16 Gemma 4 weights and calibrate. Base models needed:
+- `Qwen3-Coder-30B-A3B-BF16` (57GB) — downloaded to `/data/models/`
+- `Qwen3-Coder-Next-BF16` (149GB) — downloaded to `/data/models/`
+- Gemma 4 26B/31B BF16 — need to download (~50-60GB)
 Calibration takes ~6h for 30B (CPU), ~24h+ for 80B (needs disk offloading).
 
 ### 7. Gemma 4 expert weight format incompatibility
-**Status:** Not addressed
-**Root cause:** Gemma 4 stores expert weights in a fused format (`experts.down_proj_packed [128, 2816, 88]`) instead of per-expert format. Our `convert_moe_ct_to_awq.py` converter handles per-expert weights (`experts.0.down_proj.weight_packed`) but not Gemma 4's fused layout. Additionally, the checkpoint uses `_packed`/`_scale` suffixes instead of `weight_packed`/`weight_scale`.
-**Impact:** Gemma 4 AWQ conversion produces incorrect weights.
-**Proposed fix:** Write Gemma 4-specific AWQ converter that handles fused expert layout. Or use the native `gemma4_causal.py` model code which loads the fused format directly (blocked by #4 attention crash).
+**Status:** FIXED — converter updated for fused expert format
+**Root cause:** Gemma 4 stores expert weights in a fused format (`experts.down_proj_packed [128, 2816, 88]`) instead of per-expert format. The checkpoint uses `_packed`/`_scale` suffixes instead of `weight_packed`/`weight_scale`.
+**Fix applied:** `convert_gemma4_ct_to_awq.py` updated to detect and handle 3D fused expert tensors. Per-expert AWQ conversion (unpack → transpose → repack AWQ → stack to [E, K//8, N]) with proper suffix handling.
+**Impact:** Converter now produces correct AWQ format for Gemma 4 26B MoE model. Still blocked on weight quality (#6).
 
 ## Low: Infrastructure
 
 ### 8. CUDA graph incompatibility with Python control flow
-**Status:** Affects MoE AWQ + moe_align_block_size fallback
-**Root cause:** CUDA graphs require a fixed computation graph. Our torch fallbacks for `moe_align_block_size` and `AWQTritonMoEMethod.apply()` use Python for-loops that can't be captured. `--disable-cuda-graph` is required.
-**Impact:** ~30-50% performance penalty on all operations (not just MoE).
-**Proposed fix:** Replace Python loops with tensor operations (scatter/gather/index_select) that are graph-compatible. For moe_align_block_size, implement as a Triton kernel.
+**Status:** Mostly FIXED — native moe_align_block_size + sort-based dispatch
+**Root cause:** CUDA graphs require a fixed computation graph. `AWQTritonMoEMethod.apply()` uses per-expert loop with data-dependent iteration count.
+**Fix applied:**
+- `moe_align_block_size` now uses **native HIP kernel** from sgl_kernel build (no Python loop)
+- AWQ MoE dispatch uses sort-based approach with minimal Python overhead
+**Remaining:** AWQ MoE expert loop is still data-dependent (number of active experts varies). `--disable-cuda-graph` still required for MoE AWQ models. Dense models can use CUDA graphs.
 
 ### 9. Qwen3.5 AWQ quality regression (35/39 vs 39/39)
-**Status:** Minor
-**Root cause:** v0.5.10 + sgl_kernel fallbacks. 4 test failures are from thinking mode reasoning consuming the 256-token budget. Not a quality regression per se.
-**Impact:** Cosmetic — the model is correct, just verbose in thinking mode.
-**Proposed fix:** Increase max_tokens in eval script for thinking-mode models, or strip thinking tokens from evaluation.
+**Status:** FIXED — eval script updated
+**Root cause:** Thinking mode reasoning consumes the 256-token budget, leaving insufficient space for the actual answer. Not a quality regression per se.
+**Fix applied:** Added `--thinking-budget N` flag to `eval_comprehensive.py`. Adds N extra tokens to max_tokens for thinking-mode models (e.g. `--thinking-budget 512` for Qwen3.5).
+**Impact:** Should resolve 4 test failures when using `--thinking-budget 512`.
 
 ## Completed (for reference)
 
 ### ~~sgl_kernel import crashes~~
-**Fixed:** Patched `sgl_kernel/__init__.py` with graceful degradation + torch fallbacks for silu_and_mul, gelu_and_mul, rmsnorm, topk_softmax, topk_sigmoid, moe_align_block_size.
+**Fixed:** Patched `sgl_kernel/__init__.py` with graceful degradation + torch fallbacks for silu_and_mul, gelu_and_mul, rmsnorm, topk_softmax, topk_sigmoid, moe_align_block_size. Then **built from source** for gfx1201 — native HIP kernels for 6/10 ops.
 
 ### ~~AWQ MoE OOM (28GB/GPU)~~
 **Fixed:** `AWQTritonMoEMethod` keeps expert weights packed in INT4 (7.93 GB/GPU). Per-expert `awq_gemm_triton` dispatch.

@@ -77,9 +77,14 @@ def pack_4bit_to_int32_awq(values: torch.Tensor) -> torch.Tensor:
     return packed
 
 
-# Process each safetensors shard
+# Build cross-shard index: map each key to its shard file
 shard_files = sorted(glob.glob(f"{SRC_DIR}/model-*.safetensors"))
-print(f"\nProcessing {len(shard_files)} shards...")
+print(f"\nBuilding cross-shard index for {len(shard_files)} shards...")
+key_to_shard = {}
+for sp in shard_files:
+    with safe_open(sp, framework="pt") as sf:
+        for k in sf.keys():
+            key_to_shard[k] = sp
 
 weight_map = {}
 converted_count = 0
@@ -99,18 +104,25 @@ for shard_idx, shard_path in enumerate(shard_files):
         if key in processed:
             continue
 
+        # --- Dense layer weights: .weight_packed / .weight_scale ---
         if key.endswith(".weight_packed"):
             base = key[:-len(".weight_packed")]
             scale_key = f"{base}.weight_scale"
             shape_key = f"{base}.weight_shape"
 
-            if scale_key not in keys:
-                print(f"  SKIP {base} (scale in different shard)")
+            if scale_key not in key_to_shard:
+                print(f"  SKIP {base} (scale not found in any shard)")
                 skipped_count += 1
                 continue
 
             packed = f.get_tensor(key)
-            scale = f.get_tensor(scale_key)
+            # Load scale from its shard (may be different from current shard)
+            if scale_key in keys:
+                scale = f.get_tensor(scale_key)
+            else:
+                with safe_open(key_to_shard[scale_key], framework="pt") as sf2:
+                    scale = sf2.get_tensor(scale_key)
+                print(f"  (cross-shard scale for {base})")
 
             out_features = packed.shape[0]
             in_features = packed.shape[1] * PACK_FACTOR
@@ -141,7 +153,80 @@ for shard_idx, shard_path in enumerate(shard_files):
 
             print(f"  {base}: [{out_features}, {in_features}] -> qweight{list(qweight.shape)}")
 
+        # --- Fused MoE expert weights: _packed / _scale (Gemma 4 26B format) ---
+        # e.g. "model.language_model.layers.0.experts.gate_up_proj_packed" [128, 1408, 352]
+        #      "model.language_model.layers.0.experts.down_proj_packed" [128, 2816, 88]
+        elif key.endswith("_packed") and "experts" in key and not key.endswith(".weight_packed"):
+            base = key[:-len("_packed")]
+            scale_key = f"{base}_scale"
+
+            if scale_key not in key_to_shard:
+                print(f"  SKIP {base} (scale not found in any shard)")
+                skipped_count += 1
+                continue
+
+            packed_3d = f.get_tensor(key)  # [E, out_dim, in_dim_packed]
+            if scale_key in keys:
+                scale_3d = f.get_tensor(scale_key)
+            else:
+                with safe_open(key_to_shard[scale_key], framework="pt") as sf2:
+                    scale_3d = sf2.get_tensor(scale_key)
+                print(f"  (cross-shard scale for {base})")
+
+            E, out_dim, in_dim_packed = packed_3d.shape
+            in_dim = in_dim_packed * PACK_FACTOR
+
+            # Convert each expert's weights from compressed-tensors → AWQ format
+            # Process in batches to avoid OOM
+            qweight_list = []
+            scales_list = []
+            qzeros_list = []
+
+            for e_idx in range(E):
+                expert_packed = packed_3d[e_idx]   # [out_dim, in_dim_packed]
+                expert_scale = scale_3d[e_idx]     # [out_dim, num_groups]
+
+                # Unpack compressed-tensors → 4-bit values
+                unpacked = unpack_int32_to_4bit(expert_packed)  # [out_dim, in_dim]
+                # Transpose [out_dim, in_dim] → [in_dim, out_dim]
+                unpacked_t = unpacked.T.contiguous()
+                # Repack to AWQ interleaved order
+                qw = pack_4bit_to_int32_awq(unpacked_t)  # [in_dim//8, out_dim]
+
+                # Transpose scales [out_dim, num_groups] → [num_groups, out_dim]
+                sc = expert_scale.T.contiguous().to(torch.float16)
+
+                # Create qzeros (symmetric quantization: zero_point=8)
+                num_groups = in_dim // GROUP_SIZE
+                num_out_packed = out_dim // PACK_FACTOR
+                zp_val = torch.tensor([8], dtype=torch.int32)
+                qz = torch.zeros((num_groups, num_out_packed), dtype=torch.int32)
+                for i in range(PACK_FACTOR):
+                    qz |= (zp_val << (AWQ_PACK_ORDER[i] * W_BIT))
+
+                qweight_list.append(qw)
+                scales_list.append(sc)
+                qzeros_list.append(qz)
+
+            # Stack back to [E, ...] format
+            qweight = torch.stack(qweight_list, dim=0)  # [E, in_dim//8, out_dim]
+            scales = torch.stack(scales_list, dim=0)     # [E, num_groups, out_dim]
+            qzeros = torch.stack(qzeros_list, dim=0)     # [E, num_groups, out_dim//8]
+
+            converted[f"{base}.qweight"] = qweight
+            converted[f"{base}.scales"] = scales
+            converted[f"{base}.qzeros"] = qzeros
+
+            processed.update([key, scale_key])
+            converted_count += 1
+
+            print(f"  {base}: [{E}, {out_dim}, {in_dim}] -> qweight{list(qweight.shape)} (fused MoE)")
+
         elif key.endswith(".weight_scale") or key.endswith(".weight_shape"):
+            continue
+
+        elif key.endswith("_scale") and "experts" in key:
+            # Scale for fused expert weights — handled with _packed above
             continue
 
         else:

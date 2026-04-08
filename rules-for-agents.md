@@ -2,7 +2,7 @@
 
 ## Hardware Context
 - 2x AMD Radeon AI PRO R9700 (gfx1201, RDNA4, Wave32)
-- 16 GB VRAM each (32 GB total across TP=2)
+- 32 GB VRAM each (64 GB total across TP=2)
 - ROCm 7.2.1, Arch Linux
 - Consumer GPUs — NOT MI-series/CDNA. AITER is NOT available.
 
@@ -87,4 +87,4 @@
 
 ### Blocked
 - FP8 MoE on SGLang: GPU hang from Triton kernel (torch-native fallback available via `SGLANG_RDNA4_TORCH_MOE=1`)
-- Gemma 4: Triton attention crash with mixed head_dim (SWA=256, full=512)
+- Gemma 4: Infrastructure fixed (mixed head_dim, SWAKVPool, K=V attention), but community AWQ weights produce garbage (verified in both SGLang and vLLM). Need properly calibrated GPTQ weights.

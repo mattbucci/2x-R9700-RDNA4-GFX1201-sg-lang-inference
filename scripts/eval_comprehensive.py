@@ -8,7 +8,7 @@ Designed to catch the kinds of errors that TP=2 precision issues cause:
 - Wrong imports (import prime instead of proper implementation)
 
 Usage:
-    python scripts/eval_comprehensive.py [--port 23334] [--parallel 4] [--model-name auto]
+    python scripts/eval_comprehensive.py [--port 23334] [--parallel 4] [--thinking-budget 512]
 """
 
 import argparse
@@ -20,6 +20,11 @@ import time
 import urllib.request
 from pathlib import Path
 
+# Extra tokens to allocate for thinking-mode models (Qwen3.5, etc.)
+# The model uses these for <think>...</think> reasoning before answering.
+_thinking_budget = 0
+
+
 def chat(base_url, prompt, max_tokens=512, temperature=0, images=None):
     """Send a chat completion request."""
     content = []
@@ -28,7 +33,6 @@ def chat(base_url, prompt, max_tokens=512, temperature=0, images=None):
             if img.startswith("http"):
                 content.append({"type": "image_url", "image_url": {"url": img}})
             else:
-                # Local file - base64 encode
                 with open(img, "rb") as f:
                     b64 = base64.b64encode(f.read()).decode()
                 ext = Path(img).suffix.lower().lstrip(".")
@@ -40,10 +44,12 @@ def chat(base_url, prompt, max_tokens=512, temperature=0, images=None):
                 })
     content.append({"type": "text", "text": prompt})
 
+    effective_max_tokens = max_tokens + _thinking_budget
+
     body = json.dumps({
         "model": "default",
         "messages": [{"role": "user", "content": content if images else prompt}],
-        "max_tokens": max_tokens,
+        "max_tokens": effective_max_tokens,
         "temperature": temperature,
     }).encode()
     req = urllib.request.Request(
@@ -336,7 +342,12 @@ def main():
     parser.add_argument("--parallel", type=int, default=4, help="Parallel requests for stress test")
     parser.add_argument("--skip-vision", action="store_true", help="Skip vision tests")
     parser.add_argument("--vision-only", action="store_true", help="Only run vision tests")
+    parser.add_argument("--thinking-budget", type=int, default=0,
+                        help="Extra tokens for thinking-mode models (e.g. 512 for Qwen3.5)")
     args = parser.parse_args()
+
+    global _thinking_budget
+    _thinking_budget = args.thinking_budget
 
     base_url = f"http://localhost:{args.port}"
 
