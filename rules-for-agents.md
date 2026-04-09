@@ -77,14 +77,15 @@
 
 ## Model Status
 
-### Working on SGLang
-- Devstral-24B AWQ: 858 tok/s @ 32 concurrent
+### Working on SGLang (Dense AWQ)
+- Devstral-24B AWQ: 841 tok/s @ 32 concurrent (HIP GEMV for decode)
 - Qwen3.5-27B AWQ: 129 tok/s @ 32 concurrent (bandwidth-limited)
 
-### Working on vLLM Docker
+### Working on vLLM Docker (MoE FP8)
 - Qwen3-Coder-30B FP8: 1185 tok/s @ 32 concurrent
 - Use `vllm/vllm-openai-rocm:gemma4` Docker image
 
 ### Blocked
-- FP8 MoE on SGLang: GPU hang from Triton kernel (torch-native fallback available via `SGLANG_RDNA4_TORCH_MOE=1`)
-- Gemma 4: Infrastructure fixed (mixed head_dim, SWAKVPool, K=V attention), but community AWQ weights produce garbage (verified in both SGLang and vLLM). Need properly calibrated GPTQ weights.
+- **MoE AWQ on SGLang**: Triton AWQ GEMM generates invalid HSACO during full model forward_extend on gfx1201. All individual kernel tests pass. HIP GEMV MoE kernel ready but the model pipeline still has other Triton kernels that crash. Use vLLM Docker FP8 instead.
+- **Gemma 4**: Infrastructure fixed, community AWQ weights produce garbage (verified in both SGLang and vLLM). Need GPTQ calibration.
+- **Coder-Next 80B**: Infrastructure fixed, community AWQ weights produce garbage. Need GPTQ calibration.

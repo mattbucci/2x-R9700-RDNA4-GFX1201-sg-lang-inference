@@ -160,10 +160,18 @@ echo "  garbage output for dense AWQ models."
 "$SCRIPT_DIR/setup_sgl_kernel.sh"
 
 # -------------------------------------------------------------------
-# Step 5: Verify installation
+# Step 5: Build + install AWQ GEMV HIP kernel
 # -------------------------------------------------------------------
 echo ""
-echo "[5/5] Verifying installation..."
+echo "[5/6] Building AWQ GEMV HIP kernel for gfx1201..."
+echo "  30% faster M=1 decode, fused MoE expert dispatch"
+"$SCRIPT_DIR/build_awq_gemv.sh"
+
+# -------------------------------------------------------------------
+# Step 6: Verify installation
+# -------------------------------------------------------------------
+echo ""
+echo "[6/6] Verifying installation..."
 
 HIP_VISIBLE_DEVICES=0,1 python -c "
 import torch

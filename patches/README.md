@@ -26,13 +26,15 @@ AWQ GEMM performance tuning — batch-size-dependent block dispatch.
 - Also includes awq_gemv_triton kernel (unused, for future work)
 
 ## 003-hip-awq-gemv-kernel.patch
-Native HIP AWQ GEMV kernel — optional, for experimentation.
+Native HIP AWQ GEMV kernel — **integrated into serving path**.
 
 - Ported from mgehre-amd/vllm matthias.awq_gemv branch
 - 966-line HIP C++ kernel, wave32 compatible, split-K parallelism
-- Compiles in 25s with `PYTORCH_ROCM_ARCH=gfx1201`
-- Same speed as Triton GEMM (AWQ matmul is only 11% of TPOT)
-- Not integrated into serving path
+- `awq_gemv_hip`: M=1 decode GEMV — **30% faster** than Triton GEMM
+- `awq_gemv_moe_hip`: Fused MoE dispatch — all experts in one GPU kernel (**151x faster** than per-expert loop in microbenchmarks)
+- Build: `scripts/build_awq_gemv.sh --env <env-name>`
+- `AWQLinearMethod.apply()` uses HIP GEMV for M=1, Triton GEMM for M>1
+- `AWQTritonMoEMethod.apply()` uses HIP GEMV MoE when available
 
 ## 004-sgl-kernel-rdna4-fallbacks.patch
 **CRITICAL** — sgl_kernel graceful degradation for RDNA4 (gfx1201).
@@ -65,16 +67,13 @@ git apply ../../../patches/003-hip-awq-gemv-kernel.patch  # optional
 git apply ../../../patches/004-sgl-kernel-rdna4-fallbacks.patch
 ```
 
-## Build sgl_kernel after patching
+## Build native kernels after patching
 
 ```bash
-# Build native HIP ops for gfx1201
-cd components/sglang/sgl-kernel
-AMDGPU_TARGET=gfx1201 python setup_rocm.py build_ext --inplace
+# 1. Build and install sgl_kernel (CRITICAL — fixes rotary_embedding)
+scripts/setup_sgl_kernel.sh --env <env-name>
+scripts/setup_sgl_kernel.sh --env <env-name> --verify
 
-# Install to conda env
-../../scripts/setup_sgl_kernel.sh --env <env-name>
-
-# Verify (must show sgl_kernel.elementwise, NOT sgl_kernel)
-../../scripts/setup_sgl_kernel.sh --env <env-name> --verify
+# 2. Build and install AWQ GEMV HIP kernel (30% faster decode)
+scripts/build_awq_gemv.sh --env <env-name>
 ```
