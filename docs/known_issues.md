@@ -3,25 +3,20 @@
 Detailed tracking of issues discovered during RDNA4 inference work.
 Each issue includes root cause, impact, and proposed fix.
 
-## Critical: MoE Models Blocked
+## Fixed: MoE Models
 
-### 1. AWQ MoE crashes on gfx1201 — hipErrorLaunchFailure
-**Status:** Blocked — crashes during forward_extend on all configs
-**Model:** Qwen3-Coder-30B-A3B AWQ, all MoE models
-**Root cause:** The Triton AWQ GEMM kernel generates invalid HSACO when compiled within the full model forward pass on gfx1201. The same kernel configurations pass all tests in isolation (every M/K/N/split_k combination verified). The crash occurs during `forward_extend` (prefill) regardless of:
-- Torch version (2.11 stable, 2.12 nightly)
-- Attention backend (triton, torch_native)
-- MoE dispatch method (HIP GEMV fused, Triton per-expert loop)
-- Triton cache state (fresh or cached)
-- TP size (1 or 2)
-**Impact:** All MoE AWQ models on SGLang crash during the first inference request.
-**HIP GEMV kernel:** We ported and integrated the native HIP AWQ GEMV MoE kernel from `mgehre-amd/vllm` (`awq_gemv_moe_hip`). This kernel:
-- Dispatches ALL experts in a single GPU launch (no Python loop)
-- Is **151x faster** than the per-expert Triton loop in microbenchmarks
-- Correctly produces output in isolated tests with model-realistic dimensions
-- But the full model pipeline still crashes because other kernels (AWQ GEMM for attention projections or shared expert) hit the same Triton codegen bug during extend.
-**Workaround:** Use vLLM Docker FP8 for MoE models (1,185 tok/s peak for Coder-30B).
-**Proposed fix:** Port the remaining Triton AWQ GEMM calls (attention QKV/O projections) to HIP to eliminate ALL Triton kernel usage, or identify the specific Triton autoconfig that crashes in the multi-kernel context.
+### 1. AWQ MoE on gfx1201 — THREE crash sources identified and fixed
+**Status:** FIXED — Coder-30B AWQ runs at 169 tok/s @ 32 concurrent
+**Root causes identified (in order of discovery):**
+1. **Triton AWQ GEMM** generates invalid HSACO in multi-kernel context on gfx1201 → replaced M>1 path with `awq_dequantize_decomposition + torch.matmul` (pure PyTorch, zero Triton for AWQ). M=1 decode uses native HIP GEMV (30% faster).
+2. **sgl_kernel.topk_softmax** produces deferred `hipErrorLaunchFailure` on gfx1201 → replaced with torch-native `topk + softmax` in `fused_topk()` (global fix for all MoE models).
+3. **Per-expert Python dispatch loop** was 3.5 tok/s → replaced with HIP GEMV fused MoE kernel from mgehre-amd/vllm (all experts in single GPU launch, 151x faster in microbenchmarks).
+**Benchmark (Coder-30B AWQ, TP=2, Triton attention):**
+| Concurrency | tok/s |
+|-------------|-------|
+| 1 | 46.4 |
+| 8 | 125.1 |
+| 32 | 168.9 |
 
 ### FP8 MoE on SGLang — Arch Linux comgr bug
 **Status:** Blocked, workaround via vLLM Docker

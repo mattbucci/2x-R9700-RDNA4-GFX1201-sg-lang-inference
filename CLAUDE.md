@@ -19,7 +19,7 @@ Both environments use the same sglang code from `components/sglang/`.
 
 - **`sglang-triton36`** (torch 2.12.0.dev20260310+rocm7.2) — Primary env for all dense AWQ models
 - **`sglang-clean`** (torch 2.11.0+rocm7.2) — Alternative, same capabilities
-- MoE AWQ on SGLang is **blocked** (Triton codegen crash on gfx1201) — use vLLM Docker FP8 for MoE
+- MoE AWQ on SGLang **works** (169 tok/s @ 32 concurrent with Triton attention)
 - Models: `~/AI/models/`
 
 ## Native Kernel Builds — CRITICAL
@@ -43,7 +43,10 @@ Ported from `mgehre-amd/vllm` matthias.awq_gemv branch. Provides:
 # Launch Devstral AWQ (working, 841 tok/s @ 32 concurrent)
 scripts/run_devstral_awq.sh
 
-# Launch Coder-30B FP8 via vLLM Docker (working, 1185 tok/s peak)
+# Launch Coder-30B AWQ MoE (working, 169 tok/s @ 32 concurrent)
+scripts/run_coder30b_awq.sh
+
+# Launch Coder-30B FP8 via vLLM Docker (fastest, 1185 tok/s peak)
 scripts/bench_vllm_docker.sh
 
 # Install native kernels to a new env
@@ -63,6 +66,6 @@ scripts/bench_comprehensive.sh <label> auto <port>
 | Devstral-24B | AWQ-4bit | SGLang | Working | 841 tok/s @ 32 |
 | Qwen3.5-27B | AWQ-4bit | SGLang | Working | 129 tok/s @ 32 |
 | Coder-30B-A3B | FP8 | vLLM Docker | Working | 1185 tok/s peak |
-| Coder-30B-A3B | AWQ-4bit | SGLang | Blocked | Triton crash |
+| Coder-30B-A3B | AWQ-4bit | SGLang | Working | 169 tok/s @ 32 |
 | Gemma 4 (26B/31B) | AWQ | SGLang | Blocked | Bad weights |
 | Coder-Next-80B | AWQ | SGLang | Blocked | Bad weights |
