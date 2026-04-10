@@ -32,15 +32,17 @@ exec python -m sglang.launch_server \
     --dtype float16 \
     --quantization awq \
     --kv-cache-dtype fp8_e4m3 \
-    --context-length 262144 \
+    --context-length 32768 \
     --mem-fraction-static 0.85 \
     --disable-cuda-graph \
-    --max-running-requests 64 \
-    --chunked-prefill-size 8192 \
+    --disable-overlap-schedule \
+    --max-running-requests 32 \
+    --chunked-prefill-size 4096 \
     --attention-backend triton \
-    --num-continuous-decode-steps 32 \
+    --num-continuous-decode-steps 8 \
     --disable-custom-all-reduce \
     --trust-remote-code \
+    --watchdog-timeout 600 \
     --port "$PORT" \
     --host 0.0.0.0 \
     --enable-metrics
