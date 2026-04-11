@@ -2,11 +2,12 @@
 
 ## Active
 
-### Gemma 4 26B — empty output after GPTQ quantization
-**Status:** Model loads on TP=2 but produces zero output tokens.
-**GPTQ weights generated:** `~/AI/models/gemma-4-26B-A4B-it-AWQ-GPTQ` (15GB, group_size=32). Calibration succeeded (0.5h). group_size=32 required because `down_proj` intermediate=2112 → 1056 with TP=2, not divisible by 64/128.
-**Root cause TBD:** Likely weight key mapping mismatch in `gemma4_causal.py` — the converter splits fused expert tensors into per-expert format but the model may expect fused. Also possible: mixed head_dim (SWA=256, full=512) AWQ weight loader issue, or transformers 5.5 config changes.
-**BF16 base:** `~/AI/models/gemma-4-26B-A4B-it-BF16` (49GB)
+### Gemma 4 26B — working but degraded quality (RTN expert quantization)
+**Status:** FIXED. Model loads and generates output on TP=2 with AWQ GPTQ weights.
+**Root cause was:** `load_weights()` used fused expert mapping (BF16 only). Per-expert AWQ keys (`experts.0.gate_proj.qweight`) were silently skipped. Fixed by adding `FusedMoE.make_expert_params_mapping()` for per-expert format.
+**Remaining issue:** Expert weights are RTN-quantized (not GPTQ-calibrated) — causes repetition/artifacts in long outputs. Needs either calibrated GPTQ expert weights or official Google INT4 release.
+**Weights:** `~/AI/models/gemma-4-26B-A4B-it-AWQ-GPTQ` (16GB, group_size=32)
+**BF16 base:** `~/AI/models/gemma-4-26B-A4B-it-BF16` (49GB, too large for 2x30GB)
 
 ### Coder-Next 80B — needs GPTQ calibration
 **Status:** Infrastructure works, community AWQ weights produce garbage.

@@ -57,19 +57,19 @@ index 691f06411..52513ad7c 100644
          swa_attention_layer_ids = [0]
          full_attention_layer_ids = []
 diff --git a/python/sglang/srt/configs/qwen3_next.py b/python/sglang/srt/configs/qwen3_next.py
-index 3bf153a22..f83b5f43e 100644
+index 3bf153a22..32f4ab090 100644
 --- a/python/sglang/srt/configs/qwen3_next.py
 +++ b/python/sglang/srt/configs/qwen3_next.py
 @@ -287,8 +287,11 @@ class Qwen3NextConfig(PretrainedConfig):
              world_size = get_attention_tp_size()
              adjust_tp_num_heads_if_necessary(self, world_size, False)
  
-+        # DeltaNet projections are replicated (tp_size=1) to avoid
-+        # precision errors from TP matmul splits in the recurrent state.
-+        # The SSM state must match the replicated projection dimensions.
++        # Conv1d and projections use get_attention_tp_size() for TP splitting.
++        # The SSM state must match the actual TP-split dimensions.
++        tp_size = get_attention_tp_size()
          shape = Mamba2StateShape.create(
 -            tp_world_size=get_attention_tp_size(),
-+            tp_world_size=1,
++            tp_world_size=tp_size,
              intermediate_size=self.linear_value_head_dim * self.linear_num_value_heads,
              n_groups=self.linear_num_key_heads,
              num_heads=self.linear_num_value_heads,
@@ -117,7 +117,7 @@ index 9b4e68d8d..f707e2f2e 100644
              K_SPLIT_DIM = 128  # 128
              V_SPLIT_DIM = 64  # 32
 diff --git a/python/sglang/srt/layers/attention/mamba/causal_conv1d_triton.py b/python/sglang/srt/layers/attention/mamba/causal_conv1d_triton.py
-index c82f4d730..72af9b7a0 100644
+index c82f4d730..5ff4e7b22 100644
 --- a/python/sglang/srt/layers/attention/mamba/causal_conv1d_triton.py
 +++ b/python/sglang/srt/layers/attention/mamba/causal_conv1d_triton.py
 @@ -8,6 +8,8 @@ import torch
@@ -175,7 +175,32 @@ index c82f4d730..72af9b7a0 100644
          else:
              # prior-tokens are zeros
              if KERNEL_WIDTH >= 2:  # STRATEGY1
-@@ -547,7 +550,7 @@ def causal_conv1d_fn(
+@@ -454,17 +457,14 @@ def causal_conv1d_fn(
+     stride_istate_token = 0
+     num_cache_lines = 0
+     if conv_states is not None:
+-        # extensions to support vLLM:
+-        # 1. conv_states is used to replaced initial_states
+-        # 2. conv_states serve as a cache with num cache lines can be larger than batch size
+-        # 3. mapping from sequence x[idx] to a cache line at index as specified via cache_indices[idx]
+-        # 4. computation can be skipped if cache_indices[idx] == pad_slot_id
+         num_cache_lines = conv_states.size(0)
+-        assert (
+-            num_cache_lines == conv_states.shape[0]
+-            and dim == conv_states.shape[1]
+-            and width - 1 <= conv_states.shape[2]
+-        )
++        if not (dim == conv_states.shape[1] and width - 1 <= conv_states.shape[2]):
++            raise AssertionError(
++                f"causal_conv1d shape mismatch: x.shape={x.shape} (dim={dim}), "
++                f"weight.shape={weight.shape} (width={width}), "
++                f"conv_states.shape={conv_states.shape} "
++                f"(expected dim={dim} at [1], width-1={width-1} <= [{conv_states.shape[2]}] at [2])"
++            )
+         stride_istate_seq = conv_states.stride(0)
+         stride_istate_dim = conv_states.stride(1)
+         stride_istate_token = conv_states.stride(2)
+@@ -547,7 +547,7 @@ def causal_conv1d_fn(
          # launch_cooperative_grid=True
          BLOCK_M=8,
          BLOCK_N=256,
@@ -1717,7 +1742,7 @@ index 72483f4ea..5e8fd6749 100644
      StandardDispatcher,
  )
 diff --git a/python/sglang/srt/layers/moe/fused_moe_triton/moe_align_block_size.py b/python/sglang/srt/layers/moe/fused_moe_triton/moe_align_block_size.py
-index 12d1d5b1d..aca6029f2 100644
+index 12d1d5b1d..96baccf20 100644
 --- a/python/sglang/srt/layers/moe/fused_moe_triton/moe_align_block_size.py
 +++ b/python/sglang/srt/layers/moe/fused_moe_triton/moe_align_block_size.py
 @@ -12,7 +12,10 @@ _is_hip = is_hip()
@@ -1732,7 +1757,7 @@ index 12d1d5b1d..aca6029f2 100644
  
  
  def moe_align_block_size(
-@@ -73,14 +76,70 @@ def moe_align_block_size(
+@@ -73,14 +76,64 @@ def moe_align_block_size(
          (num_experts + 2,), dtype=torch.int32, device=topk_ids.device
      )
  
@@ -1765,11 +1790,6 @@ index 12d1d5b1d..aca6029f2 100644
 +
 +        # Count tokens per expert (including -1 for filtered experts)
 +        expert_counts = torch.zeros(num_experts + 2, dtype=torch.int32, device=topk_ids.device)
-+        for e in range(num_experts + 1):
-+            expert_counts[e] = (flat_ids == (e - 1)).sum()  # -1 maps to index 0
-+
-+        # Actually: expert -1 means filtered. topk_ids values are 0..num_experts-1
-+        expert_counts.zero_()
 +        for e in range(num_experts):
 +            expert_counts[e + 1] = (flat_ids == e).sum()
 +        # Count -1 (filtered) tokens
@@ -1800,7 +1820,6 @@ index 12d1d5b1d..aca6029f2 100644
 +                sorted_ids[pos] = idx
 +
 +        # Fill expert_ids: each block gets the expert index
-+        num_blocks = triton.cdiv(total_padded, block_size)
 +        block_idx = 0
 +        for e in range(num_experts + 1):
 +            n_blocks = padded_counts[e].item() // block_size
@@ -1877,7 +1896,7 @@ index cb6909660..b3b34392d 100644
  from sglang.srt.layers.moe.token_dispatcher.mooncake import (
      MooncakeCombineInput,
 diff --git a/python/sglang/srt/layers/moe/topk.py b/python/sglang/srt/layers/moe/topk.py
-index 892dcebae..31ce6d6cf 100644
+index 892dcebae..1479990f3 100644
 --- a/python/sglang/srt/layers/moe/topk.py
 +++ b/python/sglang/srt/layers/moe/topk.py
 @@ -120,12 +120,15 @@ if _is_cuda:
@@ -1898,7 +1917,31 @@ index 892dcebae..31ce6d6cf 100644
  if _use_aiter:
      try:
          from aiter import biased_grouped_topk as aiter_biased_grouped_topk
-@@ -545,7 +548,7 @@ def fused_topk(
+@@ -513,8 +516,6 @@ def fused_topk(
+ 
+     if scoring_func == "softmax":
+         if _use_aiter:
+-
+-            # Use fused_topk instead of topk_softmax to auto dispatch to the correct kernel
+             topk_weights, topk_ids = aiter_fused_topk(
+                 hidden_states,
+                 gating_output,
+@@ -523,6 +524,14 @@ def fused_topk(
+                 topk_ids=topk_ids,
+                 topk_weights=topk_weights,
+             )
++        elif _is_hip:
++            # RDNA4: sgl_kernel.topk_softmax produces deferred hipErrorLaunchFailure
++            # on gfx1201. Use pure PyTorch instead.
++            _, topk_ids_long = torch.topk(gating_output, k=topk, dim=-1, sorted=False)
++            topk_weights = gating_output.float().gather(1, topk_ids_long)
++            if renormalize:
++                topk_weights = F.softmax(topk_weights, dim=-1, dtype=torch.float32)
++            topk_ids = topk_ids_long.int()
+         else:
+             topk_softmax(
+                 topk_weights,
+@@ -545,7 +554,7 @@ def fused_topk(
  
  
  # This is used by the Deepseek V2/V3/R1 series models
@@ -1907,7 +1950,7 @@ index 892dcebae..31ce6d6cf 100644
  def grouped_topk_gpu(
      hidden_states: torch.Tensor,
      gating_output: torch.Tensor,
-@@ -636,7 +639,7 @@ def grouped_topk_cpu(
+@@ -636,7 +645,7 @@ def grouped_topk_cpu(
      )
  
  
@@ -1916,7 +1959,7 @@ index 892dcebae..31ce6d6cf 100644
  def kimi_k2_biased_topk_impl(
      hidden_states: torch.Tensor,
      gating_output: torch.Tensor,
-@@ -674,7 +677,7 @@ def kimi_k2_biased_topk_impl(
+@@ -674,7 +683,7 @@ def kimi_k2_biased_topk_impl(
      return topk_weights, topk_ids
  
  
@@ -1925,7 +1968,7 @@ index 892dcebae..31ce6d6cf 100644
  def biased_grouped_topk_impl(
      hidden_states: torch.Tensor,
      gating_output: torch.Tensor,
-@@ -761,7 +764,7 @@ def _mask_topk_ids_padded_region(
+@@ -761,7 +770,7 @@ def _mask_topk_ids_padded_region(
      topk_ids[indices >= num_token_non_padded, :] = -1
  
  
@@ -1934,131 +1977,313 @@ index 892dcebae..31ce6d6cf 100644
  def _biased_grouped_topk_postprocess(
      topk_ids, expert_location_dispatch_info, num_token_non_padded
  ):
-diff --git a/python/sglang/srt/layers/quantization/awq_triton.py b/python/sglang/srt/layers/quantization/awq_triton.py
-index b83dd79fb..b0b60e245 100644
---- a/python/sglang/srt/layers/quantization/awq_triton.py
-+++ b/python/sglang/srt/layers/quantization/awq_triton.py
-@@ -212,9 +212,9 @@ def awq_gemm_kernel(
-         b = (b >> shifts) & 0xF
-         zeros = (zeros >> shifts) & 0xF
-         b = (b - zeros) * scales
--        b = b.to(c_ptr.type.element_ty)
-+        b = b.to(a_ptr.type.element_ty)
+diff --git a/python/sglang/srt/layers/quantization/awq.py b/python/sglang/srt/layers/quantization/awq.py
+index c05aa091a..e85474279 100644
+--- a/python/sglang/srt/layers/quantization/awq.py
++++ b/python/sglang/srt/layers/quantization/awq.py
+@@ -2,6 +2,7 @@
+ from __future__ import annotations
  
--        # Accumulate results.
-+        # Accumulate results (FP32 accumulation with FP16 inputs).
-         accumulator = tl.dot(a, b, accumulator, out_dtype=accumulator_dtype)
+ import logging
++import os
+ import warnings
+ from typing import TYPE_CHECKING, Any, Dict, List, Optional
  
-         offsets_k += BLOCK_SIZE_K * SPLIT_K
-@@ -281,6 +281,108 @@ def awq_dequantize_triton(
-     return result
+@@ -77,7 +78,16 @@ if _is_cuda:
+ elif _is_hip:
+     from sglang.srt.layers.quantization.awq_triton import (
+         awq_dequantize_triton as awq_dequantize,
++        awq_dequantize_decomposition,  # Pure PyTorch — no Triton
++        awq_gemm_triton,
++        awq_gemv_triton,
+     )
++    # Native HIP GEMV kernel: 30% faster M=1 decode, 150x faster MoE dispatch
++    try:
++        import awq_gemv_hip_ext
++        _has_hip_gemv = True
++    except ImportError:
++        _has_hip_gemv = False
+ 
+ elif _is_xpu:
+     from sgl_kernel import awq_dequantize
+@@ -88,6 +98,13 @@ else:
+ 
+ logger = logging.getLogger(__name__)
+ 
++if _is_hip:
++    if _has_hip_gemv:
++        logger.info("AWQ HIP GEMV kernel loaded — using native HIP for M=1 decode and MoE dispatch")
++    else:
++        logger.warning("AWQ HIP GEMV kernel not found — using Triton fallback. "
++                       "Build with: scripts/build_awq_gemv.sh --env <env-name>")
++
+ 
+ ScalarType, scalar_types = get_scalar_types()
+ 
+@@ -186,6 +203,8 @@ class AWQConfig(QuantizationConfig):
+             if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
+                 return UnquantizedLinearMethod()
+             return AWQLinearMethod(self)
++        elif isinstance(layer, FusedMoE) and _is_hip:
++            return AWQTritonMoEMethod(self)
+         return None
  
  
-+@triton.jit
-+def awq_gemv_kernel(
-+    # M=1 specialized: input [1, K], qweight [K, N//8], output [SPLIT_K, 1, N]
-+    a_ptr, b_ptr, c_ptr, zeros_ptr, scales_ptr,
-+    N, K, group_size,
-+    BLOCK_SIZE_N: tl.constexpr,
-+    BLOCK_SIZE_K: tl.constexpr,
-+    SPLIT_K: tl.constexpr,
-+):
-+    """AWQ GEMV kernel for M=1 decode. No M-dimension tiling overhead."""
-+    pid_n = tl.program_id(0)
-+    pid_z = tl.program_id(1)
+@@ -455,8 +474,24 @@ class AWQLinearMethod(LinearMethodBase):
+         pack_factor = self.quant_config.pack_factor
+         out_shape = x.shape[:-1] + (qweight.shape[-1] * pack_factor,)
+         reshaped_x = x.reshape(-1, x.shape[-1])
+-        out = awq_dequantize(qweight, scales, qzeros)
+-        out = torch.matmul(reshaped_x, out)
 +
-+    accumulator_dtype = c_ptr.type.element_ty
-+    accumulator = tl.zeros((BLOCK_SIZE_N,), dtype=accumulator_dtype)
++        # Hybrid HIP/PyTorch dispatch for RDNA4 (inspired by vLLM HybridW4A16):
++        # - M=1: HIP GEMV kernel (wave32, FP16 bit-tricks, ~30% faster)
++        # - M>1: Dequantize to FP16 + hipBLAS GEMM (no Triton — avoids
++        #   gfx1201 HSACO crash when multiple Triton kernels compile together)
++        if _is_hip:
++            M = reshaped_x.shape[0]
++            if M == 1 and _has_hip_gemv:
++                out = awq_gemv_hip_ext.awq_gemv_hip(
++                    reshaped_x, qweight, scales, qzeros, 0
++                ).unsqueeze(0)
++            else:
++                # Pure PyTorch dequant + hipBLAS matmul — zero Triton involvement
++                out = awq_dequantize_decomposition(qweight, scales, qzeros)
++                out = torch.matmul(reshaped_x, out)
++        else:
++            out = awq_dequantize(qweight, scales, qzeros)
++            out = torch.matmul(reshaped_x, out)
+ 
+         if bias is not None:
+             out.add_(bias)
+@@ -864,6 +899,227 @@ class AWQMoEMethod(FusedMoEMethodBase):
+         return self.runner.run(dispatch_output, quant_info)
+ 
+ 
++class AWQTritonMoEMethod(FusedMoEMethodBase):
++    """AWQ MoE for HIP/RDNA4 using the existing fused_moe_kernel_gptq_awq.
 +
-+    # AWQ unpack order: [0, 4, 1, 5, 2, 6, 3, 7]
-+    reverse_awq_order = ((tl.arange(0, 2) * 4)[None, :] + tl.arange(0, 4)[:, None]).reshape(8)
-+    shifts = reverse_awq_order * 4
-+    shifts = tl.broadcast_to(shifts[None, :], (BLOCK_SIZE_K * (BLOCK_SIZE_N // 8), 8))
-+    shifts = tl.reshape(shifts, (BLOCK_SIZE_K, BLOCK_SIZE_N))
++    Repacks AWQ INT4 weights to GPTQ sequential format during loading, then
++    uses the standard Triton fused MoE kernel with use_int4_w4a16=True.
++    This gives full fused MoE performance with CUDA graph support.
++    """
 +
-+    offsets_bn = pid_n * (BLOCK_SIZE_N // 8) + tl.arange(0, BLOCK_SIZE_N // 8)
-+    masks_bn = offsets_bn < N // 8
-+    offsets_sn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-+    masks_sn = offsets_sn < N
++    AWQ_REVERSE_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
 +
-+    offsets_k = pid_z * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
++    def __init__(self, quant_config: AWQConfig):
++        self.quant_config = quant_config
++        if self.quant_config.weight_bits != 4:
++            raise ValueError("AWQTritonMoEMethod only supports 4bit.")
 +
-+    a_ptrs = a_ptr + offsets_k  # [BLOCK_SIZE_K] — single row
-+    b_ptrs = b_ptr + (N // 8) * offsets_k[:, None] + offsets_bn[None, :]
++    def create_weights(
++        self,
++        layer: torch.nn.Module,
++        num_experts: int,
++        hidden_size: int,
++        intermediate_size_per_partition: int,
++        params_dtype: torch.dtype,
++        **extra_weight_attrs,
++    ):
++        from sglang.srt.layers.moe.fused_moe_triton import FusedMoeWeightScaleSupported
 +
-+    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)):
-+        masks_k = offsets_k < K
-+        a = tl.load(a_ptrs, mask=masks_k, other=0.0)  # [BLOCK_SIZE_K]
-+        b = tl.load(b_ptrs, mask=masks_k[:, None] & masks_bn[None, :], other=0.0)
++        extra_weight_attrs.update({
++            "is_transposed": True,
++            "quant_method": FusedMoeWeightScaleSupported.GROUP.value,
++        })
 +
-+        # Unpack INT4
-+        b = tl.interleave(b, b)
-+        b = tl.interleave(b, b)
-+        b = tl.interleave(b, b)
++        pack_factor = self.quant_config.pack_factor  # 8 for 4-bit
++        group_size = self.quant_config.group_size
 +
-+        # Dequantize
-+        offsets_szk = (BLOCK_SIZE_K * SPLIT_K * k + pid_z * BLOCK_SIZE_K) // group_size + tl.arange(0, 1)
-+        masks_zk = offsets_szk < K // group_size
++        # AWQ format: qweight [E, K, N//8] int32, scales [E, K//G, N], qzeros [E, K//G, N//8] int32
++        w13_qweight = torch.nn.Parameter(
++            torch.empty(num_experts, hidden_size,
++                        2 * intermediate_size_per_partition // pack_factor,
++                        dtype=torch.int32),
++            requires_grad=False)
++        layer.register_parameter("w13_qweight", w13_qweight)
++        set_weight_attrs(w13_qweight, extra_weight_attrs)
 +
-+        zeros = tl.load(zeros_ptr + (N // 8) * offsets_szk[:, None] + offsets_bn[None, :],
-+                        mask=masks_zk[:, None] & masks_bn[None, :], other=0.0)
-+        zeros = tl.interleave(zeros, zeros)
-+        zeros = tl.interleave(zeros, zeros)
-+        zeros = tl.interleave(zeros, zeros)
-+        zeros = tl.broadcast_to(zeros, (BLOCK_SIZE_K, BLOCK_SIZE_N))
++        w2_qweight = torch.nn.Parameter(
++            torch.empty(num_experts, intermediate_size_per_partition,
++                        hidden_size // pack_factor, dtype=torch.int32),
++            requires_grad=False)
++        layer.register_parameter("w2_qweight", w2_qweight)
++        set_weight_attrs(w2_qweight, extra_weight_attrs)
 +
-+        scales = tl.load(scales_ptr + N * offsets_szk[:, None] + offsets_sn[None, :],
-+                         mask=masks_zk[:, None] & masks_sn[None, :], other=0.0)
-+        scales = tl.broadcast_to(scales, (BLOCK_SIZE_K, BLOCK_SIZE_N))
++        num_groups_w13 = hidden_size // group_size
++        num_groups_w2 = intermediate_size_per_partition // group_size
 +
-+        b = (b >> shifts) & 0xF
-+        zeros = (zeros >> shifts) & 0xF
-+        b = (b - zeros) * scales
-+        b = b.to(a_ptr.type.element_ty)
++        w13_scales = torch.nn.Parameter(
++            torch.empty(num_experts, num_groups_w13,
++                        intermediate_size_per_partition * 2, dtype=params_dtype),
++            requires_grad=False)
++        layer.register_parameter("w13_scales", w13_scales)
++        set_weight_attrs(w13_scales, extra_weight_attrs)
 +
-+        # GEMV: accumulate a[k] * b[k, n] over K
-+        accumulator += tl.sum(a[:, None] * b, axis=0).to(accumulator_dtype)
++        w2_scales = torch.nn.Parameter(
++            torch.empty(num_experts, num_groups_w2, hidden_size, dtype=params_dtype),
++            requires_grad=False)
++        layer.register_parameter("w2_scales", w2_scales)
++        set_weight_attrs(w2_scales, extra_weight_attrs)
 +
-+        offsets_k += BLOCK_SIZE_K * SPLIT_K
-+        a_ptrs += BLOCK_SIZE_K * SPLIT_K
-+        b_ptrs += BLOCK_SIZE_K * SPLIT_K * (N // 8)
++        w13_qzeros = torch.nn.Parameter(
++            torch.empty(num_experts, num_groups_w13,
++                        2 * intermediate_size_per_partition // pack_factor,
++                        dtype=torch.int32),
++            requires_grad=False)
++        layer.register_parameter("w13_qzeros", w13_qzeros)
++        set_weight_attrs(w13_qzeros, extra_weight_attrs)
 +
-+    # Store
-+    c_ptrs = c_ptr + pid_z * N + offsets_sn
-+    tl.store(c_ptrs, accumulator.to(c_ptr.type.element_ty), mask=offsets_sn < N)
++        w2_qzeros = torch.nn.Parameter(
++            torch.empty(num_experts, num_groups_w2,
++                        hidden_size // pack_factor, dtype=torch.int32),
++            requires_grad=False)
++        layer.register_parameter("w2_qzeros", w2_qzeros)
++        set_weight_attrs(w2_qzeros, extra_weight_attrs)
++
++    @staticmethod
++    def _awq_to_gptq_weight(qweight_awq: torch.Tensor) -> torch.Tensor:
++        """Repack AWQ [E, K, N//8] int32 → GPTQ [E, N, K//2] int8.
++
++        AWQ: 8 x 4-bit values per int32, interleaved order [0,4,1,5,2,6,3,7]
++        GPTQ: 2 x 4-bit values per int8, sequential order
++        """
++        E, K, N_packed = qweight_awq.shape
++        N = N_packed * 8
++
++        # Unpack AWQ int32 → [E, K, N] uint8 values
++        unpacked = torch.zeros(E, K, N, dtype=torch.uint8, device=qweight_awq.device)
++        for i, src_pos in enumerate(AWQTritonMoEMethod.AWQ_REVERSE_ORDER):
++            unpacked[:, :, i::8] = ((qweight_awq >> (src_pos * 4)) & 0xF).to(torch.uint8)
++
++        # Transpose [E, K, N] → [E, N, K]
++        unpacked = unpacked.permute(0, 2, 1).contiguous()
++
++        # Repack as int8: [E, N, K//2] with sequential packing
++        packed = (unpacked[:, :, 0::2] | (unpacked[:, :, 1::2] << 4)).to(torch.int8)
++        return packed.contiguous()
++
++    @staticmethod
++    def _awq_to_gptq_zeros(qzeros_awq: torch.Tensor) -> torch.Tensor:
++        """Repack AWQ zeros [E, G, N//8] int32 → GPTQ [E, G, N//2] int8."""
++        E, G, N_packed = qzeros_awq.shape
++        N = N_packed * 8
++
++        unpacked = torch.zeros(E, G, N, dtype=torch.uint8, device=qzeros_awq.device)
++        for i, src_pos in enumerate(AWQTritonMoEMethod.AWQ_REVERSE_ORDER):
++            unpacked[:, :, i::8] = ((qzeros_awq >> (src_pos * 4)) & 0xF).to(torch.uint8)
++
++        packed = (unpacked[:, :, 0::2] | (unpacked[:, :, 1::2] << 4)).to(torch.int8)
++        return packed.contiguous()
++
++    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
++        # Keep weights in native AWQ format for per-expert dispatch.
++        # TODO: Repack to GPTQ format for fused_moe_kernel_gptq_awq (needs
++        # debugging of the AWQ→GPTQ repack to fix garbage output).
++        pass
++
++    def create_moe_runner(
++        self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
++    ):
++        self.moe_runner_config = moe_runner_config
++
++    def apply(
++        self,
++        layer: torch.nn.Module,
++        dispatch_output,
++    ):
++        from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
++
++        x = dispatch_output.hidden_states  # [M, K]
++        topk_weights, topk_ids, _ = dispatch_output.topk_output
++
++        M, K = x.shape
++        top_k = topk_ids.shape[1]
++        intermediate = layer.w2_qweight.shape[1]
++
++        if _has_hip_gemv:
++            return self._apply_hip_gemv(layer, x, topk_weights, topk_ids,
++                                        M, K, top_k, intermediate)
++
++        return self._apply_triton_loop(layer, x, topk_weights, topk_ids,
++                                       M, K, top_k, intermediate)
++
++    def _apply_hip_gemv(self, layer, x, topk_weights, topk_ids,
++                        M, K, top_k, intermediate):
++        """Fused MoE via HIP GEMV — all experts dispatched in a single GPU kernel."""
++        from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
++
++        num_slots = M * top_k
++        sorted_ids = torch.arange(num_slots, dtype=torch.int32, device=x.device)
++        expert_ids_flat = topk_ids.reshape(-1).int()
++        weights_flat = topk_weights.reshape(-1).float()
++
++        # Step 1: Gate+Up GEMV (all experts, one kernel launch)
++        gate_up_N = layer.w13_qweight.shape[2] * 8
++        gate_up = torch.empty(num_slots, gate_up_N, dtype=x.dtype, device=x.device)
++        awq_gemv_hip_ext.awq_gemv_moe_hip(
++            x, layer.w13_qweight, layer.w13_scales, layer.w13_qzeros,
++            gate_up, sorted_ids, expert_ids_flat, weights_flat,
++            top_k, False, 0)
++
++        # Step 2: SiLU activation
++        gate = gate_up[:, :intermediate]
++        up = gate_up[:, intermediate:]
++        activated = (torch.nn.functional.silu(gate) * up).contiguous()
++
++        # Step 3: Down GEMV with routing weight applied (top_k=1: each slot is
++        # an independent token since each has unique activated features)
++        down_out = torch.zeros(num_slots, K, dtype=x.dtype, device=x.device)
++        awq_gemv_hip_ext.awq_gemv_moe_hip(
++            activated, layer.w2_qweight, layer.w2_scales, layer.w2_qzeros,
++            down_out, sorted_ids, expert_ids_flat, weights_flat,
++            1, True, 0)
++
++        # Combine: sum weighted expert outputs per token
++        output = down_out.reshape(M, top_k, K).sum(dim=1)
++        return StandardCombineInput(hidden_states=output)
++
++    def _apply_triton_loop(self, layer, x, topk_weights, topk_ids,
++                           M, K, top_k, intermediate):
++        """Fallback: per-expert dequant+matmul loop (used if HIP kernel unavailable)."""
++        from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
++
++        num_experts = layer.w13_qweight.shape[0]
++        output = torch.zeros_like(x)
++
++        for expert_id in range(num_experts):
++            mask = (topk_ids == expert_id)
++            if not mask.any():
++                continue
++
++            token_indices, slot_indices = mask.nonzero(as_tuple=True)
++            weights = topk_weights[token_indices, slot_indices]
++            expert_input = x[token_indices]
++
++            # Dequant + matmul (no Triton — avoids gfx1201 HSACO crash)
++            w13_fp16 = awq_dequantize_decomposition(
++                layer.w13_qweight[expert_id], layer.w13_scales[expert_id],
++                layer.w13_qzeros[expert_id])
++            gate_up = torch.matmul(expert_input, w13_fp16)
++
++            gate = gate_up[:, :intermediate]
++            up = gate_up[:, intermediate:]
++            activated = torch.nn.functional.silu(gate) * up
++
++            w2_fp16 = awq_dequantize_decomposition(
++                layer.w2_qweight[expert_id], layer.w2_scales[expert_id],
++                layer.w2_qzeros[expert_id])
++            expert_output = torch.matmul(activated, w2_fp16)
++
++            expert_output = expert_output * weights.unsqueeze(-1)
++            output.index_add_(0, token_indices, expert_output.to(output.dtype))
++
++        return StandardCombineInput(hidden_states=output)
 +
 +
-+def awq_gemv_triton(
-+    input: torch.Tensor,
-+    qweight: torch.Tensor,
-+    scales: torch.Tensor,
-+    qzeros: torch.Tensor,
-+    split_k_iters: int = 16,
-+    block_size_n: int = 64,
-+    block_size_k: int = 64,
-+) -> torch.Tensor:
-+    """AWQ GEMV for M=1 decode. Avoids GEMM tile overhead."""
-+    assert input.shape[0] == 1, "GEMV kernel requires M=1"
-+    M, K = input.shape
-+    N = qweight.shape[1] * 8
-+    group_size = qweight.shape[0] // qzeros.shape[0]
-+
-+    grid = (triton.cdiv(N, block_size_n), split_k_iters)
-+    result = torch.zeros((split_k_iters, N), dtype=scales.dtype, device=input.device)
-+
-+    awq_gemv_kernel[grid](
-+        input, qweight, result, qzeros, scales,
-+        N, K, group_size,
-+        BLOCK_SIZE_N=block_size_n,
-+        BLOCK_SIZE_K=block_size_k,
-+        SPLIT_K=split_k_iters,
-+    )
-+    return result.sum(0).unsqueeze(0)  # [1, N]
-+
-+
- # input   - [M, K]
- # qweight - [K, N // 8]
- # qzeros  - [K // G, N // 8]
+ class AWQMoEAscendMethod(AWQMoEMethod):
+     def __init__(self, quant_config: AWQConfig):
+         self.quant_config = quant_config
 diff --git a/python/sglang/srt/layers/quantization/fp8_kernel.py b/python/sglang/srt/layers/quantization/fp8_kernel.py
 index 016c836fe..1979e8a7f 100644
 --- a/python/sglang/srt/layers/quantization/fp8_kernel.py
@@ -2507,10 +2732,10 @@ index ef672c5c0..e44cfceb1 100644
          start_idx = tp_rank * shard_size
 diff --git a/python/sglang/srt/models/gemma4_causal.py b/python/sglang/srt/models/gemma4_causal.py
 new file mode 100644
-index 000000000..f2e6b2d7b
+index 000000000..32c1dd228
 --- /dev/null
 +++ b/python/sglang/srt/models/gemma4_causal.py
-@@ -0,0 +1,1074 @@
+@@ -0,0 +1,1062 @@
 +# Copyright 2025 SGLang Team
 +# Licensed under the Apache License, Version 2.0 (the "License");
 +# you may not use this file except in compliance with the License.
@@ -2549,6 +2774,7 @@ index 000000000..f2e6b2d7b
 +)
 +from sglang.srt.layers.logits_processor import LogitsProcessor
 +from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
++from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 +from sglang.srt.layers.moe.topk import TopK
 +from sglang.srt.layers.quantization.base_config import QuantizationConfig
 +from sglang.srt.layers.radix_attention import RadixAttention
@@ -2742,7 +2968,9 @@ index 000000000..f2e6b2d7b
 +                config, "swa_num_key_value_heads", config.num_key_value_heads
 +            )
 +        else:
-+            self.total_num_kv_heads = config.num_key_value_heads
++            self.total_num_kv_heads = getattr(
++                config, "num_global_key_value_heads", config.num_key_value_heads
++            )
 +
 +        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
 +
@@ -2846,23 +3074,12 @@ index 000000000..f2e6b2d7b
 +        forward_batch: ForwardBatch,
 +        **kwargs,
 +    ):
-+        _dbg = (self.layer_id == 0 and not hasattr(self, '_attn_dbg_done'))
-+
 +        qkv, _ = self.qkv_proj(hidden_states)
 +        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-+
-+        if _dbg:
-+            self._attn_dbg_done = True
-+            logger.warning(f"ATTN L{self.layer_id}: qkv nan={qkv.isnan().any().item()} "
-+                          f"q_size={self.q_size} kv_size={self.kv_size} "
-+                          f"heads={self.num_heads} kv_heads={self.num_kv_heads} head_dim={self.head_dim}")
 +
 +        q = q.unflatten(-1, (self.num_heads, self.head_dim))
 +        q = self.q_norm(q)
 +        q = q.flatten(-2, -1)
-+
-+        if _dbg:
-+            logger.warning(f"ATTN L{self.layer_id}: after q_norm nan={q.isnan().any().item()}")
 +
 +        # Check if we should use shared KV cache
 +        if self.is_kv_shared_layer and self.kv_shared_layer_index is not None:
@@ -2879,10 +3096,6 @@ index 000000000..f2e6b2d7b
 +        if k is not None:
 +            k = k.flatten(-2, -1)
 +            q, k = self.rotary_emb(positions, q, k)
-+
-+            if _dbg:
-+                logger.warning(f"ATTN L{self.layer_id}: after rope q_nan={q.isnan().any().item()} k_nan={k.isnan().any().item()}")
-+
 +            k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
 +        else:
 +            dummy_k = torch.zeros_like(q[:, : self.kv_size])
@@ -2897,15 +3110,9 @@ index 000000000..f2e6b2d7b
 +            save_kv_cache=not self.is_kv_shared_layer,
 +        )
 +
-+        if _dbg:
-+            logger.warning(f"ATTN L{self.layer_id}: after attn nan={attn_output.isnan().any().item()} shape={attn_output.shape}")
-+
 +        if attn_output.dim() == 3:
 +            attn_output = attn_output.flatten(-2, -1)
 +        output, _ = self.o_proj(attn_output)
-+
-+        if _dbg:
-+            logger.warning(f"ATTN L{self.layer_id}: after o_proj nan={output.isnan().any().item()}")
 +
 +        return output
 +
@@ -2927,10 +3134,12 @@ index 000000000..f2e6b2d7b
 +        self.layer_id = layer_id
 +
 +        # Gemma 4 uses different head dimensions for sliding vs full attention
++        # hf_transformers_utils remaps: config.head_dim = global_head_dim (512),
++        # config.swa_head_dim = original head_dim (256)
 +        layer_type = config.layer_types[layer_id]
 +        self.is_full_attention = layer_type == "full_attention"
 +        if self.is_full_attention:
-+            head_dim = config.head_dim  # following sglang naming
++            head_dim = config.head_dim
 +        else:
 +            head_dim = getattr(config, "swa_head_dim", config.head_dim)
 +
@@ -3056,31 +3265,15 @@ index 000000000..f2e6b2d7b
 +        #   h = gemma_norm(residual)
 +        residual = hidden_states
 +
-+        # DEBUG: trace NaN source in first layer
-+        _dbg = (self.layer_id == 0 and not hasattr(self, '_dbg_done'))
-+        if _dbg:
-+            self._dbg_done = True
-+            logger.warning(f"L{self.layer_id} input: nan={hidden_states.isnan().any().item()} "
-+                          f"mean={hidden_states.float().mean():.4f}")
-+
-+        # Apply input layernorm
 +        hidden_states = self.input_layernorm(hidden_states)
-+        if _dbg:
-+            logger.warning(f"L{self.layer_id} after input_norm: nan={hidden_states.isnan().any().item()} "
-+                          f"mean={hidden_states[~hidden_states.isnan()].float().mean():.4f if not hidden_states.isnan().all() else 'ALL_NAN'}")
 +
 +        hidden_states = self.self_attn(
 +            positions=positions,
 +            hidden_states=hidden_states,
 +            forward_batch=forward_batch,
 +        )
-+        if _dbg:
-+            logger.warning(f"L{self.layer_id} after attn: nan={hidden_states.isnan().any().item()} "
-+                          f"shape={hidden_states.shape}")
 +
 +        hidden_states = self.post_attention_layernorm(hidden_states)
-+        if _dbg:
-+            logger.warning(f"L{self.layer_id} after post_attn_norm: nan={hidden_states.isnan().any().item()}")
 +
 +        if self.enable_moe_block:
 +            # Fuse: hidden_states + residual -> residual; pre_ff_norm(residual) -> hidden_states
@@ -3308,12 +3501,6 @@ index 000000000..f2e6b2d7b
 +
 +        hidden_states = input_embeds
 +
-+        _do_debug = not hasattr(self, '_dbg_done')
-+        if _do_debug:
-+            self._dbg_done = True
-+            logger.warning(f"DBG embed: shape={hidden_states.shape} nan={hidden_states.isnan().any().item()} "
-+                          f"mean={hidden_states.float().mean():.4f}")
-+
 +        for layer_idx, layer in enumerate(self.layers):
 +            if per_layer_inputs is not None:
 +                per_layer_input = per_layer_inputs[:, layer_idx, :]
@@ -3328,10 +3515,6 @@ index 000000000..f2e6b2d7b
 +            )
 +            hidden_states = layer_outputs[0]
 +            residual = layer_outputs[1] if len(layer_outputs) > 1 else None
-+
-+            if _do_debug and layer_idx < 5:
-+                logger.warning(f"DBG layer {layer_idx}: nan={hidden_states.isnan().any().item()} "
-+                              f"mean={hidden_states[~hidden_states.isnan()].float().mean():.4f if not hidden_states.isnan().all().item() else 'ALL_NAN'}")
 +
 +        if residual is None:
 +            hidden_states = self.norm(hidden_states)
@@ -3437,16 +3620,6 @@ index 000000000..f2e6b2d7b
 +            per_layer_inputs,
 +            **kwargs,
 +        )
-+        # DEBUG: check hidden_states before logits
-+        if hasattr(self, '_debug_count'):
-+            self._debug_count += 1
-+        else:
-+            self._debug_count = 1
-+        if self._debug_count <= 3:
-+            logger.warning(f"DEBUG hidden_states: shape={hidden_states.shape}, "
-+                          f"mean={hidden_states.float().mean():.6f}, "
-+                          f"std={hidden_states.float().std():.6f}, "
-+                          f"any_nan={hidden_states.isnan().any().item()}")
 +        return self.logits_processor(
 +            input_ids, hidden_states, self.lm_head, forward_batch
 +        )
@@ -3469,13 +3642,25 @@ index 000000000..f2e6b2d7b
 +            ("gate_up_proj", "up_proj", 1),
 +        ]
 +
-+        expert_params_mapping = [
-+            # (param_name, ckpt_weight_name, shard_ids)
-+            # gate_up_proj is fused [E, 2*I, H] — chunk into w1 (gate) + w3 (up)
++        num_experts = getattr(self.config, "num_experts", 0)
++
++        # Per-expert mapping for AWQ/GPTQ checkpoints (experts.0.gate_proj.qweight)
++        per_expert_params_mapping = (
++            FusedMoE.make_expert_params_mapping(
++                ckpt_gate_proj_name="gate_proj",
++                ckpt_down_proj_name="down_proj",
++                ckpt_up_proj_name="up_proj",
++                num_experts=num_experts,
++            )
++            if num_experts > 0
++            else []
++        )
++
++        # Fused mapping for BF16 checkpoints (experts.gate_up_proj [E, 2*I, H])
++        fused_expert_params_mapping = [
 +            ("experts.w13_weight", "experts.gate_up_proj", ("w1", "w3")),
 +            ("experts.w2_weight", "experts.down_proj", ("w2",)),
 +        ]
-+        num_experts = getattr(self.config, "num_experts", 0)
 +
 +        k_eq_v_layers = self._get_k_eq_v_layers()
 +
@@ -3508,26 +3693,33 @@ index 000000000..f2e6b2d7b
 +                and int(m.group(1)) in k_eq_v_layers
 +            )
 +
-+            # MoE expert weights checked first (gate_up_proj contains "up_proj"
-+            # which would false-match the stacked dense MLP mapping).
 +            orig_name = name
-+            for param_name, weight_name, shard_ids in expert_params_mapping:
-+                name = orig_name
++
++            # --- Per-expert AWQ/GPTQ weights (experts.{i}.gate_proj.qweight) ---
++            is_expert_weight = False
++            for param_name, weight_name, expert_id, shard_id in per_expert_params_mapping:
 +                if weight_name not in name:
 +                    continue
++                is_expert_weight = True
 +                name = name.replace(weight_name, param_name)
 +                if name not in params_dict:
 +                    continue
 +                param = params_dict[name]
 +                weight_loader = param.weight_loader
-+                for i in range(num_experts):
-+                    chunks = loaded_weight[i].chunk(len(shard_ids), dim=0)
-+                    for chunk, sid in zip(chunks, shard_ids):
-+                        weight_loader(param, chunk, name, sid, i)
++                weight_loader(
++                    param, loaded_weight, name,
++                    shard_id=shard_id, expert_id=expert_id,
++                )
 +                break
 +            else:
-+                for param_name, weight_name, shard_id in stacked_params_mapping:
-+                    name = orig_name
++                if is_expert_weight:
++                    loaded_params.add(name)
++                    continue
++
++                # --- Fused BF16 experts (experts.gate_up_proj [E, 2*I, H]) ---
++                name = orig_name
++                fused_matched = False
++                for param_name, weight_name, shard_ids in fused_expert_params_mapping:
 +                    if weight_name not in name:
 +                        continue
 +                    name = name.replace(weight_name, param_name)
@@ -3535,24 +3727,45 @@ index 000000000..f2e6b2d7b
 +                        continue
 +                    param = params_dict[name]
 +                    weight_loader = param.weight_loader
-+                    weight_loader(param, loaded_weight, shard_id)
-+                    if should_dup_k_to_v:
-+                        weight_loader(param, loaded_weight, "v")
++                    for i in range(num_experts):
++                        chunks = loaded_weight[i].chunk(len(shard_ids), dim=0)
++                        for chunk, sid in zip(chunks, shard_ids):
++                            weight_loader(param, chunk, name, sid, i)
++                    fused_matched = True
 +                    break
-+                else:
-+                    name = orig_name
-+                    if name.endswith(".bias") and name not in params_dict:
-+                        continue
-+                    name = maybe_remap_kv_scale_name(name, params_dict)
-+                    if name is None:
-+                        continue
-+                    if name not in params_dict:
-+                        continue
-+                    param = params_dict[name]
-+                    weight_loader = getattr(
-+                        param, "weight_loader", default_weight_loader
-+                    )
-+                    weight_loader(param, loaded_weight)
++
++                if not fused_matched:
++                    # --- Stacked dense params (qkv_proj, gate_up_proj) ---
++                    for param_name, weight_name, shard_id in stacked_params_mapping:
++                        name = orig_name
++                        if weight_name not in name:
++                            continue
++                        # Skip MoE expert weights — handled above
++                        if ".moe.experts." in name:
++                            continue
++                        name = name.replace(weight_name, param_name)
++                        if name not in params_dict:
++                            continue
++                        param = params_dict[name]
++                        weight_loader = param.weight_loader
++                        weight_loader(param, loaded_weight, shard_id)
++                        if should_dup_k_to_v:
++                            weight_loader(param, loaded_weight, "v")
++                        break
++                    else:
++                        name = orig_name
++                        if name.endswith(".bias") and name not in params_dict:
++                            continue
++                        name = maybe_remap_kv_scale_name(name, params_dict)
++                        if name is None:
++                            continue
++                        if name not in params_dict:
++                            continue
++                        param = params_dict[name]
++                        weight_loader = getattr(
++                            param, "weight_loader", default_weight_loader
++                        )
++                        weight_loader(param, loaded_weight)
 +            loaded_params.add(name)
 +        unloaded_params = params_dict.keys() - loaded_params
 +        if unloaded_params:
@@ -3585,6 +3798,23 @@ index 000000000..f2e6b2d7b
 +
 +
 +EntryClass = [Gemma4ForCausalLM, Gemma4ForConditionalGeneration]
+diff --git a/python/sglang/srt/models/llama.py b/python/sglang/srt/models/llama.py
+index f955ac750..de9076d45 100644
+--- a/python/sglang/srt/models/llama.py
++++ b/python/sglang/srt/models/llama.py
+@@ -198,6 +198,12 @@ class LlamaAttention(nn.Module):
+     def forward_prepare_native(self, positions, hidden_states):
+         qkv, _ = self.qkv_proj(hidden_states)
+         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
++        # Ensure contiguous — split() returns non-contiguous views and
++        # in-place rotary embedding via .view() behaves inconsistently
++        # across torch versions on non-contiguous tensors.
++        q = q.contiguous()
++        k = k.contiguous()
++        v = v.contiguous()
+         q, k = self.rotary_emb(positions, q, k)
+         return q, k, v
+ 
 diff --git a/python/sglang/srt/models/llava.py b/python/sglang/srt/models/llava.py
 index e07ca7418..3fcac8f9e 100644
 --- a/python/sglang/srt/models/llava.py
@@ -3639,6 +3869,39 @@ index e07ca7418..3fcac8f9e 100644
                  weight_loader = getattr(param, "weight_loader", default_weight_loader)
                  weight_loader(param, loaded_weight)
  
+diff --git a/python/sglang/srt/models/ministral3.py b/python/sglang/srt/models/ministral3.py
+index 8d678ec54..37970f3c8 100644
+--- a/python/sglang/srt/models/ministral3.py
++++ b/python/sglang/srt/models/ministral3.py
+@@ -72,6 +72,13 @@ class Ministral3Attention(LlamaAttention):
+         qkv, _ = self.qkv_proj(hidden_states)
+         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+ 
++        # Ensure q/k/v are contiguous — split() returns non-contiguous views
++        # and the sgl_kernel rotary_embedding fallback produces wrong results
++        # on non-contiguous tensors on some torch versions.
++        q = q.contiguous()
++        k = k.contiguous()
++        v = v.contiguous()
++
+         # Apply RoPE
+         q, k = self.rotary_emb(positions, q, k)
+ 
+@@ -80,13 +87,8 @@ class Ministral3Attention(LlamaAttention):
+             scale = _get_llama_4_attn_scale(
+                 positions, self.llama_4_scaling_beta, self.max_position_embeddings
+             ).to(q.dtype)
+-            # q shape is [batch_size * seq_len, num_heads * head_dim] or [batch_size * seq_len, num_heads, head_dim]
+-            # positions is [batch_size * seq_len]
+-            # scale is [batch_size * seq_len, 1]
+-            # We need to reshape q to apply scale correctly if it's flattened
+-            # Assuming q is (total_tokens, num_heads * head_dim)
+             q = q.view(-1, self.num_heads, self.head_dim)
+-            q = q * scale.unsqueeze(1)  # Broadcast over heads
++            q = q * scale.unsqueeze(1)
+             q = q.view(-1, self.num_heads * self.head_dim)
+ 
+         attn_output = self.attn(q, k, v, forward_batch)
 diff --git a/python/sglang/srt/models/qwen3_5.py b/python/sglang/srt/models/qwen3_5.py
 index 2f430c2b9..e1d082f3f 100644
 --- a/python/sglang/srt/models/qwen3_5.py
