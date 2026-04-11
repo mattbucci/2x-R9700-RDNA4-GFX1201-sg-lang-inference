@@ -209,15 +209,29 @@ recipe = GPTQModifier(
             weights=QuantizationArgs(num_bits=4, type="int", symmetric=True, strategy="group", group_size=32),
         )
     },
-    ignore=["lm_head"],
-    bypass_divisibility_checks=True,  # vision tower has 4304 cols not divisible by 32
+    ignore=["lm_head", "model.vision_tower", "model.embed_vision"],
+    bypass_divisibility_checks=True,
 )
 
 print("\nLoading unfused model...")
 model = AutoModelForCausalLM.from_pretrained(
     tmp_dir, torch_dtype=torch.bfloat16, device_map="cpu",
 )
-linear_count = sum(1 for m in model.modules() if isinstance(nn.Linear, type(m)) or isinstance(m, nn.Linear))
+
+# Monkey-patch compressed_tensors to skip incompatible-dimension layers
+# instead of raising ValueError during save (vision tower has 4304 cols, not divisible by 32)
+import compressed_tensors.quantization.lifecycle.forward_helpers as _fh
+_orig_process_group = _fh._process_group
+
+def _patched_process_group(x, scale, zero_point, args, do_dequantize=False, global_scale=None, g_idx=None):
+    if hasattr(args, 'group_size') and args.group_size and x.shape[-1] % args.group_size != 0:
+        return x  # skip quantization for incompatible dimensions
+    return _orig_process_group(x, scale, zero_point, args, do_dequantize=do_dequantize, global_scale=global_scale, g_idx=g_idx)
+
+_fh._process_group = _patched_process_group
+print("  Patched compressed_tensors to skip incompatible dims")
+
+linear_count = sum(1 for m in model.modules() if isinstance(m, nn.Linear))
 print(f"Loaded model with {linear_count} nn.Linear layers")
 
 print("\nStarting GPTQ calibration (this will take 1-3 hours on CPU)...")
