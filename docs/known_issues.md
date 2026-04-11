@@ -20,11 +20,3 @@
 ### AWQ weight generation — experts not GPTQ-calibrated
 GPTQ only calibrates `nn.Linear` modules. Fused expert tensors (`Qwen3MoeExperts`) are `nn.Parameter`, so they get RTN-quantized during conversion instead. Works for Coder-30B but may explain Gemma 4 quality issues.
 
-## RDNA4 kernel workarounds (applied, no action needed)
-
-These are baked into the codebase and don't need user action:
-
-- **Triton AWQ GEMM** crashes in multi-kernel context → M>1 uses `dequant+matmul`, M=1 uses HIP GEMV
-- **sgl_kernel.topk_softmax** crashes → torch-native topk in `fused_topk()` (topk.py)
-- **sgl_kernel.rotary_embedding** fallback bug → native HIP build via `setup_sgl_kernel.sh`
-- **CUDA graphs** incompatible with MoE AWQ → `--disable-cuda-graph` required
