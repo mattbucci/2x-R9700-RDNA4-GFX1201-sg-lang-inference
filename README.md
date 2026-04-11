@@ -57,21 +57,20 @@ SHM transport (check `NCCL_DEBUG=INFO` output for `SHM` vs `P2P/IPC`).
 
 ## Model Support
 
-| Model | Params | Best Backend | Decode | Peak Throughput | Status |
-|-------|:------:|:------------:|:------:|:---------------:|:------:|
-| Devstral-24B | 24B dense | SGLang AWQ | 36.0 tok/s | 1,266 tok/s | Benchmarked |
-| Qwen3.5-27B | 27B dense (DeltaNet) | SGLang AWQ | 21.3 tok/s | ~55 tok/s | Benchmarked |
-| Qwen3-Coder-30B | 30.5B MoE (3.3B active) | vLLM Docker FP8 | 93.9 tok/s | 1,882 tok/s | Benchmarked |
-| Qwen3-Coder-30B | 30.5B MoE (3.3B active) | SGLang AWQ | ~3.5 tok/s | — | Working (slow) |
-| Qwen3-Coder-Next-80B | 80B MoE (3B active) | llama.cpp Vulkan | 79 tok/s | — | Benchmarked |
+| Model | Type | Engine | 1-user tok/s | @32 concurrent | Status |
+|-------|------|--------|:------------:|:--------------:|:------:|
+| Devstral-24B | Dense | SGLang AWQ | 78 | 841 | Working |
+| Qwen3.5-27B | Dense (DeltaNet) | SGLang AWQ | 21 | 129 | Working |
+| Coder-30B | MoE (128 experts) | SGLang AWQ | 46 | 169 | Working |
+| Coder-30B | MoE | vLLM Docker FP8 | 94 | 1,185 | Working |
+| Gemma 4 26B | MoE (128 experts) | SGLang AWQ | — | — | Blocked (empty output) |
+| Coder-Next 80B | MoE (512 experts) | SGLang AWQ | — | — | Blocked (needs GPTQ) |
 
-**Dense models** use SGLang + AWQ-4bit — our fused Triton GEMM kernels are tuned for RDNA4.
+**Dense AWQ:** HIP GEMV for M=1 decode (30% faster), dequant+matmul for prefill. Zero Triton in AWQ path.
 
-**MoE models on SGLang:** AWQ now loads correctly (7.93 GB/GPU for Coder-30B vs 28 GB with FP16 dequant) using per-expert AWQ GEMM dispatch. Current speed is ~3.5 tok/s due to Python-level per-expert loop (no CUDA graphs). A fused AWQ MoE Triton kernel would bring performance to parity with vLLM FP8.
+**MoE AWQ:** HIP GEMV fused expert dispatch (all experts in one GPU kernel). Three RDNA4-specific crash sources fixed: Triton AWQ GEMM, sgl_kernel.topk_softmax, per-expert Python loop.
 
-**MoE models for production:** Use vLLM Docker with FP8 (93.9 tok/s single, 1,882 tok/s peak).
-
-**FP8 on SGLang** is blocked by an Arch Linux `comgr` package bug ([similar to NVIDIA SM121a](https://github.com/sgl-project/sglang/issues/18203)). FP8 works via vLLM Docker (Ubuntu ROCm).
+**FP8:** Blocked on SGLang by Arch Linux `comgr` bug. Works via vLLM Docker.
 
 ## Performance (2x R9700, TP=2, updated 2026-04-06)
 
