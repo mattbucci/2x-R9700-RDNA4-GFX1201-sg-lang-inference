@@ -66,13 +66,15 @@ SHM transport (check `NCCL_DEBUG=INFO` output for `SHM` vs `P2P/IPC`).
 
 All models run on SGLang with RDNA4 patches. vLLM/llama.cpp used for comparison only.
 
-| Model | Type | 1-user tok/s | @32 conc | Max context | Status |
-|-------|------|:------------:|:--------:|:-----------:|:------:|
-| Devstral-24B AWQ | Dense | 17 | 13 | 262K | Working |
-| Coder-30B AWQ | MoE (128 experts) | 28 | 332 | 32K | Working |
-| Gemma 4 26B AWQ | MoE (128 experts) | 27 | 165 | 4K | Working |
-| Coder-Next 80B AWQ | MoE+DeltaNet (512 experts) | 24 | 25 | 8K | Working |
-| Qwen3.5-27B AWQ | DeltaNet hybrid | — | — | 256K | Conv1d bug |
+| Model | Type | 1-user tok/s | @32 conc | Max context | Launch | Weights | Status |
+|-------|------|:------------:|:--------:|:-----------:|:-----:|:------:|:------:|
+| Devstral-24B AWQ | Dense | 17 | 13 | 262K | `launch.sh devstral` | Self-calibrated | Working |
+| Coder-30B AWQ | MoE (128 experts) | 28 | 332 | 32K | `launch.sh coder-30b` | Community | Working |
+| Gemma 4 26B AWQ | MoE (128 experts) | 27 | 165 | 4K | `launch.sh gemma4` | Self-calibrated | Working |
+| Coder-Next 80B AWQ | MoE+DeltaNet (512 experts) | 24 | 25 | 8K | `launch.sh coder-next` | Community | Working |
+| Qwen3.5-27B AWQ | DeltaNet hybrid | — | — | 256K | `launch.sh qwen35` | Self-calibrated | Conv1d bug |
+
+**Weights:** "Community" = HuggingFace AWQ weights used as-is. "Self-calibrated" = we ran GPTQ calibration + CT→AWQ conversion because community weights were broken or unavailable. Calibration scripts are in `scripts/quantize/`.
 
 Note: Devstral at 262K context allocates most VRAM to KV cache, limiting batching.
 At 32K context (previous config), Devstral achieves 78 tok/s single-user and 841 @32 concurrent.
