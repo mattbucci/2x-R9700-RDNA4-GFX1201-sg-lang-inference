@@ -131,3 +131,30 @@ BASELINE=save ./scripts/bench/bench_regression.sh devstral  # Save new baseline
 ## Model Status
 
 See [README.md](README.md) for current model status, benchmarks, and known issues.
+
+## GPTQ → AWQ Conversion
+
+When converting GPTQ-calibrated models to AWQ format for HIP GEMV:
+
+### Key differences between GPTQ and AWQ INT4 formats
+- **Packing axis**: GPTQ packs 8 values along **input** dim → qweight `[in/8, out]`. AWQ packs along **output** dim → qweight `[in, out/8]`.
+- **Bit order**: GPTQ is sequential (0,1,2,3,4,5,6,7). AWQ is interleaved (0,4,1,5,2,6,3,7).
+- **Zero point**: GPTQ symmetric uses zp=7. AWQ typically uses zp=8. **Preserve the source zero point** in qzeros — don't hardcode 8.
+- **g_idx**: GPTQ includes activation group indices; AWQ doesn't use them. Drop `g_idx` during conversion.
+- **Scales**: Same format `[num_groups, out_features]` in both — copy directly.
+
+### Conversion steps
+1. Unpack GPTQ qweight `[in/8, out]` → full int8 `[in, out]` (sequential bit extraction)
+2. Repack as AWQ qweight `[in, out/8]` using AWQ interleaved bit order
+3. Repack qzeros from sequential to AWQ interleaved (preserving original zp values)
+4. Copy scales as-is (both use `[num_groups, out_features]`)
+5. Drop `g_idx` tensors
+6. Skip vision tower weights (text-only inference)
+7. Update config: `quant_method: awq`, `version: gemm`, `zero_point: true`
+
+### Verification
+Always verify conversion by comparing dequantized values:
+```
+dequant = (q_val - zero_point) * scale
+```
+GPTQ and AWQ should produce identical dequantized weights for the same layer.
