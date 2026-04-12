@@ -9,15 +9,17 @@
 #   MODEL=/path/to/weights ./scripts/launch.sh coder-next
 #
 # Models:
-#   devstral      Devstral-24B AWQ (32K context, best all-round)
-#   coder-30b     Qwen3-Coder-30B MoE AWQ (32K, best throughput)
-#   coder-next    Qwen3-Coder-Next-80B MoE+DeltaNet AWQ (128K)
-#   gemma4        Gemma 4 26B MoE AWQ (4K, GPTQ forced-routing)
-#   gemma4-31b    Gemma 4 31B Dense AWQ (4K, needs GPTQ calibration)
-#   qwen35        Qwen3.5-27B DeltaNet AWQ (262K, currently broken)
-#   coder-30b-fp8 Qwen3-Coder-30B FP8 (blocked by comgr bug)
-#   qwen35-fp8    Qwen3.5-27B FP8 (blocked by comgr bug)
-#   gemma4-bf16   Gemma 4 26B BF16 (diagnostic, no quantization)
+#   devstral       Devstral-24B AWQ (32K context, best all-round)
+#   coder-30b      Qwen3-Coder-30B MoE AWQ (32K, best throughput)
+#   coder-next     Qwen3-Coder-Next-80B MoE+DeltaNet AWQ (128K)
+#   coder-next-ream Qwen3-Coder-Next REAM 60B AWQ (128K, pruned 80→60B)
+#   glm45-air      GLM-4.5-Air REAP 82B MoE AWQ (32K)
+#   gemma4         Gemma 4 26B MoE AWQ (4K, GPTQ forced-routing)
+#   gemma4-31b     Gemma 4 31B Dense AWQ (4K, needs GPTQ calibration)
+#   qwen35         Qwen3.5-27B DeltaNet AWQ (262K)
+#   coder-30b-fp8  Qwen3-Coder-30B FP8 (blocked by comgr bug)
+#   qwen35-fp8     Qwen3.5-27B FP8 (blocked by comgr bug)
+#   gemma4-bf16    Gemma 4 26B BF16 (diagnostic, no quantization)
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,6 +61,19 @@ apply_preset() {
             MODEL="${MODEL:-$MODELS_DIR/Qwen3-Coder-Next-AWQ}"
             CTX=131072; MAX_RUNNING=64; CHUNKED=8192; DECODE_STEPS=32
             MAMBA_CACHE="--max-mamba-cache-size 10"
+            WATCHDOG=1800
+            ;;
+        coder-next-ream)
+            MODEL="${MODEL:-$MODELS_DIR/Qwen3-Coder-Next-REAM-AWQ-4bit}"
+            QUANT="compressed-tensors"
+            CTX=32768; MAX_RUNNING=32; CHUNKED=8192; DECODE_STEPS=24
+            MAMBA_CACHE="--max-mamba-cache-size 10"
+            WATCHDOG=1800
+            ;;
+        glm45-air)
+            MODEL="${MODEL:-$MODELS_DIR/GLM-4.5-Air-REAP-82B-A12B-AWQ-4bit}"
+            QUANT="compressed-tensors"
+            CTX=32768; MAX_RUNNING=32; CHUNKED=4096; DECODE_STEPS=8
             WATCHDOG=1800
             ;;
         gemma4)

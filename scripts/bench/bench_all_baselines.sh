@@ -26,6 +26,8 @@ declare -A MODEL_LAUNCH=(
     ["coder-30b"]="coder-30b"
     ["gemma4"]="gemma4"
     ["coder-next"]="coder-next"
+    ["coder-next-ream"]="coder-next-ream"
+    ["glm45-air"]="glm45-air"
     ["qwen35"]="qwen35"
 )
 declare -A MODEL_DIR=(
@@ -33,6 +35,8 @@ declare -A MODEL_DIR=(
     ["coder-30b"]="coder-30b-awq"
     ["gemma4"]="gemma4-26b-awq"
     ["coder-next"]="coder-next-80b-awq"
+    ["coder-next-ream"]="coder-next-ream-60b-awq"
+    ["glm45-air"]="glm45-air-82b-awq"
     ["qwen35"]="qwen35-27b-awq"
 )
 declare -A MODEL_MAX_CTX=(
@@ -40,6 +44,8 @@ declare -A MODEL_MAX_CTX=(
     ["coder-30b"]=32768
     ["gemma4"]=4096
     ["coder-next"]=8192
+    ["coder-next-ream"]=32768
+    ["glm45-air"]=32768
     ["qwen35"]=262144
 )
 declare -A MODEL_CONC_LEVELS=(
@@ -47,6 +53,8 @@ declare -A MODEL_CONC_LEVELS=(
     ["coder-30b"]="1 2 4 8 16 32"
     ["gemma4"]="1 2 4 8 16 32"
     ["coder-next"]="1 2 4 8"
+    ["coder-next-ream"]="1 2 4 8 16"
+    ["glm45-air"]="1 2 4 8 16 32"
     ["qwen35"]="1 2 4 8"
 )
 
@@ -275,7 +283,7 @@ kill_server() {
 
 # Determine which models to run
 if [ "$MODEL_FILTER" = "all" ]; then
-    MODELS_TO_RUN=("devstral" "coder-30b" "gemma4" "coder-next" "qwen35")
+    MODELS_TO_RUN=("devstral" "coder-30b" "gemma4" "coder-next" "coder-next-ream" "glm45-air" "qwen35")
 else
     MODELS_TO_RUN=("$MODEL_FILTER")
 fi

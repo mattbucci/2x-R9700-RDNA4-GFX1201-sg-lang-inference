@@ -19,6 +19,8 @@ scripts/build_awq_gemv.sh --env X      # HIP GEMV kernel (required for MoE)
 scripts/launch.sh devstral             # Devstral 24B AWQ
 scripts/launch.sh coder-30b            # Coder-30B MoE AWQ
 scripts/launch.sh coder-next           # Coder-Next 80B AWQ
+scripts/launch.sh coder-next-ream      # Coder-Next REAM 60B AWQ (pruned)
+scripts/launch.sh glm45-air            # GLM-4.5-Air REAP 82B MoE AWQ
 scripts/launch.sh gemma4               # Gemma 4 26B MoE AWQ
 scripts/launch.sh gemma4-31b           # Gemma 4 31B Dense AWQ
 scripts/launch.sh qwen35               # Qwen3.5-27B DeltaNet AWQ
