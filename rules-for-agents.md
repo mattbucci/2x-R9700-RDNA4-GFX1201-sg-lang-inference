@@ -25,6 +25,13 @@ used ONLY for comparison benchmarks — never as the primary serving solution.
   `LD_LIBRARY_PATH` for libc10.so and `PYTHONPATH` for HIP GEMV kernel
 - `@torch.compile` stalls 30+ min on ROCm — disabled in patches
 
+### Triton Cache
+- Triton kernels compile on first use for each unique shape — this takes 2+ seconds per kernel
+- **Never clear the Triton cache** (`~/.triton/cache/` or `$TRITON_CACHE_DIR`) without expecting cold-start latency
+- After clearing cache, the first ~10 requests will be extremely slow (2s+ per token) as kernels recompile
+- Always warm the cache before benchmarking: send several varied requests first
+- A cold Triton cache can make 35 tok/s appear as 0.5 tok/s — this is NOT a regression
+
 ### GPU Recovery
 - After hang/reset, wait 10-15 seconds before retrying
 - Check `dmesg` for amdgpu reset messages
