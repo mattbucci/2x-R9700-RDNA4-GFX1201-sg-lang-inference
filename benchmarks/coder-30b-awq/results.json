@@ -1,116 +1,120 @@
 {
-  "model": "Coder-30B AWQ MoE",
+  "model": "coder-30b",
   "engine": "SGLang",
   "hardware": "2x R9700 TP=2",
-  "timestamp": "2026-04-11 18:32:25",
-  "output_tokens": 100,
+  "timestamp": "2026-04-11 23:27:57",
+  "method": "sglang.bench_serving (TPOT-based)",
+  "output_tokens": 50,
   "context_sweep": [
     {
       "context": 128,
-      "prompt_tokens": 65,
-      "completion_tokens": 44,
-      "elapsed": 1.56,
-      "tok_per_sec": 28.2
+      "input_len": 64,
+      "tpot_ms": 33.68,
+      "tok_per_sec": 29.7,
+      "ttft_ms": 55.52,
+      "throughput": 29.18
     },
     {
       "context": 256,
-      "prompt_tokens": 129,
-      "completion_tokens": 44,
-      "elapsed": 1.72,
-      "tok_per_sec": 25.6
+      "input_len": 128,
+      "tpot_ms": 33.47,
+      "tok_per_sec": 29.9,
+      "ttft_ms": 53.49,
+      "throughput": 29.41
     },
     {
       "context": 512,
-      "prompt_tokens": 257,
-      "completion_tokens": 50,
-      "elapsed": 1.77,
-      "tok_per_sec": 28.3
+      "input_len": 256,
+      "tpot_ms": 34.27,
+      "tok_per_sec": 29.2,
+      "ttft_ms": 55.04,
+      "throughput": 28.71
     },
     {
       "context": 1024,
-      "prompt_tokens": 513,
-      "completion_tokens": 56,
-      "elapsed": 2.05,
-      "tok_per_sec": 27.3
+      "input_len": 512,
+      "tpot_ms": 33.65,
+      "tok_per_sec": 29.7,
+      "ttft_ms": 53.76,
+      "throughput": 29.23
     },
     {
       "context": 2048,
-      "prompt_tokens": 1025,
-      "completion_tokens": 96,
-      "elapsed": 3.57,
-      "tok_per_sec": 26.9
+      "input_len": 1024,
+      "tpot_ms": 34.33,
+      "tok_per_sec": 29.1,
+      "ttft_ms": 51.96,
+      "throughput": 28.73
     },
     {
       "context": 4096,
-      "prompt_tokens": 2049,
-      "completion_tokens": 95,
-      "elapsed": 3.86,
-      "tok_per_sec": 24.6
+      "input_len": 2048,
+      "tpot_ms": 33.51,
+      "tok_per_sec": 29.8,
+      "ttft_ms": 52.2,
+      "throughput": 29.38
     },
     {
       "context": 8192,
-      "prompt_tokens": 4097,
-      "completion_tokens": 51,
-      "elapsed": 3.16,
-      "tok_per_sec": 16.1
+      "input_len": 4096,
+      "tpot_ms": 33.33,
+      "tok_per_sec": 30.0,
+      "ttft_ms": 51.06,
+      "throughput": 29.55
     },
     {
       "context": 16384,
-      "prompt_tokens": 8193,
-      "completion_tokens": 32,
-      "elapsed": 4.33,
-      "tok_per_sec": 7.4
+      "input_len": 8192,
+      "tpot_ms": 33.93,
+      "tok_per_sec": 29.5,
+      "ttft_ms": 61.06,
+      "throughput": 28.87
     },
     {
       "context": 32768,
-      "prompt_tokens": 16385,
-      "completion_tokens": 31,
-      "elapsed": 7.84,
-      "tok_per_sec": 4.0
+      "input_len": 16384,
+      "tpot_ms": 36.15,
+      "tok_per_sec": 27.7,
+      "ttft_ms": 79.91,
+      "throughput": 26.85
     }
   ],
   "throughput_sweep": [
     {
       "concurrency": 1,
-      "total_tokens": 100,
-      "elapsed": 3.39,
-      "tok_per_sec": 29.5,
-      "errors": 0
+      "tok_per_sec": 38.28,
+      "tpot_ms": 71.55,
+      "ttft_ms": 214.04
     },
     {
       "concurrency": 2,
-      "total_tokens": 200,
-      "elapsed": 6.9,
-      "tok_per_sec": 29.0,
-      "errors": 0
+      "tok_per_sec": 43.71,
+      "tpot_ms": 67.02,
+      "ttft_ms": 106.5
     },
     {
       "concurrency": 4,
-      "total_tokens": 338,
-      "elapsed": 6.72,
-      "tok_per_sec": 50.3,
-      "errors": 0
+      "tok_per_sec": 46.66,
+      "tpot_ms": 68.54,
+      "ttft_ms": 258.29
     },
     {
       "concurrency": 8,
-      "total_tokens": 738,
-      "elapsed": 7.01,
-      "tok_per_sec": 105.3,
-      "errors": 0
+      "tok_per_sec": 104.92,
+      "tpot_ms": 83.62,
+      "ttft_ms": 520.05
     },
     {
       "concurrency": 16,
-      "total_tokens": 1476,
-      "elapsed": 7.64,
-      "tok_per_sec": 193.2,
-      "errors": 0
+      "tok_per_sec": 160.81,
+      "tpot_ms": 85.31,
+      "ttft_ms": 796.15
     },
     {
       "concurrency": 32,
-      "total_tokens": 2952,
-      "elapsed": 8.88,
-      "tok_per_sec": 332.3,
-      "errors": 0
+      "tok_per_sec": 166.34,
+      "tpot_ms": 149.28,
+      "ttft_ms": 1974.52
     }
   ]
 }

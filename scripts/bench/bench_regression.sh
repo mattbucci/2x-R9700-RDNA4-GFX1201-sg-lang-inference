@@ -65,16 +65,18 @@ run_bench() {
     echo "=== $key ==="
 
     # Single user (conc=1): measures raw TPOT
-    echo "  Single user (256 in, 256 out)..."
+    # Use 128 in / 50 out — same as comprehensive benchmark baseline point
+    echo "  Single user (128 in, 50 out)..."
     local single_out
-    single_out=$(bench_one "$key" 1 256 256 4)
+    single_out=$(bench_one "$key" 1 128 50 1)
     read -r tpot1 tp1 ttft1 <<< "$(extract_metrics "$single_out")"
     echo "    TPOT: ${tpot1}ms  Throughput: ${tp1} tok/s  TTFT: ${ttft1}ms"
 
     # Multi user: measures throughput scaling
-    echo "  Multi user @8 (256 in, 256 out)..."
+    # Use 128 in / 50 out, 16 prompts at max rate — same as comprehensive
+    echo "  Multi user @16 (128 in, 50 out)..."
     local multi_out
-    multi_out=$(bench_one "$key" 8 256 256 32)
+    multi_out=$(bench_one "$key" 16 128 50 32)
     read -r tpot8 tp8 ttft8 <<< "$(extract_metrics "$multi_out")"
     echo "    TPOT: ${tpot8}ms  Throughput: ${tp8} tok/s  TTFT: ${ttft8}ms"
 

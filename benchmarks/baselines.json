@@ -1,11 +1,27 @@
 {
   "devstral": {
-    "single_tpot_ms": 28.27,
-    "single_throughput": 35.0,
-    "single_ttft_ms": 35.45,
-    "multi8_tpot_ms": 0,
-    "multi8_throughput": 0,
-    "multi8_ttft_ms": 0,
-    "note": "Measured with sglang.bench_serving, 128in/50out, single request, warm Triton cache"
+    "single_tpot_ms": 27.15,
+    "single_throughput": 36.8,
+    "peak_throughput": 0.0
+  },
+  "coder-30b": {
+    "single_tpot_ms": 33.68,
+    "single_throughput": 29.7,
+    "peak_throughput": 166.34
+  },
+  "gemma4": {
+    "single_tpot_ms": 33.08,
+    "single_throughput": 30.2,
+    "peak_throughput": 27.2
+  },
+  "coder-next": {
+    "single_tpot_ms": 41.31,
+    "single_throughput": 24.2,
+    "peak_throughput": 52.87
+  },
+  "qwen35": {
+    "single_tpot_ms": 38.34,
+    "single_throughput": 26.1,
+    "peak_throughput": 0.0
   }
 }

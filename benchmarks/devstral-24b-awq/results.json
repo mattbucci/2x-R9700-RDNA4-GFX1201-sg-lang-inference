@@ -1,137 +1,73 @@
 {
-  "model": "Devstral-24B AWQ",
+  "model": "devstral",
   "engine": "SGLang",
   "hardware": "2x R9700 TP=2",
-  "timestamp": "2026-04-11 18:28:08",
-  "output_tokens": 100,
+  "timestamp": "2026-04-11 23:48:48",
+  "method": "sglang.bench_serving (TPOT-based)",
+  "output_tokens": 50,
   "context_sweep": [
     {
       "context": 128,
-      "prompt_tokens": 60,
-      "completion_tokens": 65,
-      "elapsed": 4.07,
-      "tok_per_sec": 16.0
+      "input_len": 64,
+      "tpot_ms": 27.15,
+      "tok_per_sec": 36.8,
+      "ttft_ms": 48.17,
+      "throughput": 34.35
     },
     {
       "context": 256,
-      "prompt_tokens": 124,
-      "completion_tokens": 75,
-      "elapsed": 4.35,
-      "tok_per_sec": 17.3
+      "input_len": 128,
+      "tpot_ms": 26.73,
+      "tok_per_sec": 37.4,
+      "ttft_ms": 58.47,
+      "throughput": 34.39
     },
     {
       "context": 512,
-      "prompt_tokens": 252,
-      "completion_tokens": 73,
-      "elapsed": 4.31,
-      "tok_per_sec": 16.9
+      "input_len": 256,
+      "tpot_ms": 26.92,
+      "tok_per_sec": 37.1,
+      "ttft_ms": 58.27,
+      "throughput": 34.4
     },
     {
       "context": 1024,
-      "prompt_tokens": 508,
-      "completion_tokens": 75,
-      "elapsed": 4.43,
-      "tok_per_sec": 16.9
+      "input_len": 512,
+      "tpot_ms": 26.84,
+      "tok_per_sec": 37.3,
+      "ttft_ms": 67.75,
+      "throughput": 34.39
     },
     {
       "context": 2048,
-      "prompt_tokens": 1020,
-      "completion_tokens": 38,
-      "elapsed": 3.48,
-      "tok_per_sec": 10.9
+      "input_len": 1024,
+      "tpot_ms": 26.9,
+      "tok_per_sec": 37.2,
+      "ttft_ms": 63.54,
+      "throughput": 34.41
     },
     {
       "context": 4096,
-      "prompt_tokens": 2044,
-      "completion_tokens": 38,
-      "elapsed": 3.73,
-      "tok_per_sec": 10.2
+      "input_len": 2048,
+      "tpot_ms": 28.49,
+      "tok_per_sec": 35.1,
+      "ttft_ms": 50.67,
+      "throughput": 33.7
     },
     {
       "context": 8192,
-      "prompt_tokens": 4092,
-      "completion_tokens": 71,
-      "elapsed": 5.3,
-      "tok_per_sec": 13.4
-    },
-    {
-      "context": 16384,
-      "prompt_tokens": 8188,
-      "completion_tokens": 57,
-      "elapsed": 5.94,
-      "tok_per_sec": 9.6
-    },
-    {
-      "context": 32768,
-      "prompt_tokens": 16380,
-      "completion_tokens": 38,
-      "elapsed": 9.84,
-      "tok_per_sec": 3.9
-    },
-    {
-      "context": 65536,
-      "prompt_tokens": 32764,
-      "completion_tokens": 38,
-      "elapsed": 17.3,
-      "tok_per_sec": 2.2
-    },
-    {
-      "context": 131072,
-      "prompt_tokens": 65532,
-      "completion_tokens": 80,
-      "elapsed": 40.26,
-      "tok_per_sec": 2.0
-    },
-    {
-      "context": 262144,
-      "prompt_tokens": 131068,
-      "completion_tokens": 85,
-      "elapsed": 96.48,
-      "tok_per_sec": 0.9
+      "input_len": 4096,
+      "tpot_ms": 28.09,
+      "tok_per_sec": 35.6,
+      "ttft_ms": 63.85,
+      "throughput": 33.78
     }
   ],
   "throughput_sweep": [
     {
       "concurrency": 1,
-      "total_tokens": 100,
-      "elapsed": 5.06,
-      "tok_per_sec": 19.7,
-      "errors": 0
-    },
-    {
-      "concurrency": 2,
-      "total_tokens": 200,
-      "elapsed": 225.53,
-      "tok_per_sec": 0.9,
-      "errors": 0
-    },
-    {
-      "concurrency": 4,
-      "total_tokens": 366,
-      "elapsed": 225.2,
-      "tok_per_sec": 1.6,
-      "errors": 0
-    },
-    {
-      "concurrency": 8,
-      "total_tokens": 800,
-      "elapsed": 224.84,
-      "tok_per_sec": 3.6,
-      "errors": 0
-    },
-    {
-      "concurrency": 16,
-      "total_tokens": 1484,
-      "elapsed": 225.14,
-      "tok_per_sec": 6.6,
-      "errors": 0
-    },
-    {
-      "concurrency": 32,
-      "total_tokens": 2968,
-      "elapsed": 224.1,
-      "tok_per_sec": 13.2,
-      "errors": 0
+      "tok_per_sec": 0,
+      "error": "OOM"
     }
   ]
 }

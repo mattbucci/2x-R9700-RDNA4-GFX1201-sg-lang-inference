@@ -69,22 +69,23 @@ All models run on SGLang with RDNA4 patches. vLLM/llama.cpp used for comparison 
 
 Primary use case: agent and coding workflows with maximum context at fast decode speeds.
 
-| Model | Type | Max context | 1-user tok/s | Launch | Status |
-|-------|------|:----------:|:------------:|:------:|:------:|
-| Coder-30B AWQ | MoE (128 experts) | 32K | 28 | `launch.sh coder-30b` | Working |
-| Gemma 4 26B AWQ | MoE (128 experts) | 4K | 27 | `launch.sh gemma4` | Working |
-| Coder-Next 80B AWQ | MoE+DeltaNet (512 experts) | 8K | 24 | `launch.sh coder-next` | Working |
-| Qwen3.5-27B AWQ | DeltaNet hybrid | 262K | — | `launch.sh qwen35` | Working |
-| Devstral-24B AWQ | Dense | 32K | 78 | `launch.sh devstral` | Working |
+| Model | Type | Max context | 1-user tok/s | TPOT | Launch | Status |
+|-------|------|:----------:|:------------:|:----:|:------:|:------:|
+| Devstral-24B AWQ | Dense | 32K | 37 | 27ms | `launch.sh devstral` | Working |
+| Coder-30B AWQ | MoE (128 experts) | 32K | 30 | 34ms | `launch.sh coder-30b` | Working |
+| Gemma 4 26B AWQ | MoE (128 experts) | 4K | 30 | 33ms | `launch.sh gemma4` | Working |
+| Qwen3.5-27B AWQ | DeltaNet hybrid | 16K | 26 | 38ms | `launch.sh qwen35` | Working |
+| Coder-Next 80B AWQ | MoE+DeltaNet (512 experts) | 8K | 24 | 41ms | `launch.sh coder-next` | Working |
+
+All numbers measured with `sglang.bench_serving` (TPOT = Time Per Output Token, decode only).
 
 ### Batch throughput (multi-user)
 
 | Model | Peak total tok/s | Max conc | Context | Status |
 |-------|:----------------:|:--------:|:-------:|:------:|
-| Devstral-24B AWQ | 1,266 @64 | 64 | 32K | Working |
-| Coder-30B AWQ | 332 @32 | 32 | 32K | Working |
-| Gemma 4 26B AWQ | 165 @32 | 32 | 4K | Working |
-| Coder-Next 80B AWQ | 25 @8 | 8 (OOM@16) | 8K | Working |
+| Coder-30B AWQ | 166 @32 | 32 | 32K | Working |
+| Coder-Next 80B AWQ | 53 @8 | 8 (OOM@16) | 8K | Working |
+| Gemma 4 26B AWQ | 27 @32 | 32 | 4K | Working |
 
 **Weights:** Community AWQ checkpoints work for standard architectures (Coder-30B, Coder-Next) but fail for others:
 - **Devstral** — community AWQ includes a BOS token that causes `<unk>` output, and vision is broken from quantization damaging the vision-language alignment

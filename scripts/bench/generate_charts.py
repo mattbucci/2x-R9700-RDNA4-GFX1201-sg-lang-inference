@@ -64,7 +64,10 @@ def load_results(model_key):
 
 def make_context_chart(model_key, meta, results, out_dir):
     """Single-user tok/s vs context length, unified 256K x-axis."""
-    sweep = results["context_sweep"]
+    sweep = [p for p in results["context_sweep"] if "error" not in p and p.get("tok_per_sec", 0) > 0]
+    if not sweep:
+        print(f"  SKIP context chart (no valid data)")
+        return
     ctx = [p["context"] for p in sweep]
     toks = [p["tok_per_sec"] for p in sweep]
 
