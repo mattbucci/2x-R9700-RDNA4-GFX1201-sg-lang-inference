@@ -64,8 +64,7 @@ apply_preset() {
             WATCHDOG=1800
             ;;
         coder-next-ream)
-            MODEL="${MODEL:-$MODELS_DIR/Qwen3-Coder-Next-REAM-AWQ-4bit}"
-            QUANT="compressed-tensors"
+            MODEL="${MODEL:-$MODELS_DIR/Qwen3-Coder-Next-REAM-AWQ}"
             CTX=32768; MAX_RUNNING=32; CHUNKED=8192; DECODE_STEPS=24
             MAMBA_CACHE="--max-mamba-cache-size 10"
             WATCHDOG=1800
