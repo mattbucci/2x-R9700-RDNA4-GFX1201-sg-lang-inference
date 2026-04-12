@@ -24,7 +24,9 @@ scripts/launch.sh glm45-air            # GLM-4.5-Air REAP 82B MoE AWQ
 scripts/launch.sh gemma4               # Gemma 4 26B MoE AWQ
 scripts/launch.sh gemma4-31b           # Gemma 4 31B Dense AWQ
 scripts/launch.sh qwen35               # Qwen3.5-27B DeltaNet AWQ
+scripts/launch.sh qwen35-moe           # Qwen3.5-35B-A3B MoE+DeltaNet REAM AWQ
 scripts/quantize/quantize_gemma4_gptq.sh  # Gemma 4 GPTQ calibration
+scripts/quantize/quantize_qwen35_moe_ream.sh  # Qwen3.5-35B MoE REAM/REAP AWQ pipeline
 ```
 
 ## Critical Rules

@@ -17,6 +17,7 @@
 #   gemma4         Gemma 4 26B MoE AWQ (4K, GPTQ forced-routing)
 #   gemma4-31b     Gemma 4 31B Dense AWQ (8K, BF16 required)
 #   qwen35         Qwen3.5-27B DeltaNet AWQ (262K)
+#   qwen35-moe     Qwen3.5-35B-A3B MoE+DeltaNet AWQ (REAM/REAP compressed)
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -84,6 +85,13 @@ apply_preset() {
             DTYPE="bfloat16"  # BF16 required: Gemma was never designed for FP16 inference
             CTX=8192; MAX_RUNNING=8; CHUNKED=4096
             WARMUP="--skip-server-warmup"; WATCHDOG=1800
+            OVERLAP=""
+            ;;
+        qwen35-moe)
+            MODEL="${MODEL:-$MODELS_DIR/Qwen3.5-35B-A3B-REAM-BF16-AWQ}"
+            CTX=32768; MAX_RUNNING=32; CHUNKED=4096; DECODE_STEPS=8
+            MAMBA_CACHE="--max-mamba-cache-size 10"
+            REASONING="--reasoning-parser qwen3"
             OVERLAP=""
             ;;
         qwen35)

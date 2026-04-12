@@ -16,6 +16,7 @@ Each shell script runs the full pipeline for one model: calibration, conversion,
 | `quantize_qwen35_llmcompressor.sh` | Qwen3.5-27B | Skips DeltaNet layers (BF16) |
 | `quantize_gemma4_gptq.sh` | Gemma 4 26B MoE | Forced-routing calibration for 128 experts |
 | `quantize_gemma4_31b_gptq.sh` | Gemma 4 31B Dense | Standard GPTQ, no monkey-patching |
+| `quantize_qwen35_moe_ream.sh` | Qwen3.5-35B-A3B REAM/REAP | DeltaNet-aware, full pipeline |
 
 ## Calibration (Python)
 
@@ -26,6 +27,7 @@ Each shell script runs the full pipeline for one model: calibration, conversion,
 | `quantize_gemma4_gptq.py` | Gemma 4 MoE GPTQ with expert unfusing |
 | `quantize_gemma4_gptq_step1.py` | Gemma 4 step 1: GPTQ calibration |
 | `quantize_moe_llmcompressor.py` | Generic MoE llmcompressor config |
+| `quantize_qwen35_moe_ream.py` | Qwen3.5-35B-A3B REAM/REAP (DeltaNet-aware) |
 
 ## CT → AWQ Conversion
 
@@ -37,6 +39,10 @@ Each converter handles model-specific weight naming and layout.
 | `convert_qwen35_ct_to_awq.py` | Qwen3.5 | DeltaNet/SSM layers kept BF16 |
 | `convert_gemma4_ct_to_awq.py` | Gemma 4 | Expert naming regex, router dequant |
 | `convert_moe_ct_to_awq.py` | Generic MoE | CLI args: `src_dir`, `dst_dir`, `--group-size` |
+
+## MoE Expert Compression (REAM/REAP)
+
+See [REAM.md](REAM.md) for full documentation on shrinking MoE models by reducing expert count.
 
 ## Post-Processing
 
