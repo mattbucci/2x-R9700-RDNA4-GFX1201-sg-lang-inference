@@ -82,8 +82,9 @@ apply_preset() {
             OVERLAP=""
             ;;
         gemma4-31b)
-            MODEL="${MODEL:-$MODELS_DIR/gemma-4-31B-it-AWQ-GPTQ}"
-            CTX=4096; MAX_RUNNING=1; CHUNKED=2048
+            MODEL="${MODEL:-$MODELS_DIR/gemma-4-31B-it-AWQ-calibrated}"
+            TOKENIZER="--tokenizer-path $MODELS_DIR/gemma-4-31B-it-BF16"
+            CTX=8192; MAX_RUNNING=8; CHUNKED=4096
             WARMUP="--skip-server-warmup"; WATCHDOG=1800
             OVERLAP=""
             ;;
