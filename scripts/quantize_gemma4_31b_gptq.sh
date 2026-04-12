@@ -101,8 +101,7 @@ else
     echo "=== Step 2: Convert compressed-tensors → native AWQ ==="
     init_conda
     conda activate sglang-triton36
-    CT_INPUT="$CT_OUTPUT" AWQ_OUTPUT="$AWQ_OUTPUT" \
-        python "$SCRIPT_DIR/convert_gemma4_ct_to_awq.py"
+    python "$SCRIPT_DIR/convert_gemma4_ct_to_awq.py" "$CT_OUTPUT" "$AWQ_OUTPUT"
 fi
 
 echo ""

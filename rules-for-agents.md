@@ -1,5 +1,9 @@
 # Rules for AI Agents
 
+## Inference Engine
+**All inference MUST use SGLang** with our RDNA4 patches. vLLM Docker and llama.cpp are
+used ONLY for comparison benchmarks — never as the primary serving solution.
+
 ## Hardware
 - 2x AMD Radeon AI PRO R9700 (gfx1201, RDNA4, Wave32)
 - 32 GB VRAM each, ROCm 7.2.1, Arch Linux
@@ -17,42 +21,103 @@
 - Always: `--disable-cuda-graph --disable-custom-all-reduce --disable-overlap-schedule`
 - Always: `--attention-backend triton` (or `torch_native` as fallback)
 - Always: `PYTHONDONTWRITEBYTECODE=1` and clear `__pycache__` before testing changes
+- Always: source `scripts/common.sh`, `activate_conda`, `setup_rdna4_env` — this sets
+  `LD_LIBRARY_PATH` for libc10.so and `PYTHONPATH` for HIP GEMV kernel
 - `@torch.compile` stalls 30+ min on ROCm — disabled in patches
 
 ### GPU Recovery
 - After hang/reset, wait 10-15 seconds before retrying
 - Check `dmesg` for amdgpu reset messages
 
-## GPTQ Calibration
-- Use a **clean conda env** for quantization — llmcompressor/auto-gptq have strict
-  dependency requirements that conflict with the main sglang-triton36 env.
-- Existing examples: `scripts/quantize_devstral_llmcompressor.sh`, `scripts/quantize_qwen35_llmcompressor.sh`
-- Pattern: clean env runs llmcompressor oneshot → compressed-tensors output → convert to AWQ in main env
+## Quantization Pipeline
+
+All models served on SGLang use **AWQ 4-bit** format. The pipeline to create quantized models is:
+
+### Step 1: GPTQ calibration (clean conda env, CPU)
+```
+BF16 model → llmcompressor oneshot GPTQ → compressed-tensors (CT) format
+```
+- **Clean conda env** (`gemma4-quant` or similar) — llmcompressor conflicts with sglang deps
 - Install: `pip install llmcompressor transformers==4.57.6 compressed-tensors accelerate datasets`
-- For MoE models with fused expert Parameters (Gemma4TextExperts): monkey-patch to
-  per-expert nn.Linear BEFORE loading, otherwise GPTQ skips expert calibration (RTN fallback)
-- Dense models (no MoE) need no monkey-patch — all layers are nn.Linear
-- CPU-only is fine for calibration: `CUDA_VISIBLE_DEVICES=""`
+- CPU-only: `CUDA_VISIBLE_DEVICES=""`
+- Output: compressed-tensors safetensors with `weight_packed` + `weight_scale` per layer
+
+### Step 2: CT → AWQ conversion (sglang-triton36 env)
+```
+compressed-tensors → native AWQ format (qweight + scales + qzeros)
+```
+- Use `scripts/convert_gemma4_ct_to_awq.py` or model-specific converter
+- **Clamp scales** to [-65504, 65504] before `.to(torch.float16)` to prevent inf overflow
+- Verify output: `torch.isinf(scales).any()` must be False for every tensor
+
+### Step 3: Post-processing fixes (if needed)
+```
+AWQ checkpoint → fix naming, dequant router, verify
+```
+- Expert naming: must be `experts.{id}.{proj}.{suffix}` (SGLang format)
+- Router: if quantized by GPTQ, dequant back to BF16
+- Use `scripts/fix_gemma4_awq_checkpoint.py` as reference
+
+### Dense model calibration
+- No monkey-patching needed — all layers are nn.Linear
+- 128 samples × 512 tokens is sufficient
+- Examples: `scripts/quantize_devstral_llmcompressor.sh`, `scripts/quantize_qwen35_llmcompressor.sh`
+
+### MoE model calibration — CRITICAL
+Standard GPTQ/AWQ **FAILS** for MoE models due to expert routing imbalance (MoEQuant, ICML 2025):
+1. **Inter-expert imbalance**: uneven routing → rarely-activated experts get zero/garbage
+   calibration. We hit this on Gemma 4 26B: expert 0 calibrated, experts 1-127 got inf scales.
+2. **Intra-expert imbalance**: samples have varying correlation with different experts.
+
+**MoE calibration rules:**
+- Use **at least 512 calibration samples** with sequence length ≥1024
+- **Verify all experts receive calibration data** — check CT output scales for inf/nan/zero
+- For fused expert Parameters (Gemma4TextExperts): monkey-patch to per-expert nn.Linear
+  BEFORE loading, otherwise GPTQ skips expert calibration
+- After conversion, **always check scales**: `torch.isinf(scales).any()` must be False
+- Consider **GPTQModel** with `MoE.Routing` FailSafe mode for expert-balanced calibration
+- Consider **MoEQuant EBSS** (Expert-Balanced Self-Sampling) for proper MoE quantization
+- Example: `scripts/quantize_gemma4_gptq.sh` → `quantize_gemma4_gptq_step1.py` → `convert_gemma4_ct_to_awq.py`
+
+### DeltaNet/Mamba/SSM layers — DO NOT quantize to INT4
+Models with recurrent state (DeltaNet, Mamba, SSM) accumulate quantization error across
+tokens via `S(t) = gating * S(t-1) + delta`. INT4 quantization destroys output quality.
+- **Coder-Next 80B / Qwen3.5-27B**: DeltaNet + attention layers are intentionally BF16
+- Community AWQ checkpoints use `modules_to_not_convert` to skip these — this is correct
+- The resulting BF16 weight reads (~2.4 GB/token for 36 DeltaNet layers) limit decode
+  speed to ~15 tok/s on our hardware — this is the architectural limit, not a bug
+
+### AWQ checkpoint format rules
+- Expert naming: `experts.{id}.{proj}.{suffix}`, not `experts.{proj}.{id}.{suffix}`
+- Router projection: dequant to BF16 if GPTQ quantized it (SGLang creates router unquantized)
+- Activation fn: `AWQTritonMoEMethod` reads `MoeRunnerConfig.activation` — Gemma4=gelu, Qwen=silu
 
 ## Benchmarking
 - Concurrency sweep: 1, 4, 8, 16, 32
 - Save to `benchmarks/` as `{model}_{quant}_{engine}.txt` with full env header
 - Run `scripts/eval_comprehensive.py` after kernel changes
 - Always use timeouts on GPU/Docker commands
+- DeltaNet hybrid models: ~15 tok/s single-user regardless of concurrency (VRAM-limited)
 
 ## Model Status
 
-### Working
-| Model | Engine | tok/s @32 |
-|-------|--------|-----------|
-| Devstral-24B AWQ | SGLang | 841 |
-| Qwen3.5-27B AWQ | SGLang | 129 |
-| Coder-30B AWQ MoE | SGLang | 169 |
-| Coder-30B FP8 | vLLM Docker | 1185 |
+### Working (SGLang, benchmarked 2026-04-11)
+| Model | 1-user tok/s | @32 conc | Max ctx | Notes |
+|-------|:------------:|:--------:|:-------:|-------|
+| Devstral-24B AWQ | 17 (262K) / 78 (32K) | 13 / 841 | 262K | Dense, context-VRAM tradeoff |
+| Coder-30B AWQ MoE | 28 | 332 | 32K | 128 experts, best MoE throughput |
+| Gemma 4 26B AWQ MoE | 27 | 165 | 4K | 128 experts, GPTQ forced-routing |
+| Coder-Next 80B AWQ | 24 | 25 | 8K | DeltaNet BF16 = bandwidth limit |
 
-### Degraded Quality
-- **Gemma 4 26B MoE**: AWQ working (weight loading fixed), RTN expert quantization causes artifacts. Fix: `scripts/quantize_gemma4_gptq.sh` (unfused expert GPTQ)
-- **Gemma 4 31B Dense**: cyankiwi AWQ loads + runs, but RTN quality. Fix: standard GPTQ calibration (no monkey-patch needed, all nn.Linear — easy win)
+### Comparison Benchmarks Only
+| Model | Engine | tok/s |
+|-------|--------|-------|
+| Coder-30B FP8 | vLLM Docker | 1,882 @64 |
+| Coder-Next 80B GGUF | llama.cpp Vulkan | 79 |
+
+### Needs Fix
+- **Qwen3.5-27B AWQ**: causal_conv1d shape mismatch at TP=2 (conv_states dim=5120 vs expected 10240)
+- **Gemma 4 31B Dense**: cyankiwi AWQ loads + runs, RTN quality. BF16 base not gated — can download + GPTQ.
 
 ### Blocked
-- **Coder-Next 80B**: Needs GPTQ calibration (~24h with disk offloading).
+- **FP8 MoE on SGLang**: Arch `comgr` invalid HSACO for FP8 WMMA on gfx1201.

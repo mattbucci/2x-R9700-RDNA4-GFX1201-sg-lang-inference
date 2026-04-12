@@ -134,7 +134,7 @@ for shard_idx, shard_path in enumerate(shard_files):
             # Step 3: Repack AWQ interleaved
             qweight = pack_4bit_to_int32_awq(unpacked_t)
             # Step 4: Transpose scales
-            scales = scale.T.contiguous().to(torch.float16)
+            scales = scale.T.contiguous().clamp(-65504, 65504).to(torch.float16)
             # Step 5: Create qzeros (symmetric: zero_point=8)
             num_groups = in_features // GROUP_SIZE
             num_out_packed = out_features // PACK_FACTOR
@@ -194,7 +194,7 @@ for shard_idx, shard_path in enumerate(shard_files):
                 qw = pack_4bit_to_int32_awq(unpacked_t)  # [in_dim//8, out_dim]
 
                 # Transpose scales [out_dim, num_groups] → [num_groups, out_dim]
-                sc = expert_scale.T.contiguous().to(torch.float16)
+                sc = expert_scale.T.contiguous().clamp(-65504, 65504).to(torch.float16)
 
                 # Create qzeros (symmetric quantization: zero_point=8)
                 num_groups = in_dim // GROUP_SIZE

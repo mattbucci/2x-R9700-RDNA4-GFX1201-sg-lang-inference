@@ -1,0 +1,57 @@
+Qwen3-Coder-Next-80B AWQ-4bit Benchmark
+========================================
+Engine:   SGLang v0.5.10 + RDNA4 patches
+Hardware: 2x AMD Radeon AI PRO R9700 (gfx1201), TP=2
+Weights:  ~/AI/models/Qwen3-Coder-Next-AWQ (community AWQ, 47GB)
+          23.14 GB/GPU, ~6 GB free for KV + SSM state
+Config:   --context-length 16384 --kv-cache-dtype fp8_e4m3
+          --max-mamba-cache-size 4 --disable-cuda-graph
+          --attention-backend triton --disable-overlap-schedule
+Date:     2026-04-11
+
+Model: 80B total / 3B active. 512 experts (10 active per token).
+       DeltaNet linear attention + 12 full attention layers.
+       Only MoE experts quantized (AWQ 4-bit); attention weights BF16.
+
+Single-User Context Length Sweep (100 output tokens)
+----------------------------------------------------
+Context  Time   Prompt  Compl  tok/s   TPOT
+128      6.7s   20      100    15.0    66.6ms
+512      7.0s   275     100    14.3    69.7ms
+1024     7.1s   531     100    14.2    70.7ms
+2048     7.7s   1043    100    13.0    77.1ms
+4096     7.9s   2067    100    12.6    79.3ms
+8192     9.9s   4115    100    10.1    99.3ms
+
+Throughput Sweep (200 output tokens)
+------------------------------------
+Concur  Time   Tokens  tok/s   Avg TPOT
+1       6.8s   103     15.2    65.7ms
+2       10.3s  155     15.0    133.4ms
+4       29.9s  444     14.9    269.0ms
+8       52.2s  781     14.9    535.2ms
+
+Notes:
+- Throughput is flat ~15 tok/s: SGLang auto-limits to 1 concurrent request
+  due to VRAM constraints (23GB model weights leaves only ~6GB)
+- DeltaNet decode TPOT is near-constant (~67ms) regardless of context
+- Context length only affects prefill time, not decode speed
+- OOM at 16K+ context on this configuration
+- Quality: excellent on code tasks, non-code may show repetition
+
+Performance analysis:
+- 15 tok/s is near the architectural limit for AWQ on this hardware
+- Community AWQ intentionally keeps DeltaNet+attention in BF16 (modules_to_not_convert)
+  because DeltaNet's recurrent state S(t) = g*S(t-1) + delta accumulates INT4
+  quantization error across tokens, destroying quality
+- Weight reads per decode token: 3,747 MB
+    DeltaNet BF16 (36 layers): 2,416 MB (64%)
+    MoE 10-active AWQ (48 layers): 816 MB (22%)
+    Shared expert BF16 (48 layers): 288 MB (8%)
+    Attention BF16 (12 layers): 228 MB (6%)
+- Theoretical TPOT at 1 TB/s: 3.75 ms (267 tok/s)
+- Actual TPOT: 65 ms (6% bandwidth efficiency)
+- Overhead: kernel launches (~4ms), TP allreduce (~2ms), DeltaNet SSM (~18ms),
+  Python/Triton scheduling (~15ms), memory patterns (~20ms)
+- llama.cpp Vulkan achieves 79 tok/s by quantizing everything (GGUF Q4_K_M)
+- REAM variant (cyankiwi) prunes 80B→60B, saves 25% VRAM, keeps DeltaNet BF16

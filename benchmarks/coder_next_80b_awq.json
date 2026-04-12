@@ -1,0 +1,88 @@
+{
+  "model": "Coder-Next-80B AWQ",
+  "engine": "SGLang",
+  "hardware": "2x R9700 TP=2",
+  "timestamp": "2026-04-11 18:38:18",
+  "output_tokens": 100,
+  "context_sweep": [
+    {
+      "context": 128,
+      "prompt_tokens": 65,
+      "completion_tokens": 100,
+      "elapsed": 4.13,
+      "tok_per_sec": 24.2
+    },
+    {
+      "context": 256,
+      "prompt_tokens": 129,
+      "completion_tokens": 100,
+      "elapsed": 4.14,
+      "tok_per_sec": 24.2
+    },
+    {
+      "context": 512,
+      "prompt_tokens": 257,
+      "completion_tokens": 100,
+      "elapsed": 4.27,
+      "tok_per_sec": 23.4
+    },
+    {
+      "context": 1024,
+      "prompt_tokens": 513,
+      "completion_tokens": 100,
+      "elapsed": 4.42,
+      "tok_per_sec": 22.6
+    },
+    {
+      "context": 2048,
+      "prompt_tokens": 1025,
+      "completion_tokens": 100,
+      "elapsed": 4.74,
+      "tok_per_sec": 21.1
+    },
+    {
+      "context": 4096,
+      "prompt_tokens": 2049,
+      "completion_tokens": 100,
+      "elapsed": 5.57,
+      "tok_per_sec": 18.0
+    },
+    {
+      "context": 8192,
+      "prompt_tokens": 4097,
+      "completion_tokens": 100,
+      "elapsed": 6.93,
+      "tok_per_sec": 14.4
+    }
+  ],
+  "throughput_sweep": [
+    {
+      "concurrency": 1,
+      "total_tokens": 100,
+      "elapsed": 4.12,
+      "tok_per_sec": 24.3,
+      "errors": 0
+    },
+    {
+      "concurrency": 2,
+      "total_tokens": 200,
+      "elapsed": 8.14,
+      "tok_per_sec": 24.6,
+      "errors": 0
+    },
+    {
+      "concurrency": 4,
+      "total_tokens": 359,
+      "elapsed": 14.6,
+      "tok_per_sec": 24.6,
+      "errors": 0
+    },
+    {
+      "concurrency": 8,
+      "total_tokens": 759,
+      "elapsed": 30.86,
+      "tok_per_sec": 24.6,
+      "errors": 0
+    }
+  ]
+}

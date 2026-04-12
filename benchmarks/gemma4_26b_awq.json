@@ -1,0 +1,95 @@
+{
+  "model": "Gemma4-26B AWQ MoE",
+  "engine": "SGLang",
+  "hardware": "2x R9700 TP=2",
+  "timestamp": "2026-04-11 18:34:53",
+  "output_tokens": 100,
+  "context_sweep": [
+    {
+      "context": 128,
+      "prompt_tokens": 70,
+      "completion_tokens": 49,
+      "elapsed": 1.79,
+      "tok_per_sec": 27.3
+    },
+    {
+      "context": 256,
+      "prompt_tokens": 134,
+      "completion_tokens": 40,
+      "elapsed": 1.52,
+      "tok_per_sec": 26.3
+    },
+    {
+      "context": 512,
+      "prompt_tokens": 262,
+      "completion_tokens": 48,
+      "elapsed": 1.82,
+      "tok_per_sec": 26.4
+    },
+    {
+      "context": 1024,
+      "prompt_tokens": 518,
+      "completion_tokens": 37,
+      "elapsed": 1.55,
+      "tok_per_sec": 23.9
+    },
+    {
+      "context": 2048,
+      "prompt_tokens": 1030,
+      "completion_tokens": 30,
+      "elapsed": 1.51,
+      "tok_per_sec": 19.9
+    },
+    {
+      "context": 4096,
+      "prompt_tokens": 2054,
+      "completion_tokens": 41,
+      "elapsed": 2.21,
+      "tok_per_sec": 18.6
+    }
+  ],
+  "throughput_sweep": [
+    {
+      "concurrency": 1,
+      "total_tokens": 100,
+      "elapsed": 3.54,
+      "tok_per_sec": 28.3,
+      "errors": 0
+    },
+    {
+      "concurrency": 2,
+      "total_tokens": 200,
+      "elapsed": 16.96,
+      "tok_per_sec": 11.8,
+      "errors": 0
+    },
+    {
+      "concurrency": 4,
+      "total_tokens": 400,
+      "elapsed": 16.85,
+      "tok_per_sec": 23.7,
+      "errors": 0
+    },
+    {
+      "concurrency": 8,
+      "total_tokens": 800,
+      "elapsed": 17.3,
+      "tok_per_sec": 46.2,
+      "errors": 0
+    },
+    {
+      "concurrency": 16,
+      "total_tokens": 1600,
+      "elapsed": 18.23,
+      "tok_per_sec": 87.8,
+      "errors": 0
+    },
+    {
+      "concurrency": 32,
+      "total_tokens": 3200,
+      "elapsed": 19.38,
+      "tok_per_sec": 165.1,
+      "errors": 0
+    }
+  ]
+}

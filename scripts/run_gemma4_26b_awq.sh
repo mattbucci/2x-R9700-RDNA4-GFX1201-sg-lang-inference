@@ -6,7 +6,7 @@ source scripts/common.sh
 activate_conda
 setup_rdna4_env
 exec python -m sglang.launch_server \
-    --model-path /home/letsrtfm/AI/models/gemma-4-26B-A4B-it-AWQ-GPTQ-calibrated \
+    --model-path /home/letsrtfm/AI/models/gemma-4-26B-A4B-it-AWQ-GPTQ-v2-fixed \
     --tokenizer-path /home/letsrtfm/AI/models/gemma-4-26B-A4B-it-BF16 \
     --tensor-parallel-size 2 --dtype float16 --quantization awq \
     --kv-cache-dtype fp8_e4m3 --context-length 4096 \

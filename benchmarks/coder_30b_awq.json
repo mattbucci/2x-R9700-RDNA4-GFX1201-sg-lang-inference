@@ -1,0 +1,116 @@
+{
+  "model": "Coder-30B AWQ MoE",
+  "engine": "SGLang",
+  "hardware": "2x R9700 TP=2",
+  "timestamp": "2026-04-11 18:32:25",
+  "output_tokens": 100,
+  "context_sweep": [
+    {
+      "context": 128,
+      "prompt_tokens": 65,
+      "completion_tokens": 44,
+      "elapsed": 1.56,
+      "tok_per_sec": 28.2
+    },
+    {
+      "context": 256,
+      "prompt_tokens": 129,
+      "completion_tokens": 44,
+      "elapsed": 1.72,
+      "tok_per_sec": 25.6
+    },
+    {
+      "context": 512,
+      "prompt_tokens": 257,
+      "completion_tokens": 50,
+      "elapsed": 1.77,
+      "tok_per_sec": 28.3
+    },
+    {
+      "context": 1024,
+      "prompt_tokens": 513,
+      "completion_tokens": 56,
+      "elapsed": 2.05,
+      "tok_per_sec": 27.3
+    },
+    {
+      "context": 2048,
+      "prompt_tokens": 1025,
+      "completion_tokens": 96,
+      "elapsed": 3.57,
+      "tok_per_sec": 26.9
+    },
+    {
+      "context": 4096,
+      "prompt_tokens": 2049,
+      "completion_tokens": 95,
+      "elapsed": 3.86,
+      "tok_per_sec": 24.6
+    },
+    {
+      "context": 8192,
+      "prompt_tokens": 4097,
+      "completion_tokens": 51,
+      "elapsed": 3.16,
+      "tok_per_sec": 16.1
+    },
+    {
+      "context": 16384,
+      "prompt_tokens": 8193,
+      "completion_tokens": 32,
+      "elapsed": 4.33,
+      "tok_per_sec": 7.4
+    },
+    {
+      "context": 32768,
+      "prompt_tokens": 16385,
+      "completion_tokens": 31,
+      "elapsed": 7.84,
+      "tok_per_sec": 4.0
+    }
+  ],
+  "throughput_sweep": [
+    {
+      "concurrency": 1,
+      "total_tokens": 100,
+      "elapsed": 3.39,
+      "tok_per_sec": 29.5,
+      "errors": 0
+    },
+    {
+      "concurrency": 2,
+      "total_tokens": 200,
+      "elapsed": 6.9,
+      "tok_per_sec": 29.0,
+      "errors": 0
+    },
+    {
+      "concurrency": 4,
+      "total_tokens": 338,
+      "elapsed": 6.72,
+      "tok_per_sec": 50.3,
+      "errors": 0
+    },
+    {
+      "concurrency": 8,
+      "total_tokens": 738,
+      "elapsed": 7.01,
+      "tok_per_sec": 105.3,
+      "errors": 0
+    },
+    {
+      "concurrency": 16,
+      "total_tokens": 1476,
+      "elapsed": 7.64,
+      "tok_per_sec": 193.2,
+      "errors": 0
+    },
+    {
+      "concurrency": 32,
+      "total_tokens": 2952,
+      "elapsed": 8.88,
+      "tok_per_sec": 332.3,
+      "errors": 0
+    }
+  ]
+}

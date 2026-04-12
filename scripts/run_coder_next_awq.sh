@@ -37,14 +37,16 @@ exec python -m sglang.launch_server \
     --kv-cache-dtype fp8_e4m3 \
     --context-length 131072 \
     --mem-fraction-static 0.85 \
-    --cuda-graph-bs 1 2 4 8 16 32 \
+    --disable-cuda-graph \
     --max-running-requests 64 \
     --max-mamba-cache-size 10 \
     --chunked-prefill-size 8192 \
     --attention-backend triton \
     --num-continuous-decode-steps 32 \
     --disable-custom-all-reduce \
+    --disable-overlap-schedule \
     --trust-remote-code \
+    --watchdog-timeout 1800 \
     --port "$PORT" \
     --host 0.0.0.0 \
     --enable-metrics

@@ -1,0 +1,137 @@
+{
+  "model": "Devstral-24B AWQ",
+  "engine": "SGLang",
+  "hardware": "2x R9700 TP=2",
+  "timestamp": "2026-04-11 18:28:08",
+  "output_tokens": 100,
+  "context_sweep": [
+    {
+      "context": 128,
+      "prompt_tokens": 60,
+      "completion_tokens": 65,
+      "elapsed": 4.07,
+      "tok_per_sec": 16.0
+    },
+    {
+      "context": 256,
+      "prompt_tokens": 124,
+      "completion_tokens": 75,
+      "elapsed": 4.35,
+      "tok_per_sec": 17.3
+    },
+    {
+      "context": 512,
+      "prompt_tokens": 252,
+      "completion_tokens": 73,
+      "elapsed": 4.31,
+      "tok_per_sec": 16.9
+    },
+    {
+      "context": 1024,
+      "prompt_tokens": 508,
+      "completion_tokens": 75,
+      "elapsed": 4.43,
+      "tok_per_sec": 16.9
+    },
+    {
+      "context": 2048,
+      "prompt_tokens": 1020,
+      "completion_tokens": 38,
+      "elapsed": 3.48,
+      "tok_per_sec": 10.9
+    },
+    {
+      "context": 4096,
+      "prompt_tokens": 2044,
+      "completion_tokens": 38,
+      "elapsed": 3.73,
+      "tok_per_sec": 10.2
+    },
+    {
+      "context": 8192,
+      "prompt_tokens": 4092,
+      "completion_tokens": 71,
+      "elapsed": 5.3,
+      "tok_per_sec": 13.4
+    },
+    {
+      "context": 16384,
+      "prompt_tokens": 8188,
+      "completion_tokens": 57,
+      "elapsed": 5.94,
+      "tok_per_sec": 9.6
+    },
+    {
+      "context": 32768,
+      "prompt_tokens": 16380,
+      "completion_tokens": 38,
+      "elapsed": 9.84,
+      "tok_per_sec": 3.9
+    },
+    {
+      "context": 65536,
+      "prompt_tokens": 32764,
+      "completion_tokens": 38,
+      "elapsed": 17.3,
+      "tok_per_sec": 2.2
+    },
+    {
+      "context": 131072,
+      "prompt_tokens": 65532,
+      "completion_tokens": 80,
+      "elapsed": 40.26,
+      "tok_per_sec": 2.0
+    },
+    {
+      "context": 262144,
+      "prompt_tokens": 131068,
+      "completion_tokens": 85,
+      "elapsed": 96.48,
+      "tok_per_sec": 0.9
+    }
+  ],
+  "throughput_sweep": [
+    {
+      "concurrency": 1,
+      "total_tokens": 100,
+      "elapsed": 5.06,
+      "tok_per_sec": 19.7,
+      "errors": 0
+    },
+    {
+      "concurrency": 2,
+      "total_tokens": 200,
+      "elapsed": 225.53,
+      "tok_per_sec": 0.9,
+      "errors": 0
+    },
+    {
+      "concurrency": 4,
+      "total_tokens": 366,
+      "elapsed": 225.2,
+      "tok_per_sec": 1.6,
+      "errors": 0
+    },
+    {
+      "concurrency": 8,
+      "total_tokens": 800,
+      "elapsed": 224.84,
+      "tok_per_sec": 3.6,
+      "errors": 0
+    },
+    {
+      "concurrency": 16,
+      "total_tokens": 1484,
+      "elapsed": 225.14,
+      "tok_per_sec": 6.6,
+      "errors": 0
+    },
+    {
+      "concurrency": 32,
+      "total_tokens": 2968,
+      "elapsed": 224.1,
+      "tok_per_sec": 13.2,
+      "errors": 0
+    }
+  ]
+}

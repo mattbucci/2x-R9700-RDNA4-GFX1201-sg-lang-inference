@@ -55,112 +55,124 @@ cat /sys/module/amdgpu/parameters/pcie_p2p  # Y
 Without P2P, single-GPU inference still works. Multi-GPU TP will fall back to
 SHM transport (check `NCCL_DEBUG=INFO` output for `SHM` vs `P2P/IPC`).
 
-## Model Support
+## Model Support (SGLang)
 
-| Model | Type | Engine | 1-user tok/s | @32 concurrent | Status |
-|-------|------|--------|:------------:|:--------------:|:------:|
-| Devstral-24B | Dense | SGLang AWQ | 78 | 841 | Working |
-| Qwen3.5-27B | Dense (DeltaNet) | SGLang AWQ | 21 | 129 | Working |
-| Coder-30B | MoE (128 experts) | SGLang AWQ | 46 | 169 | Working |
-| Coder-30B | MoE | vLLM Docker FP8 | 94 | 1,185 | Working |
-| Gemma 4 26B | MoE (128 experts) | SGLang AWQ | — | — | Blocked (empty output) |
-| Coder-Next 80B | MoE (512 experts) | SGLang AWQ | — | — | Blocked (needs GPTQ) |
+All models run on SGLang with RDNA4 patches. vLLM/llama.cpp used for comparison only.
+
+| Model | Type | 1-user tok/s | @32 conc | Max context | Status |
+|-------|------|:------------:|:--------:|:-----------:|:------:|
+| Devstral-24B AWQ | Dense | 17 | 13 | 262K | Working |
+| Coder-30B AWQ | MoE (128 experts) | 28 | 332 | 32K | Working |
+| Gemma 4 26B AWQ | MoE (128 experts) | 27 | 165 | 4K | Working |
+| Coder-Next 80B AWQ | MoE+DeltaNet (512 experts) | 24 | 25 | 8K | Working |
+| Qwen3.5-27B AWQ | DeltaNet hybrid | — | — | 256K | Conv1d bug |
+
+Note: Devstral at 262K context allocates most VRAM to KV cache, limiting batching.
+At 32K context (previous config), Devstral achieves 78 tok/s single-user and 841 @32 concurrent.
 
 **Dense AWQ:** HIP GEMV for M=1 decode (30% faster), dequant+matmul for prefill. Zero Triton in AWQ path.
 
 **MoE AWQ:** HIP GEMV fused expert dispatch (all experts in one GPU kernel). Three RDNA4-specific crash sources fixed: Triton AWQ GEMM, sgl_kernel.topk_softmax, per-expert Python loop.
 
-**FP8:** Blocked on SGLang by Arch Linux `comgr` bug. Works via vLLM Docker.
+**DeltaNet hybrid models (Coder-Next, Qwen3.5):** DeltaNet/attention layers kept in BF16 — INT4 quantization destroys quality due to recurrent state error accumulation. This limits decode to ~15-21 tok/s (bandwidth-bound by BF16 weight reads).
 
-## Performance (2x R9700, TP=2, updated 2026-04-06)
+**MoE quantization:** Standard GPTQ under-calibrates rare experts (inter-expert imbalance). Use expert-balanced calibration (MoEQuant EBSS or GPTQModel FailSafe). See `rules-for-agents.md`.
 
-### Devstral-24B AWQ-4bit (SGLang v0.5.10, 256K context)
+**FP8:** Blocked on SGLang by Arch Linux `comgr` bug.
 
-**Single user decode:** 36.0 tok/s (27.8ms TPOT)
-**Peak throughput:** 1,266 tok/s at 64 concurrent
+## Performance (2x R9700, TP=2, SGLang v0.5.10, updated 2026-04-11)
 
-| Concurrency | Throughput (tok/s) |
-|:-----------:|:------------------:|
-| 1           | 35.8               |
-| 2           | 67.7               |
-| 4           | 110.6              |
-| 8           | 250.2              |
-| 16          | 422.0              |
-| 32          | 810.6              |
-| 64          | **1,266**          |
+### Devstral-24B AWQ-4bit (262K context)
 
-| Context Length | Time (100 tok) | Throughput |
-|:--------------:|:--------------:|:----------:|
-| 128            | 2.8s           | 36.0 tok/s |
-| 1K             | 3.2s           | 31.3 tok/s |
-| 4K             | 4.5s           | 22.1 tok/s |
-| 16K            | 10.2s          | 9.8 tok/s  |
-| 64K            | 39.4s          | 2.5 tok/s  |
-| 131K           | 7.9s           | 6.3 tok/s  |
-| 262K           | 189s           | 0.3 tok/s  |
+24B dense transformer. ~6.5 GB/GPU AWQ weights. At 262K context, most VRAM is KV cache.
 
+| Context Length | Time (100 tok) | tok/s |
+|:--------------:|:--------------:|:-----:|
+| 128            | 4.1s           | 16.0  |
+| 1K             | 4.4s           | 16.9  |
+| 4K             | 3.7s           | 10.2  |
+| 16K            | 5.9s           | 9.6   |
+| 32K            | 9.8s           | 3.9   |
+| 64K            | 17.3s          | 2.2   |
+| 131K           | 40.3s          | 2.0   |
+| **262K**       | **96.5s**      | **0.9** |
+
+| Concurrency | tok/s |
+|:-----------:|:-----:|
+| 1           | 19.7  |
+| 32          | 13.2  |
+
+At 32K context (previous config): 78 tok/s single-user, 841 @32, 1,266 @64.
 Quality: **38/39** (math, code, reasoning, vision, parallel)
 
-### Qwen3.5-27B AWQ-4bit (SGLang v0.5.10, 256K context, DeltaNet hybrid)
+### Coder-30B AWQ-4bit MoE (32K context, 128 experts)
 
-**Single user decode:** 21.3 tok/s (46.9ms TPOT)
-**Peak throughput:** ~55 tok/s (bandwidth-limited at 27B dense)
+30B total / 3B active MoE. ~7.9 GB/GPU AWQ weights. Best throughput scaling.
 
-| Concurrency | Throughput (tok/s) | TPOT (ms) |
-|:-----------:|:------------------:|:---------:|
-| 1           | 53.5               | 48.6      |
-| 2           | 49.6               | 49.8      |
-| 4           | 55.1               | 50.4      |
-| 8           | 55.5               | 51.1      |
-| 16          | 54.9               | 51.6      |
+| Context Length | Time (100 tok) | tok/s |
+|:--------------:|:--------------:|:-----:|
+| 128            | 1.6s           | 28.2  |
+| 1K             | 2.1s           | 27.3  |
+| 4K             | 3.9s           | 24.6  |
+| 8K             | 3.2s           | 16.1  |
+| 16K            | 4.3s           | 7.4   |
+| **32K**        | **7.8s**       | **4.0** |
 
-| Context Length | Time (100 tok) | Throughput |
-|:--------------:|:--------------:|:----------:|
-| 256            | 4.7s           | 21.3 tok/s |
-| 1K             | 5.2s           | 19.3 tok/s |
-| 4K             | 7.2s           | 13.9 tok/s |
-| 16K            | 15.7s          | 6.4 tok/s  |
-| 64K            | 32.3s          | 3.1 tok/s  |
-| 128K           | 68.3s          | 1.5 tok/s  |
-| 250K           | 68.0s          | 1.5 tok/s  |
+| Concurrency | tok/s |
+|:-----------:|:-----:|
+| 1           | 29.5  |
+| 4           | 50.3  |
+| 8           | 105.3 |
+| 16          | 193.2 |
+| **32**      | **332.3** |
 
-DeltaNet decode TPOT is constant (~47ms) regardless of context length.
-Throughput drop at longer contexts is entirely from prefill time.
-Quality: **35/39** (text + vision + thinking mode)
+### Gemma 4 26B AWQ-4bit MoE (4K context, 128 experts, GPTQ forced-routing)
 
-### Qwen3-Coder-30B FP8 MoE (vLLM Docker, 128 experts, 32K context)
+26B total / 4B active MoE. ~8.5 GB/GPU AWQ weights. GPTQ with forced-routing calibration.
 
-**Single user decode:** 93.9 tok/s (10.6ms TPOT)
-**Peak throughput:** 1,882 tok/s at 64 concurrent
+| Context Length | Time (100 tok) | tok/s |
+|:--------------:|:--------------:|:-----:|
+| 128            | 1.8s           | 27.3  |
+| 512            | 1.8s           | 26.4  |
+| 1K             | 1.6s           | 23.9  |
+| 2K             | 1.5s           | 19.9  |
+| **4K**         | **2.2s**       | **18.6** |
 
-| Concurrency | Throughput (tok/s) | TPOT (ms) |
-|:-----------:|:------------------:|:---------:|
-| 1           | 94                 | 10.6      |
-| 2           | 149                | 13.2      |
-| 4           | 266                | 14.8      |
-| 8           | 387                | 18.1      |
-| 16          | 740                | 21.3      |
-| 32          | 1,215              | 25.9      |
-| 64          | **1,882**          | 33.4      |
+| Concurrency | tok/s |
+|:-----------:|:-----:|
+| 1           | 28.3  |
+| 4           | 23.7  |
+| 8           | 46.2  |
+| 16          | 87.8  |
+| **32**      | **165.1** |
 
-| Context Length | Time (100 tok) | Throughput |
-|:--------------:|:--------------:|:----------:|
-| 128            | 1.1s           | 92.5 tok/s |
-| 1K             | 1.1s           | 90.4 tok/s |
-| 4K             | 1.3s           | 79.2 tok/s |
-| 8K             | 1.5s           | 66.2 tok/s |
-| 16K            | 2.4s           | 41.1 tok/s |
-| 28K            | 3.7s           | 27.2 tok/s |
+### Coder-Next 80B AWQ-4bit (8K context, 512 experts, DeltaNet hybrid)
 
-Context limited to 32K by VRAM (~15GB/GPU for 128 expert weights at FP8).
-Quality: Verified correct (math, code, knowledge)
+80B total / 3B active MoE + DeltaNet. ~23 GB/GPU (DeltaNet+attention BF16, only MoE experts quantized).
 
-### Qwen3-Coder-Next-80B (llama.cpp Vulkan, 512 experts)
+| Context Length | Time (100 tok) | tok/s |
+|:--------------:|:--------------:|:-----:|
+| 128            | 4.1s           | 24.2  |
+| 1K             | 4.4s           | 22.6  |
+| 4K             | 5.6s           | 18.0  |
+| **8K**         | **6.9s**       | **14.4** |
 
-| Metric | Value |
-|--------|:-----:|
-| Prefill | 1,687 tok/s |
-| Decode | 79 tok/s |
+| Concurrency | tok/s |
+|:-----------:|:-----:|
+| 1           | 24.3  |
+| 4           | 24.6  |
+| **8**       | **24.6** |
+
+Throughput flat ~25 tok/s: VRAM-limited to 1 concurrent (23 GB weights, ~6 GB free).
+DeltaNet layers intentionally kept BF16 (INT4 destroys recurrent state quality).
+A [REAM variant](https://huggingface.co/cyankiwi/Qwen3-Coder-Next-REAM-AWQ-4bit) prunes 80B→60B, saving 25% VRAM.
+
+### Comparison benchmarks only (not SGLang)
+
+| Model | Engine | Single tok/s | Peak tok/s |
+|-------|--------|:------------:|:----------:|
+| Coder-30B FP8 | vLLM Docker | 94 | 1,882 @64 |
+| Coder-Next 80B GGUF | llama.cpp Vulkan | 79 | — |
 
 ## Setup
 
@@ -243,13 +255,25 @@ Standard Mistral 3 transformer. TP=2 works out of the box with AWQ.
 - **VLM warmup fix:** Image warmup pollutes radix cache. Fixed by text-only warmup for `Mistral3ForConditionalGeneration`.
 - **Vision:** Not working with community AWQ (quantization damaged vision-language alignment).
 
+## MoE Quantization Lessons
+
+Standard GPTQ/AWQ **fails** for MoE models (MoEQuant, ICML 2025). Two critical issues:
+
+1. **Inter-expert imbalance**: Router unevenly distributes calibration data — rare experts get
+   zero/garbage calibration. Our Gemma 4 26B GPTQ: 1/128 experts calibrated, rest got inf scales.
+2. **DeltaNet/SSM sensitivity**: Recurrent state `S(t) = g*S(t-1) + delta` accumulates INT4
+   noise across tokens. DeltaNet layers MUST stay BF16 — this is why Coder-Next AWQ is 15 tok/s.
+
+**Solutions**: Expert-balanced sampling (MoEQuant EBSS, GPTQModel FailSafe), skip recurrent layers.
+See [rules-for-agents.md](rules-for-agents.md) for full quantization pipeline and rules.
+
 ## Known Issues
 
-- **sgl_kernel on ROCm/RDNA4**: Pip `sgl-kernel` ships CUDA-only `.so` files. Patches add torch-based fallbacks for activation functions. Same issue affects [NVIDIA SM121a/DGX Spark](https://github.com/sgl-project/sglang/issues/18203).
-- **AWQ MoE performance**: Per-expert AWQ GEMM dispatch works (7.93 GB/GPU) but is slow (~3.5 tok/s) due to Python loop overhead and no CUDA graph support. A fused AWQ MoE Triton kernel is needed for production speed. Coder-Next-80B also needs `qwen3_next.py` fixes for AWQ + DeltaNet weight loader compatibility.
-- **FP8 MoE on SGLang**: Blocked by Arch Linux `comgr` generating invalid `.hsaco` for FP8 WMMA on gfx1201. Docker works. Use `vllm/vllm-openai-rocm:gemma4` for FP8 MoE.
-- **Gemma 4**: Triton attention crash with mixed head_dim (SWA=256, full=512). Model code ported but blocked.
-- **AWQ GEMV**: Native HIP kernel works but same speed as Triton GEMM (AWQ matmul is only 11% of TPOT).
+See [docs/known_issues.md](docs/known_issues.md) for full details.
+
+- **Gemma 4 26B MoE**: GPTQ v2 recalibrating (expert imbalance fix)
+- **Gemma 4 31B Dense**: Needs HF token for BF16 base download
+- **FP8 MoE on SGLang**: Blocked by Arch Linux `comgr` bug
 
 ## Test System
 

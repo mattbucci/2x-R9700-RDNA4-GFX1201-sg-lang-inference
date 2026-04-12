@@ -72,21 +72,21 @@ class UnfusedGemma4TextExperts(nn.Module):
     def forward(self, hidden_states, routing_weights, selected_experts):
         batch_size = hidden_states.shape[0]
         final_hidden = torch.zeros_like(hidden_states)
-        expert_mask = torch.nn.functional.one_hot(
-            selected_experts.long(), num_classes=self.num_experts
-        ).permute(2, 1, 0)
 
+        # CRITICAL: Force ALL experts to process tokens so GPTQ can calibrate them.
+        # Standard routing only activates top-k=8 of 128 experts per token, leaving
+        # ~94% of experts with zero calibration data (inter-expert imbalance).
+        # Fix: every expert processes all tokens with uniform weight (1/num_experts).
+        # This gives GPTQ representative activations for every expert's Hessian.
+        # The output differs from the real model, but GPTQ only needs activation
+        # statistics — exact output isn't required for calibration quality.
+        uniform_weight = 1.0 / self.num_experts
         for expert_idx in range(self.num_experts):
-            idx, top_x = torch.where(expert_mask[expert_idx])
-            if top_x.shape[0] == 0:
-                continue
-            current_state = hidden_states[top_x]
-            gate = self.act_fn(self.gate_proj[expert_idx](current_state))
-            up = self.up_proj[expert_idx](current_state)
+            gate = self.act_fn(self.gate_proj[expert_idx](hidden_states))
+            up = self.up_proj[expert_idx](hidden_states)
             current_hidden = gate * up
             current_hidden = self.down_proj[expert_idx](current_hidden)
-            current_hidden *= routing_weights[top_x, idx].unsqueeze(-1)
-            final_hidden.index_add_(0, top_x, current_hidden.to(final_hidden.dtype))
+            final_hidden = final_hidden + current_hidden * uniform_weight
         return final_hidden
 
 

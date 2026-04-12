@@ -92,4 +92,15 @@ setup_rdna4_env() {
     export TOKENIZERS_PARALLELISM=false
     export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
     export PYTHONWARNINGS="ignore::UserWarning"
+
+    # HIP GEMV kernel: add PyTorch lib (for libc10.so) and build dir to paths
+    local _torch_lib
+    _torch_lib="$(python -c 'import torch,os; print(os.path.join(os.path.dirname(torch.__file__), "lib"))' 2>/dev/null)"
+    if [ -n "$_torch_lib" ]; then
+        export LD_LIBRARY_PATH="${_torch_lib}:${LD_LIBRARY_PATH:-}"
+    fi
+    local _gemv_dir="/home/letsrtfm/AI/rdna4-inference-triton36/build/awq_gemv"
+    if [ -f "$_gemv_dir/awq_gemv_hip_ext.so" ]; then
+        export PYTHONPATH="${_gemv_dir}:${PYTHONPATH:-}"
+    fi
 }
