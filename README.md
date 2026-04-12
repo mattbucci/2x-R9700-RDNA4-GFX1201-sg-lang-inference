@@ -186,7 +186,8 @@ Or manually:
 cd components/sglang && git checkout v0.5.10
 git apply ../../patches/001-rdna4-core-v0.5.10.patch
 git apply ../../patches/002-awq-performance-tuning.patch
-git apply ../../patches/003-hip-awq-gemv-kernel.patch  # optional
+git apply ../../patches/003-hip-awq-gemv-kernel.patch    # optional: native HIP GEMV
+git apply ../../patches/004-sgl-kernel-rdna4-fallbacks.patch  # sgl-kernel graceful degradation
 
 # Create conda env, install dependencies
 conda create -n sglang-triton36 python=3.12
@@ -198,15 +199,16 @@ pip install -e components/sglang/python
 
 ## Patches
 
-3 patches on top of SGLang v0.5.10:
+4 patches on top of SGLang v0.5.10 (~5,000 lines across 51 files):
 
-1. **001-rdna4-core** — Core RDNA4 support: fused AWQ GEMM (4x decode speedup), torch.compile disabled on HIP, Triton 3.6 support, sgl-kernel import guards (CUDA-only ops gracefully degrade), Qwen3.5 TP=2 layer replication, Devstral chat template fix, FP8 torch-native fallbacks
-2. **002-awq-performance** — Batch-size-dependent AWQ dispatch: M=1 split_k=16, M>32 split_k=2/bm=64 (+6% decode, +13% throughput)
-3. **003-hip-awq-gemv** — Native HIP AWQ GEMV kernel (optional, experimental, same speed as Triton)
+1. **001-rdna4-core** (46 files) — Core RDNA4 support: fused AWQ GEMM (4x decode speedup), torch.compile disabled on HIP, Triton 3.6 support, Qwen3.5 TP=2 layer replication, Devstral chat template fix, FP8 torch-native fallbacks, R9700 MoE kernel configs
+2. **002-awq-performance** (1 file) — Batch-size-dependent AWQ dispatch: M=1 split_k=16, M>32 split_k=2/bm=64 (+6% decode, +13% throughput)
+3. **003-hip-awq-gemv** (2 files, optional) — Native HIP AWQ GEMV kernel for M=1 decode
+4. **004-sgl-kernel-fallbacks** (2 files) — sgl-kernel graceful degradation: wraps all CUDA-only imports with try/except, provides torch-native fallbacks for elementwise ops (rmsnorm, rotary, silu, gelu), topk, and moe_align_block_size
 
 | Component | Version | Source |
 |-----------|---------|--------|
-| SGLang | v0.5.10 | stock + 3 patches |
+| SGLang | v0.5.10 | stock + 4 patches |
 | Triton | 3.6.0 | upstream triton-lang |
 | RCCL | system ROCm 7.2 (2.27.7) | no custom build |
 | PyTorch | 2.12.0+rocm7.2 | nightly |
@@ -216,10 +218,10 @@ pip install -e components/sglang/python
 
 1. **System RCCL 7.2 has P2P/IPC for gfx1201** — no custom RCCL build needed
 2. **Upstream triton 3.6.0 works on RDNA4** — `triton-rocm` 3.6 (AMD's PyTorch fork) deadlocks with `LD_PRELOAD`, but the upstream release does not
-3. **~200 lines of patches** (18 files) get SGLang v0.5.10 running on RDNA4 with near-optimal performance
+3. **4 patches** (~5,000 lines across 51 files) get SGLang v0.5.10 running on RDNA4 with near-optimal performance
 4. **The single highest-impact change is using fused AWQ GEMM** instead of dequantize+matmul — 4x TPOT improvement
 5. **Qwen3.5 TP=2 works** by replicating all layers (DeltaNet + MLP) to avoid FP16 rounding accumulation
-6. **sgl_kernel CUDA-only** — pip package fails on ROCm; patched with torch fallbacks
+6. **sgl_kernel CUDA-only** — pip package fails on ROCm; patch 004 wraps all imports with torch fallbacks
 
 ## Qwen3.5-27B Technical Details
 
@@ -295,8 +297,9 @@ patches/                           # SGLang v0.5.10 RDNA4 patches
   001-rdna4-core-v0.5.10.patch    #   Core support (required)
   002-awq-performance-tuning.patch #   AWQ optimization (+6% decode)
   003-hip-awq-gemv-kernel.patch   #   Native HIP kernel (optional)
-benchmarks/                        # Benchmark results (txt + md)
+  004-sgl-kernel-rdna4-fallbacks.patch # sgl-kernel graceful degradation
+benchmarks/                        # Benchmark results (json + txt)
 scripts/                           # Launch, benchmark, eval, quantization
-docs/                              # Analysis (AWQ GEMV, benchmarks)
+docs/                              # Known issues tracker
 components/sglang/                 # SGLang v0.5.10 + patches
 ```

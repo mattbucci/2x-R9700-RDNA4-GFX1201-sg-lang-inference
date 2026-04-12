@@ -1,0 +1,52 @@
+Qwen3-Coder-Next-80B AWQ-4bit Benchmark
+========================================
+Engine:   SGLang v0.5.10 + RDNA4 patches
+Hardware: 2x AMD Radeon AI PRO R9700 (gfx1201), TP=2
+Weights:  ~/AI/models/Qwen3-Coder-Next-AWQ (community AWQ, 47GB)
+          23.14 GB/GPU, ~6 GB free for KV + SSM state
+Config:   --context-length 8192 --kv-cache-dtype fp8_e4m3
+          --disable-cuda-graph --attention-backend triton
+Date:     2026-04-11
+
+Model: 80B total / 3B active. 512 experts (10 active per token).
+       DeltaNet linear attention + 12 full attention layers.
+       Only MoE experts quantized (AWQ 4-bit); DeltaNet+attention weights BF16.
+
+Single-User Context Length Sweep (100 output tokens)
+----------------------------------------------------
+Context  Time   Compl  tok/s
+128      4.1s   100    24.2
+256      4.1s   100    24.2
+512      4.3s   100    23.4
+1024     4.4s   100    22.6
+2048     4.7s   100    21.1
+4096     5.6s   100    18.0
+8192     6.9s   100    14.4
+
+Throughput Sweep
+----------------
+Concur  Tokens  Time    tok/s
+1       100     4.1s    24.3
+2       200     8.1s    24.6
+4       359     14.6s   24.6
+8       759     30.9s   24.6
+
+Notes:
+- Throughput flat ~25 tok/s: VRAM-limited to effectively 1 concurrent
+  (23 GB model weights leaves only ~6 GB for KV + SSM state)
+- DeltaNet decode is near-constant TPOT regardless of context length
+- Context length mainly affects prefill time, not decode speed
+- Quality: excellent on code tasks
+- DeltaNet layers intentionally kept BF16 — INT4 quantization destroys
+  recurrent state quality (S(t) = g*S(t-1) + delta accumulates noise)
+- REAM variant (cyankiwi) prunes 80B->60B, saves 25% VRAM
+
+Performance analysis:
+- Weight reads per decode token: ~3.7 GB
+    DeltaNet BF16 (36 layers): ~2.4 GB (64%)
+    MoE 10-active AWQ (48 layers): ~0.8 GB (22%)
+    Shared expert BF16 (48 layers): ~0.3 GB (8%)
+    Attention BF16 (12 layers): ~0.2 GB (6%)
+- BF16 DeltaNet weight reads dominate — this is the architectural speed limit
+- llama.cpp Vulkan achieves 79 tok/s by quantizing everything (GGUF Q4_K_M)
+  but at the cost of DeltaNet quality degradation

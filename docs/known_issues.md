@@ -19,26 +19,4 @@
 
 ## Resolved
 
-### Gemma 4 26B MoE — WORKING (GPTQ v3, forced-routing calibration)
-**Status:** WORKING at 25 tok/s single-user, 29 tok/s @ 4 concurrent. Quality verified (knowledge, math, code).
-**Root cause:** Standard GPTQ calibration fails for MoE due to inter-expert imbalance — router only sends
-calibration data to popular experts. v1 calibrated 1/128 experts, rest got inf scales.
-**Fix:** Forced-routing calibration — modified `UnfusedGemma4TextExperts.forward` to route ALL tokens
-through ALL 128 experts with uniform weight during calibration. Every expert gets identical Hessian data.
-**Additional fixes:** Weight naming regex, router dequant to BF16, activation fn (GELU), FP16 scale clamping.
-**Model:** `~/AI/models/gemma-4-26B-A4B-it-AWQ-GPTQ-v2-fixed`
-
-### Coder-Next 80B — working, bandwidth-limited by architecture
-**Status:** WORKING at 15 tok/s. Community AWQ weights produce quality code output on SGLang TP=2.
-DeltaNet BF16 weight reads (2.4 GB/token, 64% of total) are the architectural speed limit.
-**Launch:** `scripts/run_coder_next_awq.sh`
-
-## MoE Quantization Research (reference)
-
-### Inter-expert imbalance (MoEQuant, ICML 2025)
-Standard GPTQ/AWQ routes calibration data through the model's router, which activates experts unevenly.
-Our fix: forced uniform routing during calibration ensures all experts see all data.
-Also available: MoEQuant EBSS, GPTQModel MoE.Routing FailSafe.
-
-### DeltaNet/SSM quantization sensitivity
-Recurrent architectures accumulate quantization noise through state updates. DeltaNet layers MUST stay BF16.
+See [README.md](../README.md) for working models, benchmarks, and MoE quantization details.

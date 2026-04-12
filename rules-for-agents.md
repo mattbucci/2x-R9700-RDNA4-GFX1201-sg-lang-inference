@@ -94,30 +94,11 @@ tokens via `S(t) = gating * S(t-1) + delta`. INT4 quantization destroys output q
 
 ## Benchmarking
 - Concurrency sweep: 1, 4, 8, 16, 32
-- Save to `benchmarks/` as `{model}_{quant}_{engine}.txt` with full env header
+- Save to `benchmarks/` as `{model}_{quant}_{engine}.json` (structured) and `.txt` (prose analysis)
 - Run `scripts/eval_comprehensive.py` after kernel changes
 - Always use timeouts on GPU/Docker commands
-- DeltaNet hybrid models: ~15 tok/s single-user regardless of concurrency (VRAM-limited)
+- DeltaNet hybrid models: throughput is flat (VRAM-limited by BF16 weight reads)
 
 ## Model Status
 
-### Working (SGLang, benchmarked 2026-04-11)
-| Model | 1-user tok/s | @32 conc | Max ctx | Notes |
-|-------|:------------:|:--------:|:-------:|-------|
-| Devstral-24B AWQ | 17 (262K) / 78 (32K) | 13 / 841 | 262K | Dense, context-VRAM tradeoff |
-| Coder-30B AWQ MoE | 28 | 332 | 32K | 128 experts, best MoE throughput |
-| Gemma 4 26B AWQ MoE | 27 | 165 | 4K | 128 experts, GPTQ forced-routing |
-| Coder-Next 80B AWQ | 24 | 25 | 8K | DeltaNet BF16 = bandwidth limit |
-
-### Comparison Benchmarks Only
-| Model | Engine | tok/s |
-|-------|--------|-------|
-| Coder-30B FP8 | vLLM Docker | 1,882 @64 |
-| Coder-Next 80B GGUF | llama.cpp Vulkan | 79 |
-
-### Needs Fix
-- **Qwen3.5-27B AWQ**: causal_conv1d shape mismatch at TP=2 (conv_states dim=5120 vs expected 10240)
-- **Gemma 4 31B Dense**: cyankiwi AWQ loads + runs, RTN quality. BF16 base not gated — can download + GPTQ.
-
-### Blocked
-- **FP8 MoE on SGLang**: Arch `comgr` invalid HSACO for FP8 WMMA on gfx1201.
+See [README.md](README.md) for current model status, benchmarks, and known issues.
