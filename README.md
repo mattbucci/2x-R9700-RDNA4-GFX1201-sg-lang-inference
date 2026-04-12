@@ -204,7 +204,7 @@ pip install -e components/sglang/python
 1. **001-rdna4-core** (46 files) — Core RDNA4 support: fused AWQ GEMM (4x decode speedup), torch.compile disabled on HIP, Triton 3.6 support, Qwen3.5 TP=2 layer replication, Devstral chat template fix, FP8 torch-native fallbacks, R9700 MoE kernel configs
 2. **002-awq-performance** (1 file) — Batch-size-dependent AWQ dispatch: M=1 split_k=16, M>32 split_k=2/bm=64 (+6% decode, +13% throughput)
 3. **003-hip-awq-gemv** (2 files, optional) — Native HIP AWQ GEMV kernel for M=1 decode
-4. **004-sgl-kernel-fallbacks** (2 files) — sgl-kernel graceful degradation: wraps all CUDA-only imports with try/except, provides torch-native fallbacks for elementwise ops (rmsnorm, rotary, silu, gelu), topk, and moe_align_block_size
+4. **004-sgl-kernel-rdna4-fallbacks** (2 files) — sgl-kernel graceful degradation: wraps all CUDA-only imports with try/except, provides torch-native fallbacks for elementwise ops (rmsnorm, rotary, silu, gelu), topk, and moe_align_block_size
 
 | Component | Version | Source |
 |-----------|---------|--------|
