@@ -1,0 +1,73 @@
+diff --git a/python/sglang/srt/layers/attention/triton_ops/decode_attention.py b/python/sglang/srt/layers/attention/triton_ops/decode_attention.py
+index 2b166f3b0..3a57ad090 100644
+--- a/python/sglang/srt/layers/attention/triton_ops/decode_attention.py
++++ b/python/sglang/srt/layers/attention/triton_ops/decode_attention.py
+@@ -25,9 +25,10 @@ import logging
+ import triton
+ import triton.language as tl
+ 
+-from sglang.srt.utils import is_hip
++from sglang.srt.utils import get_device_capability, is_hip
+ 
+ _is_hip = is_hip()
++_is_rdna4 = _is_hip and get_device_capability()[0] >= 12
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -38,7 +39,8 @@ _MIN_BLOCK_KV = 32
+ @triton.jit
+ def tanh(x):
+     # Tanh is just a scaled sigmoid
+-    return 2 * tl.sigmoid(2 * x) - 1
++    # Compute in FP32 for precision — BF16 tanh is lossy for softcapping
++    return 2 * tl.sigmoid(2 * x.to(tl.float32)) - 1
+ 
+ 
+ @triton.jit
+@@ -196,7 +198,7 @@ def _decode_att_m_fwd(
+     BLOCK = 64
+     # [TODO] work around SGPR limit on MI3xx
+     if _is_hip:
+-        BLOCK = 8
++        BLOCK = 32 if _is_rdna4 else 8
+     MAX_KV_SPLITS = max_kv_splits
+     Lk = k_buffer.shape[-1]
+     Lv = v_buffer.shape[-1]
+@@ -210,7 +212,7 @@ def _decode_att_m_fwd(
+         num_warps = 4
+     else:
+         num_warps = 2
+-        if _is_hip:
++        if _is_hip and not _is_rdna4:
+             num_warps = 1
+ 
+     BLOCK_DMODEL = triton.next_power_of_2(Lk)
+diff --git a/python/sglang/srt/layers/attention/triton_ops/extend_attention.py b/python/sglang/srt/layers/attention/triton_ops/extend_attention.py
+index 8ce0e35ff..d2d97f8c6 100644
+--- a/python/sglang/srt/layers/attention/triton_ops/extend_attention.py
++++ b/python/sglang/srt/layers/attention/triton_ops/extend_attention.py
+@@ -107,7 +107,8 @@ def _get_block_sizes_for_extend_attention(Lq: int, Lv: int):
+ @triton.jit
+ def tanh(x):
+     # Tanh is just a scaled sigmoid
+-    return 2 * tl.sigmoid(2 * x) - 1
++    # Compute in FP32 for precision — BF16 tanh is lossy for softcapping
++    return 2 * tl.sigmoid(2 * x.to(tl.float32)) - 1
+ 
+ 
+ @triton.jit
+diff --git a/python/sglang/srt/layers/logits_processor.py b/python/sglang/srt/layers/logits_processor.py
+index 662cc2519..eeb40e8b3 100644
+--- a/python/sglang/srt/layers/logits_processor.py
++++ b/python/sglang/srt/layers/logits_processor.py
+@@ -1110,8 +1110,8 @@ def fused_softcap_kernel(
+     # Load values
+     x = tl.load(full_logits_ptr + offsets, mask=mask)
+ 
+-    # Perform operations in-place
+-    x = x / softcapping_value
++    # Perform softcapping in FP32 for precision (BF16 tanh is lossy)
++    x = x.to(tl.float32) / softcapping_value
+ 
+     # Manual tanh implementation using exp
+     exp2x = tl.exp(2 * x)
