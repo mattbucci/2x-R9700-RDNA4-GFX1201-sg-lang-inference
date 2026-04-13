@@ -1,126 +1,110 @@
 #!/bin/bash
-# Run benchmarks across all working models on 2x R9700 RDNA4
-# Usage: bash scripts/bench_all_models.sh
-set -e
+# Run benchmarks across all working models on 2x R9700 RDNA4.
+#
+# Uses launch.sh presets for each model and bench_all_unified.py for measurement.
+# All benchmarks use sglang.bench_serving for proper TPOT/TTFT.
+#
+# Usage: ./scripts/bench/bench_all_models.sh
+#        ./scripts/bench/bench_all_models.sh devstral coder-30b   # subset
+
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
-PY=/home/letsrtfm/miniforge3/envs/sglang-clean/bin/python
-BENCH="$SCRIPT_DIR/bench_comprehensive.sh"
+LAUNCH="$REPO_DIR/scripts/launch.sh"
+BENCH="$REPO_DIR/scripts/bench/bench_all_unified.py"
 PORT=23334
 
-export PYTHONDONTWRITEBYTECODE=1
-export SGLANG_USE_AITER=0 SGLANG_USE_AITER_AR=0
-export HIP_FORCE_DEV_KERNARG=1
-export VLLM_USE_TRITON_FLASH_ATTN=1
-export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
-export TRITON_CACHE_DIR=/home/letsrtfm/.cache/triton_clean
-export TOKENIZERS_PARALLELISM=false
+# Models to benchmark (launch.sh preset → display name → context max → concurrency max)
+ALL_MODELS=(
+    "devstral|Devstral-24B AWQ|32768|64"
+    "coder-30b|Coder-30B AWQ|32768|32"
+    "gemma4|Gemma 4 26B AWQ|4096|32"
+    "gemma4-31b|Gemma 4 31B AWQ|8192|8"
+    "qwen35|Qwen3.5-27B AWQ|16384|8"
+    "coder-next|Coder-Next 80B AWQ|8192|8"
+    "coder-next-ream|Coder-Next REAM 60B AWQ|32768|16"
+)
 
-launch_sglang() {
-    local model_path="$1"
-    local extra_args="$2"
-    kill -9 $(pgrep -f sglang) 2>/dev/null; sleep 3
-
-    echo ">>> Launching: $model_path"
-    $PY -m sglang.launch_server \
-        --model-path "$model_path" \
-        --tensor-parallel-size 2 \
-        --disable-cuda-graph \
-        --max-running-requests 8 \
-        --chunked-prefill-size 4096 \
-        --attention-backend triton \
-        --num-continuous-decode-steps 4 \
-        --disable-custom-all-reduce \
-        --trust-remote-code \
-        --watchdog-timeout 1800 \
-        --port $PORT --host 0.0.0.0 \
-        $extra_args &
-
-    # Wait for health
-    for i in $(seq 1 120); do
-        sleep 2
-        curl -s "http://localhost:$PORT/health" > /dev/null 2>&1 && echo "Server UP at $((i*2))s" && return 0
+# Allow running a subset: ./bench_all_models.sh devstral coder-30b
+if [ $# -gt 0 ]; then
+    SELECTED=("$@")
+else
+    SELECTED=()
+    for entry in "${ALL_MODELS[@]}"; do
+        SELECTED+=("${entry%%|*}")
     done
-    echo "ERROR: Server failed to start"
-    return 1
-}
+fi
 
-launch_vllm_docker() {
-    local model_path="$1"
-    sudo docker kill $(sudo docker ps -q) 2>/dev/null; sleep 3
-
-    echo ">>> Launching vLLM Docker: $model_path"
-    sudo docker run -d \
-        --device=/dev/kfd --device=/dev/dri \
-        --group-add video --group-add render \
-        --ipc=host --shm-size=16g \
-        -v /home/letsrtfm/AI/models:/models \
-        -p $PORT:8000 \
-        vllm/vllm-openai-rocm:gemma4 \
-        --model "/models/$(basename $model_path)" \
-        --tensor-parallel-size 2 \
-        --dtype auto \
-        --max-model-len 4096 \
-        --trust-remote-code
-
-    for i in $(seq 1 120); do
-        sleep 2
-        curl -s "http://localhost:$PORT/health" > /dev/null 2>&1 && echo "vLLM UP at $((i*2))s" && return 0
+wait_for_server() {
+    for i in $(seq 1 180); do
+        if curl -s "http://localhost:$PORT/health" > /dev/null 2>&1; then
+            echo "  Server ready after ${i}s"
+            return 0
+        fi
+        sleep 1
     done
-    echo "ERROR: vLLM failed to start"
+    echo "  ERROR: Server failed to start within 180s"
     return 1
 }
 
 cleanup() {
-    kill -9 $(pgrep -f sglang) 2>/dev/null
-    sudo docker kill $(sudo docker ps -q) 2>/dev/null
+    pkill -f "sglang.launch_server" 2>/dev/null || true
+    sleep 5
 }
 
 echo "=========================================="
 echo " FULL BENCHMARK SUITE - 2x AMD R9700 RDNA4"
 echo " $(date)"
 echo "=========================================="
-echo ""
 
-# 1. Devstral-24B AWQ (calibrated)
-echo "=== 1/5: Devstral-24B AWQ ==="
-if launch_sglang ~/AI/models/Devstral-24B-AWQ-4bit-calibrated \
-    "--dtype float16 --quantization awq --kv-cache-dtype fp8_e4m3 --context-length 32768 --mem-fraction-static 0.85"; then
-    bash "$BENCH" "Devstral-24B-AWQ-calibrated" auto $PORT
-fi
-cleanup; sleep 5
+total=${#SELECTED[@]}
+current=0
 
-# 2. Qwen3.5-27B AWQ (calibrated)
-echo "=== 2/5: Qwen3.5-27B AWQ ==="
-if launch_sglang ~/AI/models/Qwen3.5-27B-AWQ-4bit-calibrated \
-    "--dtype float16 --quantization awq --kv-cache-dtype fp8_e4m3 --context-length 32768 --mem-fraction-static 0.85"; then
-    bash "$BENCH" "Qwen3.5-27B-AWQ-calibrated" auto $PORT
-fi
-cleanup; sleep 5
+for preset in "${SELECTED[@]}"; do
+    current=$((current + 1))
 
-# 3. Qwen3.5-27B FP8
-echo "=== 3/5: Qwen3.5-27B FP8 ==="
-if launch_sglang ~/AI/models/Qwen3.5-27B-FP8 \
-    "--dtype float16 --quantization fp8 --kv-cache-dtype fp8_e4m3 --context-length 4096 --mem-fraction-static 0.90"; then
-    bash "$BENCH" "Qwen3.5-27B-FP8" auto $PORT
-fi
-cleanup; sleep 5
+    # Find the model entry
+    name="" ctx_max="" conc_max=""
+    for entry in "${ALL_MODELS[@]}"; do
+        key="${entry%%|*}"
+        if [ "$key" = "$preset" ]; then
+            IFS='|' read -r _ name ctx_max conc_max <<< "$entry"
+            break
+        fi
+    done
 
-# 4. Qwen3-Coder-30B FP8 via vLLM Docker
-echo "=== 4/5: Qwen3-Coder-30B FP8 (vLLM Docker) ==="
-if launch_vllm_docker ~/AI/models/Qwen3-Coder-30B-A3B-FP8; then
-    bash "$BENCH" "Qwen3-Coder-30B-FP8-vLLM" auto $PORT
-fi
-cleanup; sleep 5
+    if [ -z "$name" ]; then
+        echo "Unknown preset: $preset (skipping)"
+        continue
+    fi
 
-# 5. Qwen3-Coder-30B FP8 via SGLang (with --disable-overlap-schedule)
-echo "=== 5/5: Qwen3-Coder-30B FP8 (SGLang, no overlap) ==="
-if launch_sglang ~/AI/models/Qwen3-Coder-30B-A3B-FP8 \
-    "--dtype bfloat16 --quantization fp8 --kv-cache-dtype fp8_e4m3 --context-length 4096 --mem-fraction-static 0.90 --disable-overlap-schedule"; then
-    bash "$BENCH" "Qwen3-Coder-30B-FP8-SGLang" auto $PORT
-fi
-cleanup
+    echo ""
+    echo "=== $current/$total: $name ($preset) ==="
+    cleanup
+
+    # Launch via launch.sh (runs in background via &, we wait for health)
+    "$LAUNCH" "$preset" --port "$PORT" &
+    SERVER_PID=$!
+
+    if wait_for_server; then
+        # Slug for output path
+        slug=$(echo "$name" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
+        output="$REPO_DIR/benchmarks/$slug/results.json"
+        mkdir -p "$(dirname "$output")"
+
+        python "$BENCH" \
+            --name "$name" \
+            --port "$PORT" \
+            --context-max "$ctx_max" \
+            --concurrency-max "$conc_max" \
+            --output "$output"
+    else
+        echo "  Skipping $name (server failed to start)"
+    fi
+
+    cleanup
+done
 
 echo ""
 echo "=========================================="
