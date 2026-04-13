@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/layers/quantization/awq.py b/python/sglang/srt/layers/quantization/awq.py
-index c05aa091a..8c602dd16 100644
+index c05aa091a..75769d402 100644
 --- a/python/sglang/srt/layers/quantization/awq.py
 +++ b/python/sglang/srt/layers/quantization/awq.py
 @@ -2,6 +2,7 @@
@@ -63,7 +63,7 @@ index c05aa091a..8c602dd16 100644
          return None
  
  
-@@ -455,8 +478,36 @@ class AWQLinearMethod(LinearMethodBase):
+@@ -455,8 +478,41 @@ class AWQLinearMethod(LinearMethodBase):
          pack_factor = self.quant_config.pack_factor
          out_shape = x.shape[:-1] + (qweight.shape[-1] * pack_factor,)
          reshaped_x = x.reshape(-1, x.shape[-1])
@@ -79,11 +79,16 @@ index c05aa091a..8c602dd16 100644
 +            M = reshaped_x.shape[0]
 +            if M == 1 and _has_hip_gemv:
 +                if act_dtype == torch.bfloat16:
-+                    # BF16 path: dequant in BF16, matmul in BF16.
-+                    # HIP GEMV is FP16-only so we use torch matmul instead.
-+                    dequant_w = awq_dequantize_decomposition(
-+                        qweight, scales, qzeros, out_dtype=torch.bfloat16)
-+                    out = torch.matmul(reshaped_x.unsqueeze(0), dequant_w)
++                    # BF16 path: use BF16 HIP GEMV if available, else torch matmul
++                    if hasattr(awq_gemv_hip_ext, 'awq_gemv_bf16_hip'):
++                        scales_bf16 = scales.to(torch.bfloat16) if scales.dtype != torch.bfloat16 else scales
++                        out = awq_gemv_hip_ext.awq_gemv_bf16_hip(
++                            reshaped_x, qweight, scales_bf16, qzeros, 0
++                        ).unsqueeze(0)
++                    else:
++                        dequant_w = awq_dequantize_decomposition(
++                            qweight, scales, qzeros, out_dtype=torch.bfloat16)
++                        out = torch.matmul(reshaped_x.unsqueeze(0), dequant_w)
 +                else:
 +                    # FP16 path: use fast HIP GEMV kernel
 +                    out = awq_gemv_hip_ext.awq_gemv_hip(
@@ -102,7 +107,7 @@ index c05aa091a..8c602dd16 100644
  
          if bias is not None:
              out.add_(bias)
-@@ -864,6 +915,227 @@ class AWQMoEMethod(FusedMoEMethodBase):
+@@ -864,6 +920,227 @@ class AWQMoEMethod(FusedMoEMethodBase):
          return self.runner.run(dispatch_output, quant_info)
  
  
@@ -492,10 +497,10 @@ index b83dd79fb..94af86d9b 100644
      return res.reshape(qweight_tmp.shape[0], -1)
 diff --git a/sgl-kernel/csrc/quantization/awq/awq_gemv_hip.cu b/sgl-kernel/csrc/quantization/awq/awq_gemv_hip.cu
 new file mode 100644
-index 000000000..5c4fc5806
+index 000000000..b5aac6b75
 --- /dev/null
 +++ b/sgl-kernel/csrc/quantization/awq/awq_gemv_hip.cu
-@@ -0,0 +1,985 @@
+@@ -0,0 +1,1119 @@
 +// SPDX-License-Identifier: Apache-2.0
 +// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +//
@@ -1125,8 +1130,8 @@ index 000000000..5c4fc5806
 +      target_groups_per_split = 5;
 +    }
 +    int64_t target_sk =
-+        std::max(int64_t(1), num_groups / target_groups_per_split);
-+    target_sk = std::min(target_sk, int64_t(20));
++        ::max(int64_t(1), num_groups / target_groups_per_split);
++    target_sk = ::min(target_sk, int64_t(20));
 +
 +    effective_splitk = 1;
 +    for (int64_t sk = target_sk; sk >= 1; sk--) {
@@ -1137,11 +1142,11 @@ index 000000000..5c4fc5806
 +    }
 +  }
 +
-+  effective_splitk = std::min(effective_splitk, int64_t(20));
++  effective_splitk = ::min(effective_splitk, int64_t(20));
 +  if (effective_splitk < 1 || num_groups % effective_splitk != 0) {
-+    int64_t orig = std::max(effective_splitk, int64_t(1));
++    int64_t orig = ::max(effective_splitk, int64_t(1));
 +    effective_splitk = 1;
-+    for (int64_t sk = std::min(orig, int64_t(20)); sk >= 1; sk--) {
++    for (int64_t sk = ::min(orig, int64_t(20)); sk >= 1; sk--) {
 +      if (num_groups % sk == 0) {
 +        effective_splitk = sk;
 +        break;
@@ -1335,8 +1340,8 @@ index 000000000..5c4fc5806
 +                                           OUTPUT_PER_THREAD * sizeof(float)
 +                                     : 0;
 +
-+    awq_gemv_kernel_splitk<8, SPLIT_K, PACKING, MixtureOfExperts::NO>
-+        <<<num_blocks, THREADS_PER_BLOCK, smem_size, stream>>>(
++   hipLaunchKernelGGL(( awq_gemv_kernel_splitk<8, SPLIT_K, PACKING, MixtureOfExperts::NO>)
++        , dim3(num_blocks), dim3(THREADS_PER_BLOCK), smem_size, stream, 
 +            reinterpret_cast<const __half*>(act_flat.data_ptr<at::Half>()),
 +            reinterpret_cast<const uint32_t*>(qweight.data_ptr<int32_t>()),
 +            reinterpret_cast<const __half*>(scales.data_ptr<at::Half>()),
@@ -1443,8 +1448,8 @@ index 000000000..5c4fc5806
 +                                           OUTPUT_PER_THREAD * sizeof(float)
 +                                     : 0;
 +
-+    awq_gemv_kernel_splitk<8, SPLIT_K, PackingOrder::AWQ, MixtureOfExperts::YES>
-+        <<<grid, THREADS_PER_BLOCK, smem_size, stream>>>(
++   hipLaunchKernelGGL(( awq_gemv_kernel_splitk<8, SPLIT_K, PackingOrder::AWQ, MixtureOfExperts::YES>)
++        , dim3(grid), dim3(THREADS_PER_BLOCK), smem_size, stream, 
 +            reinterpret_cast<const __half*>(activation.data_ptr<at::Half>()),
 +            reinterpret_cast<const uint32_t*>(qweight.data_ptr<int32_t>()),
 +            reinterpret_cast<const __half*>(scales.data_ptr<at::Half>()),
@@ -1461,6 +1466,136 @@ index 000000000..5c4fc5806
 +  dispatch_splitk(effective_splitk, launch);
 +}
 +
++// ============================================================================
++// BF16 AWQ GEMV Kernel — simple integer dequant, FP32 accumulate, BF16 I/O
++// For models requiring BF16 activations (e.g. Gemma 31B where FP16 overflows).
++// ============================================================================
++#include <hip/hip_bfloat16.h>
++
++template <int SPLIT_K>
++__global__ __launch_bounds__(SPLIT_K * 32)
++void awq_gemv_bf16_kernel(
++    const __hip_bfloat16* __restrict__ activation,
++    const uint32_t* __restrict__ qweight,
++    const __hip_bfloat16* __restrict__ scales,
++    const uint32_t* __restrict__ qzeros,
++    __hip_bfloat16* __restrict__ output,
++    size_t K, size_t N, size_t G)
++{
++  constexpr int AWQ_ORDER[8] = {0, 4, 1, 5, 2, 6, 3, 7};
++  constexpr int OUTPUT_PER_THREAD = 8;
++  constexpr int THREADS_PER_SPLIT = 32;
++
++  int split_id = threadIdx.x / THREADS_PER_SPLIT;
++  int thread_in_split = threadIdx.x % THREADS_PER_SPLIT;
++  size_t tid = blockIdx.x * THREADS_PER_SPLIT + thread_in_split;
++  size_t col_start = tid * OUTPUT_PER_THREAD;
++  if (col_start >= N) return;
++
++  extern __shared__ float smem_bf16[];
++  float* my_smem = &smem_bf16[split_id * THREADS_PER_SPLIT * OUTPUT_PER_THREAD +
++                               thread_in_split * OUTPUT_PER_THREAD];
++
++  float acc[OUTPUT_PER_THREAD];
++  for (int i = 0; i < OUTPUT_PER_THREAD; i++) acc[i] = 0.0f;
++
++  size_t total_groups = K / G;
++  size_t groups_per_split = total_groups / SPLIT_K;
++  size_t start_group = split_id * groups_per_split;
++  size_t weight_stride = N / 8;
++
++  for (size_t grp = 0; grp < groups_per_split; grp++) {
++    size_t g_idx = start_group + grp;
++
++    float sc[OUTPUT_PER_THREAD];
++    for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
++      size_t col = col_start + i;
++      sc[i] = (col < N) ? static_cast<float>(scales[g_idx * N + col]) : 0.0f;
++    }
++
++    float zp[OUTPUT_PER_THREAD];
++    {
++      uint32_t zp_packed = qzeros[g_idx * (N / 8) + tid];
++      for (int i = 0; i < OUTPUT_PER_THREAD; i++)
++        zp[i] = static_cast<float>((zp_packed >> (AWQ_ORDER[i] * 4)) & 0xF);
++    }
++
++    size_t row_base = (start_group + grp) * G;
++    for (size_t r = 0; r < G; r++) {
++      size_t row = row_base + r;
++      float act_f = static_cast<float>(activation[row]);
++      uint32_t w_packed = qweight[row * weight_stride + tid];
++
++      for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
++        float w_val = static_cast<float>((w_packed >> (AWQ_ORDER[i] * 4)) & 0xF);
++        acc[i] += act_f * (w_val - zp[i]) * sc[i];
++      }
++    }
++  }
++
++  if constexpr (SPLIT_K == 1) {
++    for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
++      size_t col = col_start + i;
++      if (col < N) output[col] = static_cast<__hip_bfloat16>(acc[i]);
++    }
++    return;
++  }
++
++  for (int i = 0; i < OUTPUT_PER_THREAD; i++) my_smem[i] = acc[i];
++  __syncthreads();
++
++  if (split_id == 0) {
++    for (int s = 1; s < SPLIT_K; s++) {
++      float* other = &smem_bf16[s * THREADS_PER_SPLIT * OUTPUT_PER_THREAD +
++                                 thread_in_split * OUTPUT_PER_THREAD];
++      for (int i = 0; i < OUTPUT_PER_THREAD; i++) acc[i] += other[i];
++    }
++    for (int i = 0; i < OUTPUT_PER_THREAD; i++) {
++      size_t col = col_start + i;
++      if (col < N) output[col] = static_cast<__hip_bfloat16>(acc[i]);
++    }
++  }
++}
++
++torch::Tensor awq_gemv_bf16_hip(
++    torch::Tensor activation, torch::Tensor qweight,
++    torch::Tensor scales, torch::Tensor qzeros, int64_t split_k)
++{
++  TORCH_CHECK(activation.scalar_type() == at::ScalarType::BFloat16);
++  TORCH_CHECK(scales.scalar_type() == at::ScalarType::BFloat16);
++
++  auto act_flat = activation.dim() == 2 ? activation.squeeze(0) : activation;
++  int64_t K = act_flat.size(0);
++  int64_t N = qweight.size(1) * 8;
++  int64_t num_groups = qzeros.size(0);
++  int64_t G = K / num_groups;
++
++  auto output = torch::empty({N}, scales.options());
++  auto stream = at::hip::getCurrentHIPStream();
++
++  constexpr int OUTPUT_PER_THREAD = 8;
++  constexpr int THREADS_PER_SPLIT = 32;
++  int64_t total_outputs = (N + OUTPUT_PER_THREAD - 1) / OUTPUT_PER_THREAD;
++  int64_t num_blocks = (total_outputs + THREADS_PER_SPLIT - 1) / THREADS_PER_SPLIT;
++  int64_t eff_sk = compute_effective_splitk(split_k, num_groups, N);
++
++  auto launch = [&]<int SK>() {
++    constexpr int TPB = THREADS_PER_SPLIT * SK;
++    size_t smem = (SK > 1) ? SK * THREADS_PER_SPLIT * OUTPUT_PER_THREAD * sizeof(float) : 0;
++    hipLaunchKernelGGL((awq_gemv_bf16_kernel<SK>),
++        dim3(num_blocks), dim3(TPB), smem, stream,
++        reinterpret_cast<const __hip_bfloat16*>(act_flat.data_ptr<at::BFloat16>()),
++        reinterpret_cast<const uint32_t*>(qweight.data_ptr<int32_t>()),
++        reinterpret_cast<const __hip_bfloat16*>(scales.data_ptr<at::BFloat16>()),
++        reinterpret_cast<const uint32_t*>(qzeros.data_ptr<int32_t>()),
++        reinterpret_cast<__hip_bfloat16*>(output.data_ptr<at::BFloat16>()),
++        static_cast<size_t>(K), static_cast<size_t>(N), static_cast<size_t>(G));
++  };
++
++  dispatch_splitk(eff_sk, launch);
++  return output;
++}
++
 +#endif  // USE_ROCM
 +
 +// PyBind11 module registration for torch.utils.cpp_extension.load()
@@ -1469,7 +1604,11 @@ index 000000000..5c4fc5806
 +
 +PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 +  m.def("awq_gemv_hip", &awq_gemv_hip,
-+        "AWQ GEMV kernel for M=1 decode (HIP/ROCm)",
++        "AWQ GEMV kernel for M=1 decode (HIP/ROCm, FP16)",
++        py::arg("activation"), py::arg("qweight"), py::arg("scales"),
++        py::arg("qzeros"), py::arg("split_k") = 0);
++  m.def("awq_gemv_bf16_hip", &awq_gemv_bf16_hip,
++        "AWQ GEMV kernel for M=1 decode (HIP/ROCm, BF16)",
 +        py::arg("activation"), py::arg("qweight"), py::arg("scales"),
 +        py::arg("qzeros"), py::arg("split_k") = 0);
 +  m.def("awq_gemv_moe_hip", &awq_gemv_moe_hip,
