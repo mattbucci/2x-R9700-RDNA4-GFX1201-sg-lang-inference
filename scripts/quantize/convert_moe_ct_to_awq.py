@@ -58,8 +58,8 @@ def convert_weight(packed: torch.Tensor, scale: torch.Tensor, group_size: int):
     unpacked_t = unpacked.T.contiguous()
     qweight = pack_4bit_to_int32_awq(unpacked_t)
 
-    # Transpose scales
-    scales = scale.T.contiguous().to(torch.float16)
+    # Transpose scales, clamp to FP16 range
+    scales = scale.T.contiguous().clamp(-65504, 65504).to(torch.float16)
 
     # Create qzeros (symmetric: zero_point = 8)
     num_groups = in_features // group_size
@@ -100,8 +100,8 @@ def quantize_bf16_to_awq(weight: torch.Tensor, group_size: int):
     q_t = q.T.contiguous()
     qweight = pack_4bit_to_int32_awq(q_t)  # [in, out//8]
 
-    # Scales: [in//G, out] in fp16
-    scales = scale_vals.squeeze(-1).T.contiguous().to(torch.float16)  # [G, out] -> [G, out]
+    # Scales: [in//G, out] in fp16, clamp to FP16 range
+    scales = scale_vals.squeeze(-1).T.contiguous().clamp(-65504, 65504).to(torch.float16)
 
     # Qzeros: symmetric zero_point = 8 for all groups
     num_out_packed = out_features // PACK_FACTOR
@@ -155,7 +155,14 @@ def main():
 
     # Process shards
     shard_files = sorted(glob.glob(os.path.join(src_dir, "model-*.safetensors")))
-    print(f"Processing {len(shard_files)} shards...")
+
+    # Build cross-shard index for weights split across shards
+    print(f"Building cross-shard index for {len(shard_files)} shards...")
+    key_to_shard = {}
+    for sp in shard_files:
+        with safe_open(sp, framework="pt") as sf:
+            for k in sf.keys():
+                key_to_shard[k] = sp
 
     weight_map = {}
     total_quantized = 0
@@ -179,12 +186,17 @@ def main():
                 base = key[:-len(".weight_packed")]
                 scale_key = f"{base}.weight_scale"
 
-                if scale_key not in keys:
-                    print(f"  SKIP {base} (scale in different shard)")
+                if scale_key not in key_to_shard:
+                    print(f"  SKIP {base} (scale not found in any shard)")
                     continue
 
                 packed = f.get_tensor(key)
-                scale = f.get_tensor(scale_key)
+                if scale_key in keys:
+                    scale = f.get_tensor(scale_key)
+                else:
+                    with safe_open(key_to_shard[scale_key], framework="pt") as sf2:
+                        scale = sf2.get_tensor(scale_key)
+                    print(f"  (cross-shard scale for {base})")
 
                 qweight, scales, qzeros = convert_weight(packed, scale, group_size)
 

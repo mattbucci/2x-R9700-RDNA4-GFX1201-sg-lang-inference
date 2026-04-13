@@ -99,7 +99,13 @@ if not shard_files:
     print(f"No model*.safetensors files found in {SRC_DIR}")
     exit(1)
 
-print(f"\nProcessing {len(shard_files)} shards...")
+# Build cross-shard index for weights split across shards
+print(f"\nBuilding cross-shard index for {len(shard_files)} shards...")
+key_to_shard = {}
+for sp in shard_files:
+    with safe_open(sp, framework="pt") as sf:
+        for k in sf.keys():
+            key_to_shard[k] = sp
 
 weight_map = {}
 total_converted = 0
@@ -132,10 +138,15 @@ for shard_idx, shard_path in enumerate(shard_files):
 
             packed = f.get_tensor(key)  # [out, in//8] int32
             scale_key = f"{base}.weight_scale"
-            if scale_key not in keys:
-                print(f"  WARN {base}: scale in different shard, skipping")
+            if scale_key not in key_to_shard:
+                print(f"  SKIP {base}: scale not found in any shard")
                 continue
-            scale = f.get_tensor(scale_key)  # [out, in//group_size]
+            if scale_key in keys:
+                scale = f.get_tensor(scale_key)
+            else:
+                with safe_open(key_to_shard[scale_key], framework="pt") as sf2:
+                    scale = sf2.get_tensor(scale_key)
+                print(f"  (cross-shard scale for {base})")
 
             out_features = packed.shape[0]
             in_features = packed.shape[1] * PACK_FACTOR
@@ -149,8 +160,8 @@ for shard_idx, shard_path in enumerate(shard_files):
             # 3. Repack with AWQ interleaved order along output dim
             qweight = pack_4bit_to_int32_awq(unpacked_t)  # [in, out//8]
 
-            # 4. Transpose scales [out, in//G] → [in//G, out]
-            scales = scale.T.contiguous().to(torch.float16)
+            # 4. Transpose scales [out, in//G] → [in//G, out], clamp to FP16 range
+            scales = scale.T.contiguous().clamp(-65504, 65504).to(torch.float16)
 
             # 5. Create qzeros (symmetric: zero_point = 8)
             num_groups = in_features // GROUP_SIZE

@@ -26,7 +26,6 @@ MODELS_DIR = os.environ.get("MODELS_DIR", os.path.expanduser("~/AI/models"))
 SRC_DIR = os.environ.get("CT_INPUT", f"{MODELS_DIR}/Devstral-24B-AWQ-CT")
 OUTPUT_DIR = os.environ.get("AWQ_OUTPUT", f"{MODELS_DIR}/Devstral-24B-AWQ-4bit-calibrated")
 
-GROUP_SIZE = 128
 W_BIT = 4
 PACK_FACTOR = 32 // W_BIT
 
@@ -37,8 +36,20 @@ if not os.path.isdir(SRC_DIR):
     print("Run quantize_devstral_llmcompressor.py first.")
     exit(1)
 
-print(f"Source: {SRC_DIR}")
-print(f"Output: {OUTPUT_DIR}")
+# Auto-detect GROUP_SIZE from config
+config_path = os.path.join(SRC_DIR, "config.json")
+with open(config_path) as f:
+    _cfg = json.load(f)
+GROUP_SIZE = 128
+for group_cfg in _cfg.get("quantization_config", {}).get("config_groups", {}).values():
+    gs = group_cfg.get("weights", {}).get("group_size")
+    if gs:
+        GROUP_SIZE = gs
+        break
+
+print(f"Source:     {SRC_DIR}")
+print(f"Output:     {OUTPUT_DIR}")
+print(f"Group size: {GROUP_SIZE}")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
@@ -98,7 +109,13 @@ if not shard_files:
     print(f"No model*.safetensors files found in {SRC_DIR}")
     exit(1)
 
-print(f"\nProcessing {len(shard_files)} shards...")
+# Build cross-shard index for weights split across shards
+print(f"\nBuilding cross-shard index for {len(shard_files)} shards...")
+key_to_shard = {}
+for sp in shard_files:
+    with safe_open(sp, framework="pt") as sf:
+        for k in sf.keys():
+            key_to_shard[k] = sp
 
 weight_map = {}
 total_converted = 0
@@ -122,10 +139,15 @@ for shard_idx, shard_path in enumerate(shard_files):
             base = key[: -len(".weight_packed")]
             packed = f.get_tensor(key)
             scale_key = f"{base}.weight_scale"
-            if scale_key not in keys:
-                print(f"  WARN {base}: scale in different shard, skipping")
+            if scale_key not in key_to_shard:
+                print(f"  SKIP {base}: scale not found in any shard")
                 continue
-            scale = f.get_tensor(scale_key)
+            if scale_key in keys:
+                scale = f.get_tensor(scale_key)
+            else:
+                with safe_open(key_to_shard[scale_key], framework="pt") as sf2:
+                    scale = sf2.get_tensor(scale_key)
+                print(f"  (cross-shard scale for {base})")
 
             out_features = packed.shape[0]
             in_features = packed.shape[1] * PACK_FACTOR
@@ -133,7 +155,7 @@ for shard_idx, shard_path in enumerate(shard_files):
             unpacked = unpack_int32_to_4bit(packed)
             unpacked_t = unpacked.T.contiguous()
             qweight = pack_4bit_to_int32_awq(unpacked_t)
-            scales = scale.T.contiguous().to(torch.float16)
+            scales = scale.T.contiguous().clamp(-65504, 65504).to(torch.float16)
 
             num_groups = in_features // GROUP_SIZE
             num_out_packed = out_features // PACK_FACTOR
