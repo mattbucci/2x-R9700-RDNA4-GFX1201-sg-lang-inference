@@ -345,10 +345,13 @@ Kernel: 6.18.0-zen1-1-zen-p2p (custom linux-zen with CONFIG_HSA_AMD_P2P=y)
 CPU:    AMD Ryzen 9 7900 12-Core Processor
 RAM:    64 GB DDR5
 GPU:    2x AMD Radeon AI PRO R9700 (gfx1201, 32GB GDDR7 each)
+GPU interconnect: PCIe 4.0 x8 P2P/IPC per GPU (13.2 GB/s measured)*
 ROCm:   7.2.0
-RCCL:   2.27.7 (system, P2P/IPC transport confirmed)
+RCCL:   2.27.7 (system, P2P/IPC transport with GDR)
 Python: 3.12
 ```
+
+*Navi 48 connects to an internal PCIe switch at Gen5 x16, but the switch↔CPU uplink negotiates Gen4 x8 on AM5 (Raphael has 24 usable PCIe 5.0 lanes — dual GPU = x8/x8). Navi 48 itself is PCIe Gen4, so even with full x16 the theoretical max would be ~25 GB/s. No consumer RDNA4 GPU-to-GPU interconnect exists (no NVLink/XGMI equivalent). Threadripper TRX50 with Gen5 x16 per slot would be the upgrade path.
 
 ## Structure
 

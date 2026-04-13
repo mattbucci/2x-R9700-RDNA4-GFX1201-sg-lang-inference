@@ -16,6 +16,7 @@
 #   glm45-air      GLM-4.5-Air REAP 82B MoE AWQ (32K)
 #   gemma4         Gemma 4 26B MoE AWQ (4K, GPTQ forced-routing)
 #   gemma4-31b     Gemma 4 31B Dense AWQ (8K, BF16 required)
+#   gemma4-31b-ct  Gemma 4 31B Dense compressed-tensors (fallback if AWQ breaks quality)
 #   qwen35         Qwen3.5-27B DeltaNet AWQ (262K)
 #   qwen35-moe     Qwen3.5-35B-A3B MoE+DeltaNet AWQ (REAM/REAP compressed)
 
@@ -80,9 +81,19 @@ apply_preset() {
             OVERLAP=""
             ;;
         gemma4-31b)
-            MODEL="${MODEL:-$MODELS_DIR/gemma-4-31B-it-AWQ-RTN-128g}"
+            MODEL="${MODEL:-$MODELS_DIR/gemma-4-31B-it-AWQ-GPTQ-128g}"
             TOKENIZER="--tokenizer-path $MODELS_DIR/gemma-4-31B-it-BF16"
             DTYPE="bfloat16"  # BF16 required: Gemma was never designed for FP16 inference
+            CTX=8192; MAX_RUNNING=8; CHUNKED=4096
+            WARMUP="--skip-server-warmup"; WATCHDOG=1800
+            OVERLAP=""
+            ;;
+        gemma4-31b-ct)
+            # Compressed-tensors fallback: no CT→AWQ conversion, loads GPTQ directly
+            MODEL="${MODEL:-$MODELS_DIR/gemma-4-31B-it-CT-GPTQ-128g}"
+            TOKENIZER="--tokenizer-path $MODELS_DIR/gemma-4-31B-it-BF16"
+            QUANT="compressed-tensors"
+            DTYPE="bfloat16"
             CTX=8192; MAX_RUNNING=8; CHUNKED=4096
             WARMUP="--skip-server-warmup"; WATCHDOG=1800
             OVERLAP=""

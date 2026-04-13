@@ -38,24 +38,54 @@ used ONLY for comparison benchmarks — never as the primary serving solution.
 
 ## Quantization Pipeline
 
-All models served on SGLang use **AWQ 4-bit** format. The pipeline to create quantized models is:
+All models served on SGLang use **AWQ 4-bit** format. The pipeline produces weights at each step:
 
-### Step 1: GPTQ calibration (clean conda env, CPU)
+```
+BF16 model → GPTQ calibration (llmcompressor, quant env) → compressed-tensors → CT→AWQ conversion → native AWQ
+```
+
+Both intermediate formats are loadable by SGLang:
+- **AWQ** (preferred): `--quantization awq` — uses our Triton AWQ GEMM + HIP GEMV kernels
+- **compressed-tensors** (fallback): `--quantization compressed-tensors` — if CT→AWQ conversion degrades quality, load the CT weights directly. Uses Marlin on CUDA or torch dequant on RDNA4.
+
+### Environment Setup
+
+**CRITICAL: Use a separate conda env.** llmcompressor conflicts with SGLang deps.
+
+```bash
+conda create -n quant python=3.12 -y
+conda activate quant
+pip install llmcompressor transformers compressed-tensors accelerate datasets safetensors sentencepiece protobuf
+
+# Or install dev versions for latest model support:
+pip install git+https://github.com/vllm-project/llm-compressor.git --no-deps
+pip install git+https://github.com/neuralmagic/compressed-tensors.git --no-deps
+```
+
+**Why a separate env?**
+- llmcompressor pins `transformers==4.x`, SGLang needs `transformers>=5.x`
+- llmcompressor pulls `compressed-tensors` which conflicts with SGLang's quantization code
+- **Installing llmcompressor into sglang-triton36 WILL break SGLang**
+
+### Step 1: GPTQ calibration (quant env, CPU)
 ```
 BF16 model → llmcompressor oneshot GPTQ → compressed-tensors (CT) format
 ```
-- **Clean conda env** (`gemma4-quant` or similar) — llmcompressor conflicts with sglang deps
-- Install: `pip install llmcompressor transformers==4.57.6 compressed-tensors accelerate datasets`
-- CPU-only: `CUDA_VISIBLE_DEVICES=""`
+- Always `CUDA_VISIBLE_DEVICES=""` — run on CPU only
+- Drop caches first: `echo 3 | sudo tee /proc/sys/vm/drop_caches`
 - Output: compressed-tensors safetensors with `weight_packed` + `weight_scale` per layer
+- Use `scheme="W4A16"` for standard group_size=128
+- Use `config_groups` with `QuantizationScheme` for custom group_size (see 3090 repo README)
 
-### Step 2: CT → AWQ conversion (sglang-triton36 env)
+### Step 2: CT → AWQ conversion (either env)
 ```
 compressed-tensors → native AWQ format (qweight + scales + qzeros)
 ```
-- Use `scripts/quantize/convert_gemma4_ct_to_awq.py` or model-specific converter
+- Uses `torch` + `safetensors` only — can run in either env
+- Use model-specific converter (e.g. `convert_gemma4_31b_ct_to_awq.py`, `convert_qwen35_ct_to_awq.py`)
 - **Clamp scales** to [-65504, 65504] before `.to(torch.float16)` to prevent inf overflow
 - Verify output: `torch.isinf(scales).any()` must be False for every tensor
+- **Do NOT mix formats**: compressed-tensors (`weight_packed`) and GPTQ (`qweight/g_idx`) are different formats — use the correct converter for your input
 
 ### Step 3: Post-processing fixes (if needed)
 ```
