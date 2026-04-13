@@ -1,132 +1,43 @@
 diff --git a/python/sglang/srt/configs/model_config.py b/python/sglang/srt/configs/model_config.py
-index 691f06411..67cce0e63 100644
+index 691f06411..05325503d 100644
 --- a/python/sglang/srt/configs/model_config.py
 +++ b/python/sglang/srt/configs/model_config.py
-@@ -196,8 +196,16 @@ class ModelConfig:
-         self.is_image_understandable_model = enable_multimodal and hasattr(
-             self.hf_config, "vision_config"
+@@ -155,6 +155,7 @@ class ModelConfig:
+         if enable_multimodal is None:
+             mm_disabled_models = [
+                 "Gemma3ForConditionalGeneration",
++                "Gemma4ForConditionalGeneration",
+                 "Llama4ForConditionalGeneration",
+                 "Step3VLForConditionalGeneration",
+             ]
+@@ -185,7 +186,13 @@ class ModelConfig:
+             or hasattr(self.hf_config, "vision_config")
+             or hasattr(self.hf_config, "audio_config")
          )
--        self.is_audio_understandable_model = enable_multimodal and hasattr(
--            self.hf_config, "audio_config"
-+
-+        # Models expose audio_config at different nesting levels:
-+        #   - top-level audio_config: e.g. Qwen2Audio
-+        #   - thinker_config.audio_config: Qwen3-Omni, Qwen3-ASR (nested thinker arch)
-+        #   - is_audio_model(): Whisper, Qwen3-ASR (architecture-based fallback)\
-+        # TODO: Handle this more robustly by standardizing the config structure in the future
-+        self.is_audio_understandable_model = enable_multimodal and (
-+            hasattr(self.hf_config, "audio_config")
-+            or hasattr(getattr(self.hf_config, "thinker_config", None), "audio_config")
-+            or is_audio_model(self.hf_config.architectures)
+-        self.is_multimodal = enable_multimodal and (
++        # CausalLM architectures are text-only even if the config class has
++        # vision/audio attributes (e.g. Gemma4ForCausalLM uses Gemma4Config
++        # which always defines vision_config/audio_config as class defaults)
++        is_causal_lm_only = any(
++            "ForCausalLM" in arch for arch in self.hf_config.architectures
++        ) and not is_multimodal_model(self.hf_config.architectures)
++        self.is_multimodal = enable_multimodal and not is_causal_lm_only and (
+             is_multimodal_model(self.hf_config.architectures)
+             or has_multimodal_subconfig
          )
+@@ -1438,6 +1445,8 @@ def compute_mla_mscale_scaling(rope_scaling: dict, base_scaling: float) -> float
+ def is_hybrid_swa_model(model_architectures: List[str]):
  
-         self.is_multimodal_chunked_prefill_supported = (
-@@ -232,6 +240,8 @@ class ModelConfig:
- 
-         # Cache attributes
-         self.hf_eos_token_id = self._get_hf_eos_token_id()
-+        # Set by scheduler when reasoning_parser is enabled
-+        self.think_end_id: Optional[int] = None
- 
-         # multimodal
-         self.image_token_id = getattr(
-@@ -374,6 +384,8 @@ class ModelConfig:
-         self.is_hybrid_swa_compress = self.hf_config.architectures[0] in [
-             "MiMoV2FlashForCausalLM",
-             "MiMoV2MTP",
-+            "Gemma4ForCausalLM",
-+            "Gemma4ForConditionalGeneration",
-         ]
- 
-     def _derive_context_length(self, context_length: int):
-@@ -431,7 +443,7 @@ class ModelConfig:
-         self.swa_v_head_dim = getattr(
-             self.hf_text_config,
-             "swa_v_head_dim",
--            self.v_head_dim,
-+            self.swa_head_dim,
-         )
-         # FIXME: temporary special judge for MLA architecture
-         if (
-@@ -563,6 +575,12 @@ class ModelConfig:
-         self.num_key_value_heads = getattr(
-             self.hf_text_config, "num_key_value_heads", None
-         )
-+        self.first_k_dense_replace = getattr(
-+            self.hf_text_config, "first_k_dense_replace", None
-+        )
-+        self.full_attention_interval = getattr(
-+            self.hf_text_config, "full_attention_interval", None
-+        )
- 
-         # for Dbrx and MPT models
-         if self.hf_config.model_type in ["dbrx", "mpt"]:
-@@ -1053,8 +1071,10 @@ class ModelConfig:
-                     f"supported in ROCm."
-                 )
-             if self.quantization not in optimized_quantization_methods:
--                # Don't warn for MXFP4 on SM100 since it has optimized kernels
--                if not (self.quantization == "mxfp4" and is_sm100_supported()):
-+                # Don't warn for MXFP4/MXFP8 on SM100 since they have optimized kernels
-+                if not (
-+                    self.quantization in ["mxfp4", "mxfp8"] and is_sm100_supported()
-+                ):
-                     logger.warning(
-                         "%s quantization is not fully "
-                         "optimized yet. The speed can be slower than "
-@@ -1299,6 +1319,7 @@ multimodal_model_archs = [
-     "Ernie4_5_VLMoeForConditionalGeneration",
-     "Gemma3ForConditionalGeneration",
-     "Gemma3nForConditionalGeneration",
-+    "Gemma4ForConditionalGeneration",
-     "Glm4vForConditionalGeneration",
-     "Glm4vMoeForConditionalGeneration",
-     "GlmOcrForConditionalGeneration",
-@@ -1327,12 +1348,14 @@ multimodal_model_archs = [
-     "Qwen3VLMoeForConditionalGeneration",
-     "Qwen3_5ForConditionalGeneration",
-     "Qwen3_5MoeForConditionalGeneration",
-+    "Qwen3ASRForConditionalGeneration",
-     "Qwen3OmniMoeForConditionalGeneration",
-     "KimiVLForConditionalGeneration",
-     "InternVLChatModel",
-     "InternS1ForConditionalGeneration",
-     "InternS1ProForConditionalGeneration",
-     "Phi4MMForCausalLM",
-+    "VoxtralForConditionalGeneration",
-     "WhisperForConditionalGeneration",
-     "Step3VLForConditionalGeneration",
-     "POINTSV15ChatModel",
-@@ -1374,6 +1397,7 @@ def is_multimodal_model(model_architectures: List[str]):
- def is_audio_model(model_architectures: List[str]):
-     models = [
-         "WhisperForConditionalGeneration",
-+        "Qwen3ASRForConditionalGeneration",
-     ]
-     return any(model in model_architectures for model in models)
- 
-@@ -1444,6 +1468,8 @@ def is_hybrid_swa_model(model_architectures: List[str]):
-         "MiMoV2MTP",
-         "Step3p5ForCausalLM",
-         "Step3p5MTP",
+     hybrid_swa_archs = {
 +        "Gemma4ForCausalLM",
 +        "Gemma4ForConditionalGeneration",
-     }
-     return any(arch in hybrid_swa_archs for arch in model_architectures)
- 
-@@ -1461,7 +1487,7 @@ def get_hybrid_layer_ids(
-             i for i in range(num_hidden_layers) if (i + 1) % 4 == 0
+         "Llama4ForConditionalGeneration",
+         "GptOssForCausalLM",
+         "MiMoV2FlashForCausalLM",
+@@ -1491,6 +1500,17 @@ def get_hybrid_layer_ids(
+             for i, x in enumerate(layer_types)
+             if x == "full_attention" and i < num_hidden_layers
          ]
-     elif "GptOssForCausalLM" in model_architectures:
--        layer_types = getattr(hf_text_config, "layer_types", None)
-+        layer_types = getattr(hf_text_config, "layer_types", [])
-         swa_attention_layer_ids = [
-             i for i, x in enumerate(layer_types) if x == "sliding_attention"
-         ]
-@@ -1494,6 +1520,17 @@ def get_hybrid_layer_ids(
-     elif "Step3p5MTP" in model_architectures:
-         swa_attention_layer_ids = [0]
-         full_attention_layer_ids = []
 +    elif (
 +        "Gemma4ForCausalLM" in model_architectures
 +        or "Gemma4ForConditionalGeneration" in model_architectures
@@ -138,22 +49,14 @@ index 691f06411..67cce0e63 100644
 +        full_attention_layer_ids = [
 +            i for i, x in enumerate(layer_types) if x == "full_attention"
 +        ]
-     else:
-         swa_attention_layer_ids = None
-         full_attention_layer_ids = None
+     elif "Step3p5MTP" in model_architectures:
+         swa_attention_layer_ids = [0]
+         full_attention_layer_ids = []
 diff --git a/python/sglang/srt/layers/attention/triton_backend.py b/python/sglang/srt/layers/attention/triton_backend.py
-index 18ed55572..c1f1f48fb 100644
+index 18ed55572..ac03c1af2 100644
 --- a/python/sglang/srt/layers/attention/triton_backend.py
 +++ b/python/sglang/srt/layers/attention/triton_backend.py
-@@ -12,6 +12,7 @@ from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
- from sglang.srt.layers.attention.utils import create_flashinfer_kv_indices_triton
- from sglang.srt.layers.dp_attention import get_attention_tp_size
- from sglang.srt.layers.radix_attention import AttentionType
-+from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool
- from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
- from sglang.srt.speculative.spec_utils import generate_draft_decode_kv_indices
- from sglang.srt.utils import (
-@@ -51,6 +52,8 @@ class ForwardMetadata:
+@@ -51,6 +51,8 @@ class ForwardMetadata:
      window_kv_indices: torch.Tensor
      window_num_kv_splits: torch.Tensor
      window_kv_offsets: torch.Tensor
@@ -162,47 +65,22 @@ index 18ed55572..c1f1f48fb 100644
  
  
  class TritonAttnBackend(AttentionBackend):
-@@ -94,16 +97,30 @@ class TritonAttnBackend(AttentionBackend):
-         self.num_kv_head = model_runner.model_config.get_num_kv_heads(
-             get_attention_tp_size()
-         )
--        if (
-+        # The decode triton kernel derives attn_lse offsets from attn_logits
-+        # strides via integer division by v_head_dim (the "// Lv" trick in
-+        # _fwd_kernel_stage1/stage2), so attn_logits.shape[-1] must exactly
-+        # match the layer's v_head_dim. For hybrid SWA models where SWA and
-+        # full-attention layers use different v_head_dim (e.g. Gemma 4:
-+        # swa=256, full=512), we allocate a second buffer for SWA layers.
-+        full_v_head_dim = model_runner.model_config.v_head_dim
-+        swa_v_head_dim = model_runner.model_config.swa_v_head_dim
-+        if self.sliding_window_size is not None and swa_v_head_dim != full_v_head_dim:
-+            self.v_head_dim = full_v_head_dim
-+            self.swa_v_head_dim = swa_v_head_dim
-+        elif (
-             model_runner.hybrid_gdn_config is not None
-             or model_runner.kimi_linear_config is not None
-+            or model_runner.linear_attn_model_spec is not None
-         ):
-             # For hybrid linear models, layer_id = 0 may not be full attention
-             self.v_head_dim = model_runner.token_to_kv_pool.get_v_head_dim()
-+            self.swa_v_head_dim = None
-         else:
+@@ -104,6 +106,14 @@ class TritonAttnBackend(AttentionBackend):
              self.v_head_dim = model_runner.token_to_kv_pool.get_value_buffer(0).shape[
                  -1
              ]
++        # Track whether SWA layers need different v_head_dim
++        full_v_head_dim = model_runner.model_config.v_head_dim
++        swa_v_head_dim = model_runner.model_config.swa_v_head_dim
++        if self.sliding_window_size is not None and swa_v_head_dim != full_v_head_dim:
++            self.swa_v_head_dim = swa_v_head_dim
++        else:
 +            self.swa_v_head_dim = None
++
          self.max_context_len = model_runner.model_config.context_len
          self.device = model_runner.device
          self.device_core_count = get_device_core_count(model_runner.gpu_id)
-@@ -242,6 +259,7 @@ class TritonAttnBackend(AttentionBackend):
-         window_kv_indices = None
-         window_num_kv_splits = None
-         window_kv_offsets = None
-+        swa_attn_logits = None
-         spec_info = forward_batch.spec_info
- 
-         if forward_batch.forward_mode.is_decode_or_idle():
-@@ -290,6 +308,14 @@ class TritonAttnBackend(AttentionBackend):
+@@ -290,6 +300,14 @@ class TritonAttnBackend(AttentionBackend):
                  dtype=torch.float32,
                  device=self.device,
              )
@@ -217,7 +95,18 @@ index 18ed55572..c1f1f48fb 100644
              attn_lse = torch.empty(
                  (bs, self.num_head, self.max_kv_splits),
                  dtype=torch.float32,
-@@ -436,6 +462,7 @@ class TritonAttnBackend(AttentionBackend):
+@@ -422,6 +440,10 @@ class TritonAttnBackend(AttentionBackend):
+             max_extend_len = max(forward_batch.extend_seq_lens_cpu)
+             num_kv_splits = None
+ 
++        # For non-decode modes, swa_attn_logits is not needed
++        if not forward_batch.forward_mode.is_decode():
++            swa_attn_logits = None
++
+         self.forward_metadata = ForwardMetadata(
+             attn_logits,
+             attn_lse,
+@@ -436,6 +458,7 @@ class TritonAttnBackend(AttentionBackend):
              window_kv_indices,
              window_num_kv_splits,
              window_kv_offsets,
@@ -225,18 +114,13 @@ index 18ed55572..c1f1f48fb 100644
          )
  
      def init_cuda_graph_state(
-@@ -450,6 +477,19 @@ class TritonAttnBackend(AttentionBackend):
+@@ -450,6 +473,14 @@ class TritonAttnBackend(AttentionBackend):
              dtype=torch.float32,
              device=self.device,
          )
 +        if self.swa_v_head_dim is not None:
 +            self.cuda_graph_swa_attn_logits = torch.zeros(
-+                (
-+                    max_num_tokens,
-+                    self.num_head,
-+                    self.max_kv_splits,
-+                    self.swa_v_head_dim,
-+                ),
++                (max_num_tokens, self.num_head, self.max_kv_splits, self.swa_v_head_dim),
 +                dtype=torch.float32,
 +                device=self.device,
 +            )
@@ -245,15 +129,7 @@ index 18ed55572..c1f1f48fb 100644
          self.cuda_graph_attn_lse = torch.zeros(
              (max_num_tokens, self.num_head, self.max_kv_splits),
              dtype=torch.float32,
-@@ -520,6 +560,7 @@ class TritonAttnBackend(AttentionBackend):
-         window_kv_indices = None
-         window_num_kv_splits = None
-         window_kv_offsets = None
-+        swa_attn_logits = None
- 
-         if forward_mode.is_decode_or_idle():
-             if spec_info is None:
-@@ -558,6 +599,7 @@ class TritonAttnBackend(AttentionBackend):
+@@ -558,6 +589,7 @@ class TritonAttnBackend(AttentionBackend):
                  kv_indptr, kv_indices = spec_info.kv_indptr, spec_info.kv_indices
  
              attn_logits = self.cuda_graph_attn_logits
@@ -261,7 +137,18 @@ index 18ed55572..c1f1f48fb 100644
              attn_lse = self.cuda_graph_attn_lse
              max_extend_len = None
              num_kv_splits = self.cuda_graph_num_kv_splits
-@@ -659,6 +701,7 @@ class TritonAttnBackend(AttentionBackend):
+@@ -645,6 +677,10 @@ class TritonAttnBackend(AttentionBackend):
+                 f"Invalid forward mode: {forward_mode=} for CUDA Graph capture."
+             )
+ 
++        # For non-decode CUDA graph modes, swa_attn_logits is not needed
++        if not forward_mode.is_decode():
++            swa_attn_logits = None
++
+         self.forward_metadata = ForwardMetadata(
+             attn_logits,
+             attn_lse,
+@@ -659,6 +695,7 @@ class TritonAttnBackend(AttentionBackend):
              window_kv_indices,
              window_num_kv_splits,
              window_kv_offsets,
@@ -269,82 +156,61 @@ index 18ed55572..c1f1f48fb 100644
          )
  
      def init_forward_metadata_replay_cuda_graph(
-@@ -819,26 +862,37 @@ class TritonAttnBackend(AttentionBackend):
-         else:
-             o = torch.empty_like(q)
- 
--        # Save KV cache first (must do this before unified kernel)
--        if save_kv_cache:
--            if (
--                self.use_mla or layer.k_scale is None
--            ):  # Triton MLA currently doesn't support quantized kv cache
--                forward_batch.token_to_kv_pool.set_kv_buffer(
--                    layer,
--                    forward_batch.out_cache_loc,
--                    k,
--                    v,
--                )
--            else:
--                forward_batch.token_to_kv_pool.set_kv_buffer(
--                    layer,
--                    forward_batch.out_cache_loc,
--                    k.clone(),  # cloned to protect k,v from in-place mutation in set_kv_buffer
--                    v.clone(),
--                    layer.k_scale,
--                    layer.v_scale,
--                )
+@@ -813,6 +850,18 @@ class TritonAttnBackend(AttentionBackend):
+         save_kv_cache=True,
+         sinks=None,
+     ):
++        # Handle KV-shared layers (Gemma4): k=None, v=None means retrieve from cache
 +        if k is None and v is None:
 +            pool = forward_batch.token_to_kv_pool
 +            cache_loc = forward_batch.out_cache_loc
-+            if isinstance(pool, SWAKVPool) and pool.layers_mapping[layer.layer_id][1]:
++            if hasattr(pool, 'layers_mapping') and pool.layers_mapping[layer.layer_id][1]:
 +                cache_loc = pool.translate_loc_from_full_to_swa(cache_loc)
 +            k_buffer, v_buffer = pool.get_kv_buffer(layer.layer_id)
 +            k = k_buffer[cache_loc]
 +            v = v_buffer[cache_loc]
 +        elif k is None or v is None:
 +            raise ValueError("Both k and v should be None or not None")
-+        else:
-+            # Save KV cache first (must do this before unified kernel)
-+            if save_kv_cache:
-+                if (
-+                    self.use_mla or layer.k_scale is None
-+                ):  # Triton MLA currently doesn't support quantized kv cache
-+                    forward_batch.token_to_kv_pool.set_kv_buffer(
-+                        layer,
-+                        forward_batch.out_cache_loc,
-+                        k,
-+                        v,
-+                    )
-+                else:
-+                    forward_batch.token_to_kv_pool.set_kv_buffer(
-+                        layer,
-+                        forward_batch.out_cache_loc,
-+                        k.clone(),  # cloned to protect k,v from in-place mutation in set_kv_buffer
-+                        v.clone(),
-+                        layer.k_scale,
-+                        layer.v_scale,
-+                    )
- 
-         logits_soft_cap = logit_capping_mod(layer.logit_capping_method, layer.logit_cap)
- 
-@@ -1089,6 +1143,16 @@ class TritonAttnBackend(AttentionBackend):
++
+         # TODO: reuse the buffer across layers
+         if layer.qk_head_dim != layer.v_head_dim:
+             o = q.new_empty((q.shape[0], layer.tp_q_head_num * layer.v_head_dim))
+@@ -1045,6 +1094,18 @@ class TritonAttnBackend(AttentionBackend):
+         save_kv_cache=True,
+         sinks=None,
+     ):
++        # Handle KV-shared layers (Gemma4): k=None, v=None means retrieve from cache
++        if k is None and v is None:
++            pool = forward_batch.token_to_kv_pool
++            cache_loc = forward_batch.out_cache_loc
++            if hasattr(pool, 'layers_mapping') and pool.layers_mapping[layer.layer_id][1]:
++                cache_loc = pool.translate_loc_from_full_to_swa(cache_loc)
++            k_buffer, v_buffer = pool.get_kv_buffer(layer.layer_id)
++            k = k_buffer[cache_loc]
++            v = v_buffer[cache_loc]
++        elif k is None or v is None:
++            raise ValueError("Both k and v should be None or not None")
++
+         # During torch.compile, there is a bug in rotary_emb that causes the
+         # output value to have a 3D tensor shape. This reshapes the output correctly.
+         q = q.reshape(-1, layer.tp_q_head_num * layer.qk_head_dim)
+@@ -1089,6 +1150,15 @@ class TritonAttnBackend(AttentionBackend):
              k_descale = 1.0
              v_descale = 1.0
  
 +        # Select the correctly-sized attn_logits buffer for this layer.
-+        # The triton kernel's // Lv stride trick requires attn_logits.shape[-1]
-+        # to exactly match the layer's v_head_dim.
 +        attn_logits = self.forward_metadata.attn_logits
 +        if (
 +            self.forward_metadata.swa_attn_logits is not None
-+            and layer.v_head_dim == self.swa_v_head_dim
++            and layer.sliding_window_size is not None
++            and layer.sliding_window_size > -1
 +        ):
 +            attn_logits = self.forward_metadata.swa_attn_logits
 +
          self.decode_attention_fwd(
              q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
              forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id),
-@@ -1096,7 +1160,7 @@ class TritonAttnBackend(AttentionBackend):
+@@ -1096,7 +1166,7 @@ class TritonAttnBackend(AttentionBackend):
              o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
              kv_indptr,
              kv_indices,
@@ -353,254 +219,37 @@ index 18ed55572..c1f1f48fb 100644
              self.forward_metadata.attn_lse,
              self.forward_metadata.num_kv_splits,
              self.max_kv_splits,
-diff --git a/python/sglang/srt/layers/attention/triton_ops/prefill_attention.py b/python/sglang/srt/layers/attention/triton_ops/prefill_attention.py
-index ac0fc72af..a50b89787 100644
---- a/python/sglang/srt/layers/attention/triton_ops/prefill_attention.py
-+++ b/python/sglang/srt/layers/attention/triton_ops/prefill_attention.py
-@@ -168,13 +168,14 @@ def _fwd_kernel(
- 
- 
- def context_attention_fwd(
--    q, k, v, o, b_start_loc, b_seq_len, max_input_len, is_causal=True
-+    q, k, v, o, b_start_loc, b_seq_len, max_input_len, is_causal=True, sm_scale=None
- ):
-     """
-     q, k, v: [b * s, head, head_dim]
-     b_start_loc: [b]
-     b_seq_len: [b]
-     out: [b * s, head, head_dim]
-+    sm_scale: softmax scale, defaults to 1/sqrt(head_dim)
-     """
-     if (_is_cuda or _is_hip) and CUDA_CAPABILITY[0] > 8:
-         BLOCK = 128
-@@ -183,7 +184,8 @@ def context_attention_fwd(
- 
-     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
- 
--    sm_scale = 1.0 / (Lq**0.5)
-+    if sm_scale is None:
-+        sm_scale = 1.0 / (Lq**0.5)
-     batch, head = b_seq_len.shape[0], q.shape[1]
-     kv_group_num = q.shape[1] // k.shape[1]
- 
 diff --git a/python/sglang/srt/layers/communicator.py b/python/sglang/srt/layers/communicator.py
-index 936eecb90..54e2326b2 100644
+index 936eecb90..2146b3649 100644
 --- a/python/sglang/srt/layers/communicator.py
 +++ b/python/sglang/srt/layers/communicator.py
-@@ -80,14 +80,68 @@ _is_gfx95_supported = is_gfx95_supported()
+@@ -75,7 +75,8 @@ _is_cuda = is_cuda()
+ _is_flashinfer_available = is_flashinfer_available()
+ _is_sm90_supported = _is_cuda and is_sm90_supported()
+ _is_sm100_supported = _is_cuda and is_sm100_supported()
+-_use_aiter = get_bool_env_var("SGLANG_USE_AITER") and is_hip()
++_is_hip = is_hip()
++_use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+ _is_gfx95_supported = is_gfx95_supported()
  _is_npu = is_npu()
  _use_ag_after_qlora = envs.SGLANG_USE_AG_AFTER_QLORA.get()
+@@ -883,9 +884,16 @@ class CommunicateWithAllReduceAndLayerNormFn:
+                 handled = True
  
--if _use_aiter and _is_gfx95_supported:
--    from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
-+if _use_aiter:
-+    from aiter.ops.rmsnorm import add_rmsnorm_quant as _aiter_add_rmsnorm_quant
-+    from aiter.ops.rmsnorm import rmsnorm_quant as _aiter_rmsnorm_quant
- 
--    from sglang.srt.layers.quantization.rocm_mxfp4_utils import fused_rms_mxfp4_quant
-+    from sglang.srt.layers.quantization.fp8_kernel import fp8_dtype as _aiter_fp8_dtype
-+
-+    if _is_gfx95_supported:
-+        from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
-+
-+        from sglang.srt.layers.quantization.rocm_mxfp4_utils import (
-+            fused_rms_mxfp4_quant,
-+        )
- elif _is_npu:
-     from sglang.srt.hardware_backend.npu.cmo import prepare_weight_cache
- 
- 
-+def _fused_rmsnorm_fp8_per_token_quant(
-+    hidden_states: torch.Tensor,
-+    weight: torch.Tensor,
-+    epsilon: float,
-+    residual: Optional[torch.Tensor] = None,
-+):
-+    """Fused (optional residual-add +) RMSNorm + FP8 per-token quantization.
-+
-+    Only used with the aiter (ROCm) backend.
-+
-+    Args:
-+        residual: if provided, computes hidden_states + residual before RMSNorm
-+                  and returns updated residual_out as second element.
-+
-+    Returns:
-+        If residual is None:  (out_fp8, scale)
-+        If residual provided: ((out_fp8, scale), residual_out)
-+    """
-+    M, N = hidden_states.shape
-+    out_fp8 = torch.empty((M, N), dtype=_aiter_fp8_dtype, device=hidden_states.device)
-+    scale = torch.empty(M, dtype=torch.float32, device=hidden_states.device)
-+    if residual is not None:
-+        residual_out = torch.empty_like(hidden_states)
-+        _aiter_add_rmsnorm_quant(
-+            out_fp8,
-+            hidden_states,
-+            residual,
-+            residual_out,
-+            scale,
-+            weight,
-+            epsilon,
-+            0,  # group_size=0 → per-token
-+        )
-+        return (out_fp8, scale.unsqueeze(1)), residual_out
-+    else:
-+        _aiter_rmsnorm_quant(
-+            out_fp8,
-+            hidden_states,
-+            scale,
-+            weight,
-+            epsilon,
-+            0,  # group_size=0 → per-token
-+        )
-+        return (out_fp8, scale.unsqueeze(1))
-+
-+
- # TODO: According to the discussion in https://github.com/flashinfer-ai/flashinfer/issues/1223#issuecomment-3047256465
- # We set the max token num to 128 for allreduce fusion with min-latency case(use_oneshot=True).
- FUSE_ALLREDUCE_MAX_BATCH_SIZE = 2048
-@@ -113,11 +167,12 @@ def apply_flashinfer_allreduce_fusion(batch_size: int):
- def apply_aiter_all_reduce_fusion(input_tensor: torch.Tensor):
-     n = input_tensor.shape[-1]
-     total_bytes = input_tensor.numel() * input_tensor.element_size()
-+    # Aiter's should_custom_ar uses <= max_size/2 (64 MB); match that boundary.
-     return (
-         _use_aiter
-         and total_bytes > 0
-         and n <= 16384
--        and total_bytes < 8 * 1024 * 8192
-+        and total_bytes <= 8 * 1024 * 8192
-         and get_tensor_model_parallel_world_size() != 6
-         and not is_dp_attention_enabled()
-         and get_global_server_args().enable_aiter_allreduce_fusion
-@@ -147,7 +202,6 @@ class ScatterMode(Enum):
- 
- 
- class AttentionInputs:
--
-     def __init__(
-         self,
-         hidden_states: torch.Tensor,
-@@ -195,8 +249,10 @@ class AttnTpContext:
-         self.allow_input_scattered = False
-         self.input_scattered_ = False
-         self.attn_inputs_: Optional[AttentionInputs] = None
-+        self.is_nsa = False
- 
-     def init_context(self, q_lora_rank, is_nsa):
-+        self.is_nsa = is_nsa
-         self.allow_input_scattered = (
-             get_global_server_args().enable_attn_tp_input_scattered
-             and (_is_cuda or _is_npu)
-@@ -309,8 +365,8 @@ class LayerScatterModes:
-         if context.is_layer_sparse:
-             return (
-                 ScatterMode.SCATTERED
-+                # Token dispatch/combine will be handled outside of LayerCommunicator for these modes.
-                 if (
--                    # Token dispatch/combine will be handled outside of LayerCommunicator for these modes.
-                     not get_moe_a2a_backend().is_none()
-                     or should_use_flashinfer_cutlass_moe_fp4_allgather()
+             if not handled:
++                # Float32 all-reduce for TP precision on HIP (prevents
++                # FP16 rounding accumulation through DeltaNet recurrence).
++                orig_dtype = hidden_states.dtype
++                if _is_hip and orig_dtype != torch.float32:
++                    hidden_states = hidden_states.float()
+                 hidden_states = attention_tensor_model_parallel_all_reduce(
+                     hidden_states
                  )
-@@ -482,9 +538,13 @@ class LayerCommunicator:
-                             None,
-                             None,
-                         )
--                    elif _use_aiter and _is_gfx95_supported and ("fp8" in quant_format):
--
--                        hidden_states, _, _, _res = fused_rms_fp8_group_quant(
-+                    elif _use_aiter and _is_gfx95_supported and (quant_format == "fp8"):
-+                        # aiter (ROCm gfx95) fused RMSNorm + FP8 group quant.
-+                        # When NSA is active, also preserve the unquantized bf16
-+                        # output as a 3-tuple (fp8, scale, bf16) so the NSA
-+                        # indexer can skip redundant FP8 dequantization.
-+                        _nsa_needs_bf16 = get_attn_tp_context().is_nsa
-+                        hidden_states, _unq_bf16, _, _res = fused_rms_fp8_group_quant(
-                             hidden_states,
-                             self.input_layernorm.weight,
-                             self.input_layernorm.variance_epsilon,
-@@ -494,13 +554,25 @@ class LayerCommunicator:
-                             group_size=128,
-                             dtype_quant=torch.float8_e4m3fn,
-                             res1=None,
--                            output_unquantized_inp1=False,
-+                            output_unquantized_inp1=_nsa_needs_bf16,
-+                        )
-+                        if _nsa_needs_bf16:
-+                            hidden_states = (
-+                                hidden_states[0],
-+                                hidden_states[1],
-+                                _unq_bf16,
-+                            )
-+
-+                    elif _use_aiter and (quant_format == "fp8_per_token"):
-+                        hidden_states = _fused_rmsnorm_fp8_per_token_quant(
-+                            hidden_states,
-+                            self.input_layernorm.weight.data,
-+                            self.input_layernorm.variance_epsilon,
-                         )
- 
-                     else:
-                         hidden_states = self.input_layernorm(hidden_states)
-                 else:
--
-                     if _use_aiter and _is_gfx95_supported and ("mxfp4" in quant_format):
-                         hidden_states, *_, residual = fused_rms_mxfp4_quant(
-                             hidden_states,
-@@ -511,22 +583,39 @@ class LayerCommunicator:
-                             None,
-                             residual,
-                         )
--                    elif _use_aiter and _is_gfx95_supported and ("fp8" in quant_format):
--                        # RMSNorm + FP8 per-group quant
--                        # return hidden_states：
--                        #   out_fp8  : FP8 activation →  a8w8 GEMM
--                        #   out_bs   : block-scale →  gemm_a8w8_blockscale.x_scale
--                        hidden_states, _, _, residual = fused_rms_fp8_group_quant(
-+                    elif _use_aiter and _is_gfx95_supported and (quant_format == "fp8"):
-+                        # aiter (ROCm gfx95) fused RMSNorm + FP8 group quant
-+                        # with residual addition. When NSA is active, pack
-+                        # the unquantized bf16 as a 3-tuple (fp8, scale, bf16).
-+                        _nsa_needs_bf16 = get_attn_tp_context().is_nsa
-+                        hidden_states, _unq_bf16, _, residual = (
-+                            fused_rms_fp8_group_quant(
-+                                hidden_states,
-+                                self.input_layernorm.weight,
-+                                self.input_layernorm.variance_epsilon,
-+                                inp2=None,
-+                                inp2_weight=None,
-+                                inp2_epsilon=None,
-+                                group_size=128,
-+                                dtype_quant=torch.float8_e4m3fn,
-+                                res1=residual,
-+                                output_unquantized_inp1=_nsa_needs_bf16,
-+                            )
-+                        )
-+                        if _nsa_needs_bf16:
-+                            hidden_states = (
-+                                hidden_states[0],
-+                                hidden_states[1],
-+                                _unq_bf16,
-+                            )
-+                    elif _use_aiter and (quant_format == "fp8_per_token"):
-+                        if post_residual_addition is not None:
-+                            residual = residual + post_residual_addition
-+                        hidden_states, residual = _fused_rmsnorm_fp8_per_token_quant(
-                             hidden_states,
--                            self.input_layernorm.weight,
-+                            self.input_layernorm.weight.data,
-                             self.input_layernorm.variance_epsilon,
--                            inp2=None,
--                            inp2_weight=None,
--                            inp2_epsilon=None,
--                            group_size=128,
--                            dtype_quant=torch.float8_e4m3fn,
--                            res1=residual,
--                            output_unquantized_inp1=False,
-+                            residual=residual,
-                         )
-                     else:
-                         hidden_states, residual = self.input_layernorm(
++                if _is_hip and hidden_states.dtype != orig_dtype:
++                    hidden_states = hidden_states.to(orig_dtype)
+                 if _is_npu and context.cache is not None:
+                     _ = prepare_weight_cache(hidden_states, context.cache)
+                 hidden_states, residual = layernorm(hidden_states, residual)
 diff --git a/python/sglang/srt/layers/gemma4_fused_ops.py b/python/sglang/srt/layers/gemma4_fused_ops.py
 new file mode 100644
 index 000000000..5f227db82
@@ -687,91 +336,10 @@ index 000000000..5f227db82
 +    )
 +    return out
 diff --git a/python/sglang/srt/layers/layernorm.py b/python/sglang/srt/layers/layernorm.py
-index e4960bdb4..55d880643 100644
+index e4960bdb4..c3544c41b 100644
 --- a/python/sglang/srt/layers/layernorm.py
 +++ b/python/sglang/srt/layers/layernorm.py
-@@ -65,11 +65,14 @@ if _is_cuda or _is_xpu:
-         gemma_rmsnorm,
-         rmsnorm,
-     )
-+_has_aiter_layer_norm = False
- _has_vllm_rms_norm = False
- if _use_aiter:
-+    from aiter import layernorm2d_fwd as layer_norm
-     from aiter import rmsnorm2d_fwd as rms_norm
-     from aiter import rmsnorm2d_fwd_with_add as fused_add_rms_norm
- 
-+    _has_aiter_layer_norm = True  # aiter provides the layer_norm functions
-     _has_vllm_rms_norm = True  # aiter provides the rms_norm functions
- elif _is_hip:
-     try:
-@@ -181,7 +184,16 @@ class RMSNorm(MultiPlatformOp):
-         post_residual_addition: Optional[torch.Tensor] = None,
-     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-         if x.numel() == 0:
-+            if residual is not None:
-+                if post_residual_addition is not None:
-+                    residual = residual + post_residual_addition
-+                return x, residual
-             return x
-+        # sgl_kernel rmsnorm requires 2D input; reshape higher-rank tensors
-+        needs_reshape = x.dim() != 2 and residual is None
-+        if needs_reshape:
-+            original_shape = x.shape
-+            x = x.contiguous().reshape(-1, original_shape[-1])
-         if self.variance_size_override is not None:
-             return self.forward_native(x, residual, post_residual_addition)
-         if is_batch_invariant_mode_enabled():
-@@ -205,6 +217,8 @@ class RMSNorm(MultiPlatformOp):
-             fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
-             return x, residual
-         out = rmsnorm(x, self.weight.data, self.variance_epsilon)
-+        if needs_reshape:
-+            out = out.reshape(original_shape)
-         return out
- 
-     def forward_npu(
-@@ -421,7 +435,18 @@ class LayerNorm(MultiPlatformOp):
-         self,
-         x: torch.Tensor,
-     ) -> torch.Tensor:
--        return self.forward_native(x)
-+        if (
-+            _has_aiter_layer_norm
-+            and x.dtype in (torch.bfloat16, torch.float16)
-+            and x.dtype == self.dtype
-+        ):
-+            orig_shape = x.shape
-+            x = x.reshape(-1, self.hidden_size)
-+            return layer_norm(x, self.weight, self.bias, self.variance_epsilon).view(
-+                orig_shape
-+            )
-+        else:
-+            return self.forward_native(x)
- 
-     def forward_npu(
-         self,
-@@ -458,6 +483,10 @@ class GemmaRMSNorm(MultiPlatformOp):
-         residual: Optional[torch.Tensor] = None,
-         post_residual_addition: Optional[torch.Tensor] = None,
-     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-+        needs_reshape = x.dim() != 2 and residual is None
-+        if needs_reshape:
-+            original_shape = x.shape
-+            x = x.contiguous().reshape(-1, original_shape[-1])
-         if residual is not None:
-             if post_residual_addition is not None:
-                 residual = residual + post_residual_addition
-@@ -466,6 +495,8 @@ class GemmaRMSNorm(MultiPlatformOp):
-             )
-             return x, residual
-         out = gemma_rmsnorm(x, self.weight.data, self.variance_epsilon)
-+        if needs_reshape:
-+            out = out.reshape(original_shape)
-         return out
- 
-     def forward_native(
-@@ -631,3 +662,88 @@ class Gemma3RMSNorm(MultiPlatformOp):
+@@ -631,3 +631,60 @@ class Gemma3RMSNorm(MultiPlatformOp):
  
      def extra_repr(self):
          return f"{tuple(self.weight.shape)}, eps={self.eps}"
@@ -787,6 +355,7 @@ index e4960bdb4..55d880643 100644
 +    ):
 +        super().__init__()
 +        self.with_scale = with_scale
++        self.variance_epsilon = eps
 +
 +        if self.with_scale:
 +            self.weight = nn.Parameter(torch.ones(dim))
@@ -821,12 +390,8 @@ index e4960bdb4..55d880643 100644
 +            original_shape = x.shape
 +            x = x.contiguous().reshape(-1, original_shape[-1])
 +        if self.with_scale and self.scale_shift == 1.0:
-+            # gemma_rmsnorm: norm(x) * (1 + weight)
 +            out = gemma_rmsnorm(x, self.weight.data, self.eps)
 +        else:
-+            # rmsnorm: norm(x) * weight
-+            # with_scale=False → weight is ones → norm(x) * 1 = norm(x)
-+            # scale_shift=0.0 → standard RMSNorm without +1 shift
 +            out = rmsnorm(x, self.weight.data, self.eps)
 +
 +        if needs_reshape:
@@ -834,32 +399,7 @@ index e4960bdb4..55d880643 100644
 +        return out
 +
 +    def forward_hip(self, x: torch.Tensor) -> torch.Tensor:
-+        # sgl_kernel's gemma_rmsnorm is not available on ROCm;
-+        # delegate to the pure-PyTorch implementation.
 +        return self.forward_native(x)
-+
-+
-+class RMSNormWithoutScale(MultiPlatformOp):
-+    def __init__(self, hidden_size: int, eps=1e-6):
-+        super().__init__()
-+        self.hidden_size = hidden_size
-+        self.eps = eps
-+
-+    def _norm(self, x):
-+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-+
-+    def forward_native(self, x):
-+        orig_dtype = x.dtype
-+        x = x.float()
-+        variance = x.pow(2).mean(dim=-1, keepdim=True)
-+        x = x * torch.rsqrt(variance + self.eps)
-+        return x.to(orig_dtype)
-+
-+    def forward_cuda(self, x):
-+        return self.forward_native(x)
-+
-+    def extra_repr(self):
-+        return f"{self.hidden_size}, eps={self.eps}"
 diff --git a/python/sglang/srt/layers/rotary_embedding/factory.py b/python/sglang/srt/layers/rotary_embedding/factory.py
 index 27e28577c..d058ea08a 100644
 --- a/python/sglang/srt/layers/rotary_embedding/factory.py
@@ -889,10 +429,10 @@ index 27e28577c..d058ea08a 100644
              raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
      _ROPE_DICT[key] = rotary_emb
 diff --git a/python/sglang/srt/layers/rotary_embedding/rope_variant.py b/python/sglang/srt/layers/rotary_embedding/rope_variant.py
-index 28aaae598..2fe9d5da2 100644
+index 28aaae598..0a6535bb0 100644
 --- a/python/sglang/srt/layers/rotary_embedding/rope_variant.py
 +++ b/python/sglang/srt/layers/rotary_embedding/rope_variant.py
-@@ -866,3 +866,66 @@ class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
+@@ -866,3 +866,58 @@ class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
          sin = freqs.sin()
          cache = torch.cat((cos, sin), dim=-1)
          return cache
@@ -918,11 +458,8 @@ index 28aaae598..2fe9d5da2 100644
 +        is_neox_style: bool,
 +        dtype: torch.dtype,
 +    ) -> None:
-+        # Store angles before calling super().__init__
-+        # rotary_dim is already scaled by partial_rotary_factor in get_rope
-+        # For Gemma4: head_size=512, partial_rotary_factor=0.25 -> rotary_dim=128
-+        self.rope_angles = rotary_dim // 2  # Number of rotation angles per half
-+        self.nope_angles = (head_size // 2) - self.rope_angles  # Non-rotated per half
++        self.rope_angles = rotary_dim // 2
++        self.nope_angles = (head_size // 2) - self.rope_angles
 +
 +        super().__init__(
 +            head_size,
@@ -934,16 +471,11 @@ index 28aaae598..2fe9d5da2 100644
 +        )
 +
 +    def _compute_inv_freq(self, base: float) -> torch.Tensor:
-+        """Compute frequencies only for the rotated dimensions.
-+
-+        Non-rotated dims are padded with 0.0 to produce identity rotation.
-+        """
 +        freq_exponents = (
 +            torch.arange(0, 2 * self.rope_angles, 2, dtype=torch.float) / self.head_size
 +        )
 +        inv_freq = 1.0 / (base**freq_exponents)
 +
-+        # Zero-pad for non-rotated dims (identity rotation: cos=1, sin=0)
 +        if self.nope_angles > 0:
 +            inv_freq = torch.cat(
 +                [
@@ -959,685 +491,64 @@ index 28aaae598..2fe9d5da2 100644
 +        s += f", max_position_embeddings={self.max_position_embeddings}"
 +        s += f", base={self.base}, is_neox_style={self.is_neox_style}"
 +        return s
-diff --git a/python/sglang/srt/mem_cache/swa_memory_pool.py b/python/sglang/srt/mem_cache/swa_memory_pool.py
-index 96b0e3844..80f24e6df 100644
---- a/python/sglang/srt/mem_cache/swa_memory_pool.py
-+++ b/python/sglang/srt/mem_cache/swa_memory_pool.py
-@@ -1,5 +1,4 @@
- import logging
--import weakref
- from typing import Dict, List, Optional, Tuple
- 
- import torch
-@@ -306,7 +305,7 @@ class SWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
- 
-         self.clear()
-         self._kvcache = kvcache
--        self._kvcache.register_mapping(weakref.proxy(self.full_to_swa_index_mapping))
-+        self._kvcache.register_mapping(self.full_to_swa_index_mapping)
- 
-     def available_size(self):
-         return min(
 diff --git a/python/sglang/srt/model_executor/model_runner_kv_cache_mixin.py b/python/sglang/srt/model_executor/model_runner_kv_cache_mixin.py
-index a6baa4817..9ecc0c414 100644
+index a6baa4817..60f27ac36 100644
 --- a/python/sglang/srt/model_executor/model_runner_kv_cache_mixin.py
 +++ b/python/sglang/srt/model_executor/model_runner_kv_cache_mixin.py
-@@ -1,8 +1,7 @@
- from __future__ import annotations
- 
- import logging
--from dataclasses import dataclass
--from typing import TYPE_CHECKING, Optional, Tuple
-+from typing import TYPE_CHECKING
- 
- import torch
- 
-@@ -39,25 +38,7 @@ from sglang.srt.utils.common import (
- 
- if TYPE_CHECKING:
-     from sglang.srt.model_executor.model_runner import ModelRunner
--
--
--@dataclass
--class MemoryPoolConfig:
--    """Resolved memory pool config, shared between target and draft workers."""
--
--    max_total_num_tokens: int
--    max_running_requests: int
--    full_max_total_num_tokens: Optional[int] = None
--    swa_max_total_num_tokens: Optional[int] = None
--
--    mem_fraction_static: Optional[float] = None
--
--    def __post_init__(self):
--        if self.max_total_num_tokens <= 0:
--            msg = "Not enough memory. Please try to increase --mem-fraction-static."
--            if self.mem_fraction_static is not None:
--                msg += f" Current value: mem_fraction_static={self.mem_fraction_static}"
--            raise RuntimeError(msg)
-+    from sglang.srt.model_executor.pool_configurator import MemoryPoolConfig
- 
- 
- # the ratio of mamba cache pool size to max_running_requests
-@@ -72,76 +53,8 @@ _is_hip = is_hip()
- 
- 
- class ModelRunnerKVCacheMixin:
--    def get_cell_size_per_token(self: ModelRunner, num_layers: int) -> int:
--        kv_size = torch._utils._element_size(self.kv_cache_dtype)
--        if self.use_mla_backend:
--            cell_size = (
--                (self.model_config.kv_lora_rank + self.model_config.qk_rope_head_dim)
--                * num_layers
--                * kv_size
--            )
--            if is_float4_e2m1fn_x2(self.kv_cache_dtype):
--                # kv_scale_buffer
--                scale_block_size = 16
--                cell_size = (cell_size // 2) + (
--                    (
--                        (
--                            self.model_config.kv_lora_rank
--                            + self.model_config.qk_rope_head_dim
--                        )
--                        // scale_block_size
--                    )
--                    * num_layers
--                    * kv_size
--                )
--
--            # Add indexer KV cache overhead for NSA models (DeepSeek V3.2)
--            if is_deepseek_nsa(self.model_config.hf_config):
--                index_head_dim = get_nsa_index_head_dim(self.model_config.hf_config)
--                indexer_size_per_token = (
--                    index_head_dim
--                    + index_head_dim // NSATokenToKVPool.quant_block_size * 4
--                )
--                element_size = torch._utils._element_size(
--                    NSATokenToKVPool.index_k_with_scale_buffer_dtype
--                )
--                cell_size += indexer_size_per_token * num_layers * element_size
--        else:
--            if self.model_config.is_hybrid_swa:
--                full_layers_num = len(self.model_config.full_attention_layer_ids)
--                swa_layers_num = len(self.model_config.swa_attention_layer_ids)
--
--                full_per_token = self.model_config.get_num_kv_heads(
--                    get_attention_tp_size()
--                ) * (self.model_config.head_dim + self.model_config.v_head_dim)
- 
--                swa_per_token = self.model_config.get_swa_num_kv_heads(
--                    get_attention_tp_size()
--                ) * (self.model_config.swa_head_dim + self.model_config.swa_v_head_dim)
--
--                cell_size = (
--                    full_per_token * full_layers_num + swa_per_token * swa_layers_num
--                ) * kv_size
--            else:
--                cell_size = (
--                    self.model_config.get_num_kv_heads(get_attention_tp_size())
--                    * (self.model_config.head_dim + self.model_config.v_head_dim)
--                    * num_layers
--                    * kv_size
--                )
--
--            if is_float4_e2m1fn_x2(self.kv_cache_dtype):
--                # kv_scale_buffer
--                scale_block_size = 16
--
--                n = self.model_config.get_num_kv_heads(get_attention_tp_size())
--                k = self.model_config.head_dim
--                cell_size = (cell_size // 2) + (
--                    (n * k * num_layers * 2 * kv_size) // scale_block_size
--                )
--        return cell_size
--
--    def profile_max_num_token(self: ModelRunner, pre_model_load_memory: int):
-+    def _profile_available_bytes(self: ModelRunner, pre_model_load_memory: int) -> int:
-         post_model_load_memory = get_available_gpu_memory(
-             self.device,
-             self.gpu_id,
-@@ -149,32 +62,13 @@ class ModelRunnerKVCacheMixin:
-             cpu_group=get_world_group().cpu_group,
-         )
- 
--        # Get the number of layers used for KV cache calculation
--        if self.is_draft_worker:
--            num_layers = getattr(
--                self.model_config.hf_config,
--                "num_nextn_predict_layers",
--                self.num_effective_layers,
--            )
--        elif mambaish := self.mambaish_config:
--            effective_layer_ids = [
--                i
--                for i in mambaish.full_attention_layer_ids
--                if self.start_layer <= i < self.end_layer
--            ]
--            num_layers = len(effective_layer_ids)
--        else:
--            num_layers = self.num_effective_layers
--
--        cell_size = self.get_cell_size_per_token(num_layers)
--
-         rest_memory = post_model_load_memory - pre_model_load_memory * (
-             1 - self.mem_fraction_static
-         )
-         if self.mambaish_config is not None:
-             rest_memory = self.handle_max_mamba_cache(rest_memory)
- 
--        return int(rest_memory * (1 << 30)) // cell_size
-+        return int(rest_memory * (1 << 30))  # return in bytes
- 
-     def handle_max_mamba_cache(self: ModelRunner, total_rest_memory):
-         config = self.mambaish_config
-@@ -284,92 +178,6 @@ class ModelRunnerKVCacheMixin:
- 
-         return kv_cache_dim
- 
--    def _resolve_hybrid_swa_tokens(
--        self: ModelRunner, token_capacity: int
--    ) -> Tuple[int, int, int]:
--        """Split token_capacity into full/swa pools.
--
--        Returns (effective_capacity, full_max_total_num_tokens, swa_max_total_num_tokens).
--        """
--        page_size = self.server_args.page_size
--
--        assert self.sliding_window_size is not None and self.sliding_window_size > 0
--        full_layers_num = len(self.model_config.full_attention_layer_ids)
--        swa_layers_num = len(self.model_config.swa_attention_layer_ids)
--
--        assert swa_layers_num > 0, "Hybrid SWA model must have at least one SWA layer"
--
--        def align_page_size(x: int) -> int:
--            return (x // page_size) * page_size
--
--        if full_layers_num == 0:
--            # all layers are SWA
--            swa_tokens = align_page_size(token_capacity)
--            logger.info(
--                f"Use sliding window memory pool (all SWA). swa_layer_tokens={swa_tokens}"
--            )
--            return swa_tokens, 0, swa_tokens
--
--        swa_full_tokens_ratio = self.server_args.swa_full_tokens_ratio
--
--        # Use unified memory-based allocation for all hybrid SWA models.
--        #
--        # Let:
--        #   F = Full layer per-token memory
--        #   S = SWA layer per-token memory (may differ from F)
--        #   r = swa_full_tokens_ratio = swa_tokens / full_tokens
--        #
--        # The profile phase computed:
--        #   cell_size = F * n_full + S * n_swa
--        #   token_capacity = rest_memory / cell_size
--        #   => total_memory = token_capacity * (F * n_full + S * n_swa)
--        #
--        # We need to solve:
--        #   full_tokens * F * n_full + swa_tokens * S * n_swa = total_memory
--        #   swa_tokens = full_tokens * r
--        #
--        # Solution:
--        #   full_tokens = total_memory / (F * n_full + r * S * n_swa)
--        #               = token_capacity * (F * n_full + S * n_swa) / (F * n_full + r * S * n_swa)
--
--        kv_size = torch._utils._element_size(self.kv_cache_dtype)
--
--        # Full layer per-token memory
--        full_per_token = (
--            self.model_config.get_num_kv_heads(get_attention_tp_size())
--            * (self.model_config.head_dim + self.model_config.v_head_dim)
--            * kv_size
--        )
--
--        # SWA layer per-token memory
--        swa_per_token = (
--            self.model_config.get_swa_num_kv_heads(get_attention_tp_size())
--            * (self.model_config.swa_head_dim + self.model_config.swa_v_head_dim)
--            * kv_size
--        )
--
--        # Total memory available from profile
--        total_memory = token_capacity * (
--            full_per_token * full_layers_num + swa_per_token * swa_layers_num
--        )
--
--        # Solve the equations
--        denominator = (
--            full_per_token * full_layers_num
--            + swa_full_tokens_ratio * swa_per_token * swa_layers_num
--        )
--        assert (
--            denominator > 0
--        ), f"Invalid denominator={denominator} for memory-based allocation. full_per_token={full_per_token}, full_layers_num={full_layers_num}, swa_per_token={swa_per_token}, swa_layers_num={swa_layers_num}, swa_full_tokens_ratio={swa_full_tokens_ratio}"
--
--        full_tokens = align_page_size(int(total_memory / denominator))
--        swa_tokens = align_page_size(int(full_tokens * swa_full_tokens_ratio))
--
--        logger.info(
--            f"Use sliding window memory pool. full_layer_tokens={full_tokens}, swa_layer_tokens={swa_tokens}"
--        )
--        return full_tokens, full_tokens, swa_tokens
--
-     def _calculate_mamba_ratio(self: ModelRunner) -> int:
-         if self.server_args.disable_radix_cache:
-             return 1
-@@ -805,37 +613,34 @@ class ModelRunnerKVCacheMixin:
-                     self.token_to_kv_pool_allocator.full_to_swa_index_mapping
-                 )
- 
--    def _resolve_token_capacity(self: ModelRunner, profiled_tokens: int) -> int:
--        """Compute final token pool capacity from profiled value,
--        applying user cap, page alignment, and PP sync"""
-+    def _apply_token_constraints(self: ModelRunner, token_capacity: int) -> int:
-+        """Apply external constraints to token capacity: user cap, PP sync.
-+
-+        Page alignment is handled by the configurator, not here.
-+        If constraints change the value, the configurator re-runs and re-aligns.
-+        """
-         user_limit = self.server_args.max_total_tokens
- 
-         # Apply user-specified upper bound
-         if user_limit is not None:
--            if user_limit > profiled_tokens:
-+            if user_limit > token_capacity:
-                 logging.warning(
-                     f"max_total_tokens={user_limit} is larger than the profiled value "
--                    f"{profiled_tokens}. Use the profiled value instead."
-+                    f"{token_capacity}. Use the profiled value instead."
-                 )
--            capacity = min(profiled_tokens, user_limit)
--        else:
--            capacity = profiled_tokens
--
--        # Align to page boundary
--        page_size = self.server_args.page_size
--        capacity = capacity // page_size * page_size
-+            token_capacity = min(token_capacity, user_limit)
- 
-         # Sync across PP ranks (each may have different layer counts)
-         if self.pp_size > 1:
--            tensor = torch.tensor(capacity, dtype=torch.int64)
-+            tensor = torch.tensor(token_capacity, dtype=torch.int64)
-             torch.distributed.all_reduce(
-                 tensor,
-                 op=torch.distributed.ReduceOp.MIN,
-                 group=get_world_group().cpu_group,
-             )
--            capacity = tensor.item()
-+            token_capacity = tensor.item()
- 
--        return capacity
-+        return token_capacity
- 
-     def _resolve_max_num_reqs(self: ModelRunner, token_capacity: int) -> int:
-         """Compute max concurrent requests (per dp worker) from the finalized
-@@ -872,23 +677,28 @@ class ModelRunnerKVCacheMixin:
-         self: ModelRunner, pre_model_load_memory: int
-     ) -> MemoryPoolConfig:
-         """Profile GPU memory and resolve all pool parameters into a config."""
--        profiled_tokens = self.profile_max_num_token(pre_model_load_memory)
--        token_capacity = self._resolve_token_capacity(profiled_tokens)
-+        from sglang.srt.model_executor.pool_configurator import (
-+            create_memory_pool_configurator,
-+        )
- 
--        full_tokens = None
--        swa_tokens = None
--        if self.is_hybrid_swa:
--            token_capacity, full_tokens, swa_tokens = self._resolve_hybrid_swa_tokens(
--                token_capacity
-+        available_bytes = self._profile_available_bytes(pre_model_load_memory)
-+        page_size = self.server_args.page_size
-+
-+        configurator = create_memory_pool_configurator(self)
-+        config = configurator.calculate_pool_sizes(available_bytes, page_size)
-+
-+        # Apply external constraints (user cap, page alignment, PP sync)
-+        constrained = self._apply_token_constraints(config.max_total_num_tokens)
-+        if constrained != config.max_total_num_tokens:
-+            config = configurator.calculate_pool_sizes_from_max_tokens(
-+                constrained, page_size
-             )
- 
--        return MemoryPoolConfig(
--            max_total_num_tokens=token_capacity,
--            max_running_requests=self._resolve_max_num_reqs(token_capacity),
--            full_max_total_num_tokens=full_tokens,
--            swa_max_total_num_tokens=swa_tokens,
--            mem_fraction_static=self.server_args.mem_fraction_static,
-+        config.max_running_requests = self._resolve_max_num_reqs(
-+            config.max_total_num_tokens
-         )
-+        config.mem_fraction_static = self.server_args.mem_fraction_static
-+        return config
- 
-     def init_memory_pool(self: ModelRunner, pre_model_load_memory: int):
-         if not self.spec_algorithm.is_none() and self.is_draft_worker:
-diff --git a/python/sglang/srt/model_executor/pool_configurator.py b/python/sglang/srt/model_executor/pool_configurator.py
-new file mode 100644
-index 000000000..659b65fd3
---- /dev/null
-+++ b/python/sglang/srt/model_executor/pool_configurator.py
-@@ -0,0 +1,294 @@
-+"""Memory pool configurators for profiling and sizing KV cache pools.
-+
-+Each model architecture has its own configurator that computes pool sizes
-+from available GPU memory using a unified coeff+bias model:
-+
-+    available_bytes = max_tokens * coeff + bias
-+    max_tokens = (available_bytes - bias) / coeff
-+
-+Two entry points, same core computation:
-+- calculate_pool_sizes(available_bytes, page_size): profiling path
-+- calculate_pool_sizes_from_max_tokens(max_tokens, page_size): constraint path
-+"""
-+
-+from __future__ import annotations
-+
-+import logging
-+from dataclasses import dataclass
-+from typing import TYPE_CHECKING, Optional
-+
-+import torch
-+
-+from sglang.srt.configs.model_config import get_nsa_index_head_dim, is_deepseek_nsa
-+from sglang.srt.layers.dp_attention import get_attention_tp_size
-+from sglang.srt.mem_cache.memory_pool import NSATokenToKVPool
-+from sglang.srt.utils.common import is_float4_e2m1fn_x2
-+
-+
-+@dataclass
-+class MemoryPoolConfig:
-+    """Resolved memory pool config, shared between target and draft workers."""
-+
-+    max_total_num_tokens: int
-+    max_running_requests: Optional[int] = None
-+    full_max_total_num_tokens: Optional[int] = None
-+    swa_max_total_num_tokens: Optional[int] = None
-+
-+    mem_fraction_static: Optional[float] = None
-+
-+    def __post_init__(self):
-+        if self.max_total_num_tokens <= 0:
-+            msg = "Not enough memory. Please try to increase --mem-fraction-static."
-+            if self.mem_fraction_static is not None:
-+                msg += f" Current value: mem_fraction_static={self.mem_fraction_static}"
-+            raise RuntimeError(msg)
-+
-+
-+if TYPE_CHECKING:
-+    from sglang.srt.model_executor.model_runner import ModelRunner
-+
-+logger = logging.getLogger(__name__)
-+
-+
-+class MemoryPoolConfigurator:
-+    """Base class for memory pool configurators.
-+
-+    Subclasses compute pool sizes for their architecture via coeff+bias model.
-+    Both entry points return MemoryPoolConfig (with max_running_requests=None,
-+    to be filled by the consumer).
-+    """
-+
-+    def calculate_pool_sizes(
-+        self, available_bytes: int, page_size: int
-+    ) -> MemoryPoolConfig:
-+        """Profiling path: compute pool sizes from available bytes."""
-+        raise NotImplementedError
-+
-+    def calculate_pool_sizes_from_max_tokens(
-+        self, max_total_num_tokens: int, page_size: int
-+    ) -> MemoryPoolConfig:
-+        """Constraint path: recalculate pool sizes from a constrained max_tokens."""
-+        raise NotImplementedError
-+
-+
-+class DefaultPoolConfigurator(MemoryPoolConfigurator):
-+    """Configurator for standard models: MHA, MLA, NSA, FP4.
-+
-+    coeff = cell_size (bytes per token across all layers)
-+    bias = 0
-+    """
-+
-+    def __init__(self, mr: ModelRunner):
-+        # Determine effective number of layers for KV cache
-+        if mambaish := mr.mambaish_config:
-+            effective_layer_ids = [
-+                i
-+                for i in mambaish.full_attention_layer_ids
-+                if mr.start_layer <= i < mr.end_layer
-+            ]
-+            num_layers = len(effective_layer_ids)
-+        else:
-+            num_layers = mr.num_effective_layers
-+
-+        self._cell_size = self._compute_cell_size(mr, num_layers)
-+
-+        # DFLASH: scale cell_size to account for draft model KV cache
-+        if mr.spec_algorithm.is_dflash() and not mr.is_draft_worker:
-+            from sglang.srt.speculative.dflash_utils import (
-+                scale_kv_cell_size_per_token_for_dflash,
-+            )
-+
-+            draft_num_layers = getattr(mr, "dflash_draft_num_layers", None)
-+            if (
-+                draft_num_layers is not None
-+                and int(draft_num_layers) > 0
-+                and int(num_layers) > 0
-+            ):
-+                self._cell_size = scale_kv_cell_size_per_token_for_dflash(
-+                    target_cell_size_per_token=self._cell_size,
-+                    target_num_layers=int(num_layers),
-+                    draft_num_layers=int(draft_num_layers),
-+                )
-+
-+    def _compute_cell_size(self, mr: ModelRunner, num_layers: int) -> int:
-+        """Compute per-token KV cache cost in bytes. Subclasses can override."""
-+        # args to config cell size
-+        model_config = mr.model_config
-+        kv_cache_dtype = mr.kv_cache_dtype
-+
-+        kv_size = torch._utils._element_size(kv_cache_dtype)
-+        tp_size = get_attention_tp_size()
-+
-+        if mr.use_mla_backend:
-+            cell_size = (
-+                (model_config.kv_lora_rank + model_config.qk_rope_head_dim)
-+                * num_layers
-+                * kv_size
-+            )
-+            if is_float4_e2m1fn_x2(kv_cache_dtype):
-+                # kv_scale_buffer
-+                scale_block_size = 16
-+                cell_size = (cell_size // 2) + (
-+                    (
-+                        (model_config.kv_lora_rank + model_config.qk_rope_head_dim)
-+                        // scale_block_size
-+                    )
-+                    * num_layers
-+                    * kv_size
-+                )
-+
-+            # Add indexer KV cache overhead for NSA models (DeepSeek V3.2)
-+            if is_deepseek_nsa(model_config.hf_config):
-+                index_head_dim = get_nsa_index_head_dim(model_config.hf_config)
-+                indexer_size_per_token = (
-+                    index_head_dim
-+                    + index_head_dim // NSATokenToKVPool.quant_block_size * 4
-+                )
-+                element_size = torch._utils._element_size(
-+                    NSATokenToKVPool.index_k_with_scale_buffer_dtype
-+                )
-+                cell_size += indexer_size_per_token * num_layers * element_size
-+        else:
-+            cell_size = (
-+                model_config.get_num_kv_heads(tp_size)
-+                * (model_config.head_dim + model_config.v_head_dim)
-+                * num_layers
-+                * kv_size
-+            )
-+
-+            if is_float4_e2m1fn_x2(kv_cache_dtype):
-+                # kv_scale_buffer
-+                scale_block_size = 16
-+                n = model_config.get_num_kv_heads(tp_size)
-+                k = model_config.head_dim
-+                cell_size = (cell_size // 2) + (
-+                    (n * k * num_layers * 2 * kv_size) // scale_block_size
-+                )
-+
-+        return cell_size
-+
-+    def calculate_pool_sizes(
-+        self, available_bytes: int, page_size: int
-+    ) -> MemoryPoolConfig:
-+        max_total_num_tokens = available_bytes // self._cell_size
-+        max_total_num_tokens = max_total_num_tokens // page_size * page_size
-+        return MemoryPoolConfig(max_total_num_tokens=max_total_num_tokens)
-+
-+    def calculate_pool_sizes_from_max_tokens(
-+        self, max_total_num_tokens: int, page_size: int
-+    ) -> MemoryPoolConfig:
-+        max_total_num_tokens = max_total_num_tokens // page_size * page_size
-+        return MemoryPoolConfig(max_total_num_tokens=max_total_num_tokens)
-+
-+
-+class HybridSWAPoolConfigurator(MemoryPoolConfigurator):
-+    """Configurator for hybrid sliding window attention models (Gemma2, Command-R, MiMo).
-+
-+    Splits available memory between full attention and SWA pools.
-+    Does NOT inherit DefaultPoolConfigurator — different coeff model.
-+    """
-+
-+    def __init__(self, mr: ModelRunner):
-+        model_config = mr.model_config
-+        kv_cache_dtype = mr.kv_cache_dtype
-+        kv_size = torch._utils._element_size(kv_cache_dtype)
-+        tp_size = get_attention_tp_size()
-+
-+        self._full_layers_num = len(model_config.full_attention_layer_ids)
-+        self._swa_layers_num = len(model_config.swa_attention_layer_ids)
-+        assert (
-+            self._swa_layers_num > 0
-+        ), "Hybrid SWA model must have at least one SWA layer"
-+
-+        self._swa_full_tokens_ratio = mr.server_args.swa_full_tokens_ratio
-+
-+        # Full layer per-token memory (bytes)
-+        self._full_per_token = (
-+            model_config.get_num_kv_heads(tp_size)
-+            * (model_config.head_dim + model_config.v_head_dim)
-+            * kv_size
-+        )
-+
-+        # SWA layer per-token memory (bytes)
-+        self._swa_per_token = (
-+            model_config.get_swa_num_kv_heads(tp_size)
-+            * (model_config.swa_head_dim + model_config.swa_v_head_dim)
-+            * kv_size
-+        )
-+
-+        # Bytes per token of max_total_num_tokens.
-+        #
-+        # Hybrid (full_layers > 0): max_total = full_tokens, so cell_size accounts
-+        # for both pools: F*nf + r*S*ns (where swa_tokens = full_tokens * r).
-+        #
-+        # All-SWA (full_layers == 0): max_total = swa_tokens directly. The ratio
-+        # is meaningless here -- there is no full pool to relate to, and every
-+        # token beyond the sliding window can be evicted. So cell_size = S*ns,
-+        # with no ratio factor applied.
-+        if self._full_layers_num == 0:
-+            self._cell_size = self._swa_per_token * self._swa_layers_num
-+        else:
-+            self._cell_size = (
-+                self._full_per_token * self._full_layers_num
-+                + self._swa_full_tokens_ratio
-+                * self._swa_per_token
-+                * self._swa_layers_num
-+            )
-+
-+    def _solve_pool_sizes(
-+        self, max_total_num_tokens: int, page_size: int
-+    ) -> MemoryPoolConfig:
-+        """Core computation: split max_total_num_tokens into full/swa pool sizes."""
-+
-+        def align_page_size(x: int) -> int:
-+            return (x // page_size) * page_size
-+
-+        if self._full_layers_num == 0:
-+            # All-SWA: no full pool, max_total = actual SWA pool size.
-+            # Ratio is not applied -- see __init__ comment.
-+            swa_tokens = align_page_size(max_total_num_tokens)
-+            logger.info(
-+                f"Use sliding window memory pool (all SWA). "
-+                f"swa_layer_tokens={swa_tokens}"
-+            )
-+            return MemoryPoolConfig(
-+                max_total_num_tokens=swa_tokens,
-+                full_max_total_num_tokens=0,
-+                swa_max_total_num_tokens=swa_tokens,
-+            )
-+
-+        # Hybrid: full_tokens = max_total_num_tokens, swa_tokens = full_tokens * ratio
-+        full_tokens = align_page_size(max_total_num_tokens)
-+        swa_tokens = align_page_size(int(full_tokens * self._swa_full_tokens_ratio))
-+
-+        logger.info(
-+            f"Use sliding window memory pool. "
-+            f"full_layer_tokens={full_tokens}, swa_layer_tokens={swa_tokens}"
-+        )
-+
-+        return MemoryPoolConfig(
-+            max_total_num_tokens=full_tokens,
-+            full_max_total_num_tokens=full_tokens,
-+            swa_max_total_num_tokens=swa_tokens,
-+        )
-+
-+    def calculate_pool_sizes(
-+        self, available_bytes: int, page_size: int
-+    ) -> MemoryPoolConfig:
-+        max_total_num_tokens = int(available_bytes // self._cell_size)
-+        return self._solve_pool_sizes(max_total_num_tokens, page_size)
-+
-+    def calculate_pool_sizes_from_max_tokens(
-+        self, max_total_num_tokens: int, page_size: int
-+    ) -> MemoryPoolConfig:
-+        return self._solve_pool_sizes(max_total_num_tokens, page_size)
-+
-+
-+def create_memory_pool_configurator(
-+    mr: ModelRunner,
-+) -> MemoryPoolConfigurator:
-+    """Factory: select the right configurator for the model architecture."""
-+    if mr.is_hybrid_swa:
-+        return HybridSWAPoolConfigurator(mr)
-+    # Future: MambaPoolConfigurator
-+    return DefaultPoolConfigurator(mr)
+@@ -618,16 +618,24 @@ class ModelRunnerKVCacheMixin:
+         else:
+             if self.is_hybrid_swa:
+                 kwargs = {}
+-                if self.is_hybrid_swa_compress:
++                # Pass SWA-specific head dimensions when they differ from full attention
++                swa_head_dim = getattr(self.model_config.hf_text_config, "swa_head_dim", self.model_config.head_dim)
++                swa_v_head_dim = getattr(self.model_config.hf_text_config, "swa_v_head_dim", self.model_config.v_head_dim)
++                swa_num_kv_heads = getattr(self.model_config.hf_text_config, "swa_num_key_value_heads", None)
++                if (
++                    self.is_hybrid_swa_compress
++                    or swa_head_dim != self.model_config.head_dim
++                    or (swa_num_kv_heads is not None and swa_num_kv_heads != self.model_config.hf_text_config.num_key_value_heads)
++                ):
+                     kwargs = {
+                         "swa_head_num": max(
+                             1,
+-                            self.model_config.hf_text_config.swa_num_key_value_heads
++                            (swa_num_kv_heads or self.model_config.hf_text_config.num_key_value_heads)
+                             // get_attention_tp_size(),
+                         ),
+-                        "swa_head_dim": self.model_config.hf_text_config.swa_head_dim,
+-                        "swa_v_head_dim": self.model_config.hf_text_config.swa_v_head_dim,
+-                        "v_head_dim": self.model_config.hf_text_config.v_head_dim,
++                        "swa_head_dim": swa_head_dim,
++                        "swa_v_head_dim": swa_v_head_dim,
++                        "v_head_dim": self.model_config.v_head_dim,
+                     }
+                 self.token_to_kv_pool = SWAKVPool(
+                     size=self.full_max_total_num_tokens,
 diff --git a/python/sglang/srt/model_loader/weight_utils.py b/python/sglang/srt/model_loader/weight_utils.py
-index ef672c5c0..d978eefdf 100644
+index ef672c5c0..e44cfceb1 100644
 --- a/python/sglang/srt/model_loader/weight_utils.py
 +++ b/python/sglang/srt/model_loader/weight_utils.py
-@@ -551,9 +551,9 @@ def download_safetensors_index_file_from_hf(
-         # If file not found on remote or locally, we should not fail since
-         # only some models will have index_file.
-         except huggingface_hub.utils.EntryNotFoundError:
--            logger.info("No %s found in remote.", index_file)
-+            logger.debug("No %s found in remote.", index_file)
-         except huggingface_hub.utils.LocalEntryNotFoundError:
--            logger.info("No %s found in local cache.", index_file)
-+            logger.debug("No %s found in local cache.", index_file)
+@@ -1044,11 +1044,11 @@ def row_parallel_weight_loader(
+ LoaderFunction = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
  
  
- # For models like Mistral-7B-v0.3, there are both sharded
+-def sharded_weight_loader(shard_axis: int) -> LoaderFunction:
++def sharded_weight_loader(shard_axis: int, override_tp_rank: int = None) -> LoaderFunction:
+     """Create a weight loader that shards the weights along the given axis"""
+ 
+     def loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+-        tp_rank = get_attention_tp_rank()
++        tp_rank = override_tp_rank if override_tp_rank is not None else get_attention_tp_rank()
+ 
+         shard_size = param.data.shape[shard_axis]
+         start_idx = tp_rank * shard_size
 diff --git a/python/sglang/srt/models/gemma4_causal.py b/python/sglang/srt/models/gemma4_causal.py
 new file mode 100644
-index 000000000..544406119
+index 000000000..8f83f4e43
 --- /dev/null
 +++ b/python/sglang/srt/models/gemma4_causal.py
-@@ -0,0 +1,1009 @@
+@@ -0,0 +1,1062 @@
 +# Copyright 2025 SGLang Team
 +# Licensed under the Apache License, Version 2.0 (the "License");
 +# you may not use this file except in compliance with the License.
@@ -1676,6 +587,7 @@ index 000000000..544406119
 +)
 +from sglang.srt.layers.logits_processor import LogitsProcessor
 +from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
++from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 +from sglang.srt.layers.moe.topk import TopK
 +from sglang.srt.layers.quantization.base_config import QuantizationConfig
 +from sglang.srt.layers.radix_attention import RadixAttention
@@ -1869,7 +781,9 @@ index 000000000..544406119
 +                config, "swa_num_key_value_heads", config.num_key_value_heads
 +            )
 +        else:
-+            self.total_num_kv_heads = config.num_key_value_heads
++            self.total_num_kv_heads = getattr(
++                config, "num_global_key_value_heads", config.num_key_value_heads
++            )
 +
 +        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
 +
@@ -1982,8 +896,6 @@ index 000000000..544406119
 +
 +        # Check if we should use shared KV cache
 +        if self.is_kv_shared_layer and self.kv_shared_layer_index is not None:
-+            # For KV shared layers, we skip K/V computation and normalization
-+            # The RadixAttention will handle retrieving shared KV from cache
 +            k = None
 +            v = None
 +        else:
@@ -1999,7 +911,6 @@ index 000000000..544406119
 +            q, k = self.rotary_emb(positions, q, k)
 +            k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
 +        else:
-+            # Rotary embedding requires a key input; use zeros since KV is shared from another layer
 +            dummy_k = torch.zeros_like(q[:, : self.kv_size])
 +            q, _ = self.rotary_emb(positions, q, dummy_k)
 +
@@ -2011,6 +922,7 @@ index 000000000..544406119
 +            forward_batch=forward_batch,
 +            save_kv_cache=not self.is_kv_shared_layer,
 +        )
++
 +        if attn_output.dim() == 3:
 +            attn_output = attn_output.flatten(-2, -1)
 +        output, _ = self.o_proj(attn_output)
@@ -2035,10 +947,12 @@ index 000000000..544406119
 +        self.layer_id = layer_id
 +
 +        # Gemma 4 uses different head dimensions for sliding vs full attention
++        # hf_transformers_utils remaps: config.head_dim = global_head_dim (512),
++        # config.swa_head_dim = original head_dim (256)
 +        layer_type = config.layer_types[layer_id]
 +        self.is_full_attention = layer_type == "full_attention"
 +        if self.is_full_attention:
-+            head_dim = config.head_dim  # following sglang naming
++            head_dim = config.head_dim
 +        else:
 +            head_dim = getattr(config, "swa_head_dim", config.head_dim)
 +
@@ -2164,13 +1078,14 @@ index 000000000..544406119
 +        #   h = gemma_norm(residual)
 +        residual = hidden_states
 +
-+        # Apply input layernorm
 +        hidden_states = self.input_layernorm(hidden_states)
++
 +        hidden_states = self.self_attn(
 +            positions=positions,
 +            hidden_states=hidden_states,
 +            forward_batch=forward_batch,
 +        )
++
 +        hidden_states = self.post_attention_layernorm(hidden_states)
 +
 +        if self.enable_moe_block:
@@ -2202,7 +1117,7 @@ index 000000000..544406119
 +            )
 +            hidden_states = self.mlp(hidden_states)
 +
-+        if not self.has_ple and hidden_states.is_cuda and hidden_states.dim() == 2:
++        if False:  # Disabled on RDNA4 — the Triton fused kernel crashes on gfx1201
 +            # Fused: (post_ff_norm(h) + residual) * layer_scalar in one kernel
 +            norm = self.post_feedforward_layernorm
 +            hidden_states = gemma_rmsnorm_residual_scalar(
@@ -2465,10 +1380,13 @@ index 000000000..544406119
 +
 +    def __init__(
 +        self,
-+        config: Gemma4TextConfig,
++        config,
 +        quant_config: Optional[QuantizationConfig] = None,
 +        prefix: str = "",
 +    ) -> None:
++        # Handle multimodal config wrapper: extract text_config for the language model
++        if hasattr(config, "text_config") and getattr(config, "model_type", "") == "gemma4":
++            config = config.text_config
 +        super().__init__(config=config)
 +        self.config = config
 +        self.quant_config = quant_config
@@ -2537,13 +1455,25 @@ index 000000000..544406119
 +            ("gate_up_proj", "up_proj", 1),
 +        ]
 +
-+        expert_params_mapping = [
-+            # (param_name, ckpt_weight_name, shard_ids)
-+            # gate_up_proj is fused [E, 2*I, H] — chunk into w1 (gate) + w3 (up)
++        num_experts = getattr(self.config, "num_experts", 0) or 0
++
++        # Per-expert mapping for AWQ/GPTQ checkpoints (experts.0.gate_proj.qweight)
++        per_expert_params_mapping = (
++            FusedMoE.make_expert_params_mapping(
++                ckpt_gate_proj_name="gate_proj",
++                ckpt_down_proj_name="down_proj",
++                ckpt_up_proj_name="up_proj",
++                num_experts=num_experts,
++            )
++            if num_experts > 0
++            else []
++        )
++
++        # Fused mapping for BF16 checkpoints (experts.gate_up_proj [E, 2*I, H])
++        fused_expert_params_mapping = [
 +            ("experts.w13_weight", "experts.gate_up_proj", ("w1", "w3")),
 +            ("experts.w2_weight", "experts.down_proj", ("w2",)),
 +        ]
-+        num_experts = self.config.num_experts
 +
 +        k_eq_v_layers = self._get_k_eq_v_layers()
 +
@@ -2576,26 +1506,33 @@ index 000000000..544406119
 +                and int(m.group(1)) in k_eq_v_layers
 +            )
 +
-+            # MoE expert weights checked first (gate_up_proj contains "up_proj"
-+            # which would false-match the stacked dense MLP mapping).
 +            orig_name = name
-+            for param_name, weight_name, shard_ids in expert_params_mapping:
-+                name = orig_name
++
++            # --- Per-expert AWQ/GPTQ weights (experts.{i}.gate_proj.qweight) ---
++            is_expert_weight = False
++            for param_name, weight_name, expert_id, shard_id in per_expert_params_mapping:
 +                if weight_name not in name:
 +                    continue
++                is_expert_weight = True
 +                name = name.replace(weight_name, param_name)
 +                if name not in params_dict:
 +                    continue
 +                param = params_dict[name]
 +                weight_loader = param.weight_loader
-+                for i in range(num_experts):
-+                    chunks = loaded_weight[i].chunk(len(shard_ids), dim=0)
-+                    for chunk, sid in zip(chunks, shard_ids):
-+                        weight_loader(param, chunk, name, sid, i)
++                weight_loader(
++                    param, loaded_weight, name,
++                    shard_id=shard_id, expert_id=expert_id,
++                )
 +                break
 +            else:
-+                for param_name, weight_name, shard_id in stacked_params_mapping:
-+                    name = orig_name
++                if is_expert_weight:
++                    loaded_params.add(name)
++                    continue
++
++                # --- Fused BF16 experts (experts.gate_up_proj [E, 2*I, H]) ---
++                name = orig_name
++                fused_matched = False
++                for param_name, weight_name, shard_ids in fused_expert_params_mapping:
 +                    if weight_name not in name:
 +                        continue
 +                    name = name.replace(weight_name, param_name)
@@ -2603,24 +1540,45 @@ index 000000000..544406119
 +                        continue
 +                    param = params_dict[name]
 +                    weight_loader = param.weight_loader
-+                    weight_loader(param, loaded_weight, shard_id)
-+                    if should_dup_k_to_v:
-+                        weight_loader(param, loaded_weight, "v")
++                    for i in range(num_experts):
++                        chunks = loaded_weight[i].chunk(len(shard_ids), dim=0)
++                        for chunk, sid in zip(chunks, shard_ids):
++                            weight_loader(param, chunk, name, sid, i)
++                    fused_matched = True
 +                    break
-+                else:
-+                    name = orig_name
-+                    if name.endswith(".bias") and name not in params_dict:
-+                        continue
-+                    name = maybe_remap_kv_scale_name(name, params_dict)
-+                    if name is None:
-+                        continue
-+                    if name not in params_dict:
-+                        continue
-+                    param = params_dict[name]
-+                    weight_loader = getattr(
-+                        param, "weight_loader", default_weight_loader
-+                    )
-+                    weight_loader(param, loaded_weight)
++
++                if not fused_matched:
++                    # --- Stacked dense params (qkv_proj, gate_up_proj) ---
++                    for param_name, weight_name, shard_id in stacked_params_mapping:
++                        name = orig_name
++                        if weight_name not in name:
++                            continue
++                        # Skip MoE expert weights — handled above
++                        if ".moe.experts." in name:
++                            continue
++                        name = name.replace(weight_name, param_name)
++                        if name not in params_dict:
++                            continue
++                        param = params_dict[name]
++                        weight_loader = param.weight_loader
++                        weight_loader(param, loaded_weight, shard_id)
++                        if should_dup_k_to_v:
++                            weight_loader(param, loaded_weight, "v")
++                        break
++                    else:
++                        name = orig_name
++                        if name.endswith(".bias") and name not in params_dict:
++                            continue
++                        name = maybe_remap_kv_scale_name(name, params_dict)
++                        if name is None:
++                            continue
++                        if name not in params_dict:
++                            continue
++                        param = params_dict[name]
++                        weight_loader = getattr(
++                            param, "weight_loader", default_weight_loader
++                        )
++                        weight_loader(param, loaded_weight)
 +            loaded_params.add(name)
 +        unloaded_params = params_dict.keys() - loaded_params
 +        if unloaded_params:
@@ -2646,182 +1604,221 @@ index 000000000..544406119
 +        return loaded_params
 +
 +
-+EntryClass = Gemma4ForCausalLM
++# Text-only alias for multimodal architecture name
++# Allows loading Gemma4ForConditionalGeneration models without vision
++class Gemma4ForConditionalGeneration(Gemma4ForCausalLM):
++    pass
++
++
++EntryClass = [Gemma4ForCausalLM, Gemma4ForConditionalGeneration]
 diff --git a/python/sglang/srt/models/qwen3_5.py b/python/sglang/srt/models/qwen3_5.py
-index 2f430c2b9..cd1e68592 100644
+index 2f430c2b9..e1d082f3f 100644
 --- a/python/sglang/srt/models/qwen3_5.py
 +++ b/python/sglang/srt/models/qwen3_5.py
-@@ -574,8 +574,15 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
-     ):
-         forward_batch = kwargs.get("forward_batch", None)
+@@ -106,6 +106,21 @@ _is_amx_available = cpu_has_amx_support()
+ cached_get_processor = lru_cache(get_processor)
  
--        hidden_states, residual = self.layer_communicator.prepare_attn(
--            hidden_states, residual, forward_batch
-+        hidden_states, residual = (
-+            self.layer_communicator.prepare_attn_and_capture_last_layer_outputs(
-+                hidden_states,
-+                residual,
-+                forward_batch,
-+                captured_last_layer_outputs=kwargs.get(
-+                    "captured_last_layer_outputs", None
-+                ),
-+            )
+ 
++def _should_replicate_deltanet_for_tp(
++    quant_config: Optional[QuantizationConfig],
++) -> bool:
++    """Whether to replicate DeltaNet+MLP layers across TP ranks.
++
++    FP8 models are too large to replicate everything, so only DeltaNet
++    projections are replicated while MLPs use standard TP splitting.
++    AWQ and unquantized models replicate both DeltaNet and MLP layers.
++    """
++    if quant_config is None:
++        return True
++    name = quant_config.get_name()
++    return name not in ("fp8", "mxfp8", "w8a8_fp8")
++
++
+ class Qwen3_5GatedDeltaNet(nn.Module):
+     def __init__(
+         self,
+@@ -117,8 +132,12 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+     ) -> None:
+         super().__init__()
+         self.config = config
+-        self.attn_tp_rank = get_attention_tp_rank()
+-        self.attn_tp_size = get_attention_tp_size()
++        # DeltaNet projections are always replicated (tp_size=1) to avoid
++        # FP16 rounding errors accumulating through recurrent state S(t).
++        self.attn_tp_rank = 0
++        self.attn_tp_size = 1
++        self.real_tp_rank = get_attention_tp_rank()
++        self.real_tp_size = get_attention_tp_size()
+         self.hidden_size = config.hidden_size
+         self.num_v_heads = config.linear_num_value_heads
+         self.num_k_heads = config.linear_num_key_heads
+@@ -157,10 +176,13 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+             tp_size=self.attn_tp_size,
          )
  
-         if not forward_batch.forward_mode.is_idle():
-@@ -825,10 +832,16 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
-         hidden_states: torch.Tensor,
-         residual: Optional[torch.Tensor],
-         forward_batch: ForwardBatch,
-+        captured_last_layer_outputs: Optional[list[torch.Tensor]] = None,
-         **kwargs,
-     ):
--        hidden_states, residual = self.layer_communicator.prepare_attn(
--            hidden_states, residual, forward_batch
-+        hidden_states, residual = (
-+            self.layer_communicator.prepare_attn_and_capture_last_layer_outputs(
-+                hidden_states,
-+                residual,
-+                forward_batch,
-+                captured_last_layer_outputs=captured_last_layer_outputs,
-+            )
++        # quant_config=None for in_proj_ba: output dim 48 is not divisible
++        # by TP=2 * 16 (hipBLASLt scaled_mm alignment), so FP8 quantization
++        # would fail. Keep projections in full precision.
+         self.in_proj_ba = self.create_ba_proj(
+             hidden_size=self.hidden_size,
+             num_v_heads=self.num_v_heads,
+-            quant_config=quant_config,
++            quant_config=None,
+             prefix=add_prefix("in_proj_ba", prefix),
+             tp_rank=self.attn_tp_rank,
+             tp_size=self.attn_tp_size,
+@@ -197,8 +219,9 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+             torch.empty(self.num_v_heads // self.attn_tp_size, dtype=torch.float32),
          )
  
-         if not forward_batch.forward_mode.is_idle():
-@@ -881,7 +894,7 @@ ALL_DECODER_LAYER_TYPES = {
- class Qwen3_5ForCausalLM(nn.Module):
-     """Qwen3.5 Model with support for dense variant."""
+-        set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0)})
+-        set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
++        # override_tp_rank=0 so all TP workers load the full (unsharded) weight
++        set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0, override_tp_rank=0)})
++        set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0, override_tp_rank=0)})
  
--    if _is_gfx95:
-+    if _is_gfx95 or _is_npu:
-         packed_modules_mapping = {
-             "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-             "gate_up_proj": ["gate_proj", "up_proj"],
-@@ -945,9 +958,16 @@ class Qwen3_5ForCausalLM(nn.Module):
+         conv_weights = self.conv1d.weight.view(
+             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
+@@ -490,6 +513,8 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+         core_attn_out = core_attn_out.reshape(*core_attn_out.shape[:-2], -1)
+ 
+         output, _ = self.out_proj(core_attn_out)
++        if self.real_tp_size > 1:
++            output = output / self.real_tp_size
+         return output
+ 
+ 
+@@ -520,6 +545,8 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
+ 
+         # NOTE: Determine the MLP type based on the model type
+         # Qwen3.5 use all layers for MLP / Qwen3.5-MoE use sparse MoE blocks
++        self.replicate_mlp = _should_replicate_deltanet_for_tp(quant_config)
++        self.real_tp_size = get_attention_tp_size()
+         if config.model_type == "qwen3_5_moe_text":
+             self.mlp = Qwen2MoeSparseMoeBlock(
+                 layer_id=layer_id,
+@@ -533,12 +560,16 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
+             is_previous_layer_sparse = True
+             is_next_layer_sparse = True
+         elif config.model_type == "qwen3_5_text":
++            mlp_tp_kwargs = {}
++            if self.replicate_mlp:
++                mlp_tp_kwargs = {"tp_rank": 0, "tp_size": 1}
+             self.mlp = Qwen2MoeMLP(
+                 hidden_size=config.hidden_size,
+                 intermediate_size=config.intermediate_size,
+                 hidden_act=config.hidden_act,
+                 quant_config=quant_config,
+                 prefix=add_prefix("mlp", prefix.replace(".linear_attn", "")),
++                **mlp_tp_kwargs,
+             )
+             is_layer_sparse = False
+             is_previous_layer_sparse = False
+@@ -609,6 +640,8 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
+             hidden_states = self.mlp(
+                 hidden_states, should_allreduce_fusion, use_reduce_scatter
+             )
++        if self.replicate_mlp and self.real_tp_size > 1:
++            hidden_states = hidden_states / self.real_tp_size
+         if should_allreduce_fusion:
+             hidden_states._sglang_needs_allreduce_fusion = True
          else:
-             self.norm = PPMissingLayer()
+@@ -713,13 +746,19 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
+         )
  
-+        self.layers_to_capture = []
-+
-     def get_input_embeddings(self):
-         return self.embed_tokens
+         # Dense MLP for non-MoE variant
++        self.replicate_mlp = _should_replicate_deltanet_for_tp(quant_config)
++        self.real_tp_size = get_attention_tp_size()
+         if config.model_type == "qwen3_5_text":
++            mlp_tp_kwargs = {}
++            if self.replicate_mlp:
++                mlp_tp_kwargs = {"tp_rank": 0, "tp_size": 1}
+             self.mlp = Qwen2MoeMLP(
+                 hidden_size=config.hidden_size,
+                 intermediate_size=config.intermediate_size,
+                 hidden_act=config.hidden_act,
+                 quant_config=quant_config,
+                 prefix=add_prefix("mlp", prefix.replace(".self_attn", "")),
++                **mlp_tp_kwargs,
+             )
+             is_layer_sparse = False
+             is_previous_layer_sparse = False
+@@ -862,6 +901,8 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
+             hidden_states = self.mlp(
+                 hidden_states, should_allreduce_fusion, use_reduce_scatter
+             )
++        if self.replicate_mlp and self.real_tp_size > 1:
++            hidden_states = hidden_states / self.real_tp_size
+         if should_allreduce_fusion:
+             hidden_states._sglang_needs_allreduce_fusion = True
+         else:
+@@ -1429,7 +1470,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
+                     name = name.replace(r"attn.qkv.", r"attn.qkv_proj.")
+                     name = name.replace(r"model.visual.", r"visual.")
  
-+    def set_dflash_layers_to_capture(self, layers_to_capture: list[int]):
-+        self.layers_to_capture = layers_to_capture
-+        for layer_id in self.layers_to_capture:
-+            setattr(self.layers[layer_id], "_is_layer_to_capture", True)
-+
-     @property
-     def start_layer(self) -> int:
-         return self._start_layer
-@@ -978,6 +998,7 @@ class Qwen3_5ForCausalLM(nn.Module):
-             hidden_states = pp_proxy_tensors["hidden_states"]
-             residual = pp_proxy_tensors["residual"]
- 
-+        aux_hidden_states = []
-         # Pass through decoder layers
-         for layer_idx in range(self.start_layer, self.end_layer):
-             layer = self.layers[layer_idx]
-@@ -989,6 +1010,11 @@ class Qwen3_5ForCausalLM(nn.Module):
-                     hidden_states=hidden_states,
-                     residual=residual,
-                     forward_batch=forward_batch,
-+                    captured_last_layer_outputs=(
-+                        aux_hidden_states
-+                        if getattr(layer, "_is_layer_to_capture", False)
-+                        else None
-+                    ),
-                 )
- 
-             # Process deepstack embeddings if provided
-@@ -1018,7 +1044,10 @@ class Qwen3_5ForCausalLM(nn.Module):
-             else:
-                 hidden_states, _ = self.norm(hidden_states, residual)
- 
--        return hidden_states
-+        if len(aux_hidden_states) == 0:
-+            return hidden_states
-+
-+        return hidden_states, aux_hidden_states
- 
-     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-         stacked_params_mapping = [
-@@ -1310,7 +1339,7 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLM):
- 
- 
- class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
--    if _is_gfx95:
-+    if _is_gfx95 or _is_npu:
-         packed_modules_mapping = Qwen3_5ForCausalLM.packed_modules_mapping
-         hf_to_sglang_mapper = None
- 
-@@ -1447,7 +1476,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
- class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
-     """Qwen3.5 MoE Vision-Language Model."""
- 
--    if _is_gfx95:
-+    if _is_gfx95 or _is_npu:
-         packed_modules_mapping = Qwen3_5ForCausalLM.packed_modules_mapping
-         hf_to_sglang_mapper = None
- 
+-                # print(name, loaded_weight.shape)
++                print(name, loaded_weight.shape)
+                 # Skip loading extra bias for GPTQ models.
+                 if name.endswith(".bias") and name not in params_dict:
+                     continue
 diff --git a/python/sglang/srt/models/qwen3_next.py b/python/sglang/srt/models/qwen3_next.py
-index 7e3862a8a..ac63cae10 100644
+index 7e3862a8a..22d34e848 100644
 --- a/python/sglang/srt/models/qwen3_next.py
 +++ b/python/sglang/srt/models/qwen3_next.py
-@@ -813,6 +813,11 @@ class Qwen3NextModel(nn.Module):
-         for layer_id in self.layers_to_capture:
-             setattr(self.layers[layer_id], "_is_layer_to_capture", True)
+@@ -135,12 +135,13 @@ class Qwen3GatedDeltaNet(nn.Module):
  
-+    def set_dflash_layers_to_capture(self, layers_to_capture: list[int]):
-+        self.layers_to_capture = layers_to_capture
-+        for layer_id in self.layers_to_capture:
-+            setattr(self.layers[layer_id], "_is_layer_to_capture", True)
-+
-     def forward(
-         self,
-         input_ids: torch.Tensor,
-@@ -947,6 +952,9 @@ class Qwen3NextForCausalLM(nn.Module):
-     def get_embed_and_head(self):
-         return self.model.embed_tokens.weight, self.lm_head.weight
+         # Override weight_loader for packed checkpoint format.
+         # Must capture original_loader BEFORE overwriting.
+-        self._override_weight_loader(
+-            self.in_proj_qkvz, self._make_packed_weight_loader(self.in_proj_qkvz)
+-        )
+-        self._override_weight_loader(
+-            self.in_proj_ba, self._make_packed_weight_loader(self.in_proj_ba)
+-        )
++        # With AWQ quantization, modules have qweight instead of weight — skip.
++        loader_qkvz = self._make_packed_weight_loader(self.in_proj_qkvz)
++        if loader_qkvz is not None:
++            self._override_weight_loader(self.in_proj_qkvz, loader_qkvz)
++        loader_ba = self._make_packed_weight_loader(self.in_proj_ba)
++        if loader_ba is not None:
++            self._override_weight_loader(self.in_proj_ba, loader_ba)
  
-+    def get_input_embeddings(self) -> nn.Embedding:
-+        return self.model.embed_tokens
-+
-     def set_embed_and_head(self, embed, head):
-         del self.model.embed_tokens.weight
-         del self.lm_head.weight
-@@ -1127,5 +1135,17 @@ class Qwen3NextForCausalLM(nn.Module):
-         else:
-             self.model.set_eagle3_layers_to_capture([val + 1 for val in layer_ids])
+         # Conv1d weight loader setup
+         query_key_settings = (self.key_dim, 0, False)
+@@ -222,7 +223,10 @@ class Qwen3GatedDeltaNet(nn.Module):
  
-+    def set_dflash_layers_to_capture(self, layer_ids: list[int]):
-+        if not self.pp_group.is_last_rank:
-+            return
-+
-+        if layer_ids is None:
-+            raise ValueError(
-+                "DFLASH requires explicit layer_ids for aux hidden capture."
-+            )
-+
-+        self.capture_aux_hidden_states = True
-+        self.model.set_dflash_layers_to_capture([val + 1 for val in layer_ids])
-+
+         ModelWeightParameter exposes weight_loader as a read-only property
+         backed by _weight_loader, while plain parameters store it as a
+-        regular attribute.  This helper handles both cases."""
++        regular attribute.  This helper handles both cases.
++        With AWQ quantization, module has qweight instead of weight — skip."""
++        if not hasattr(module, "weight"):
++            return  # AWQ quantization: qweight/scales/qzeros handle their own loading
+         param = module.weight
+         if hasattr(param, "_weight_loader"):
+             param._weight_loader = new_loader
+@@ -235,6 +239,8 @@ class Qwen3GatedDeltaNet(nn.Module):
+         (packed-format) checkpoint weights (shard_id=None), and delegates
+         to the standard MergedColumnParallelLinear loader for split checkpoint
+         weights (shard_id=int/tuple)."""
++        if not hasattr(module, "weight"):
++            return None  # AWQ: skip packed weight loader
+         original_loader = module.weight.weight_loader
  
- EntryClass = Qwen3NextForCausalLM
+         def weight_loader(param, loaded_weight, loaded_shard_id=None):
 diff --git a/python/sglang/srt/utils/hf_transformers_utils.py b/python/sglang/srt/utils/hf_transformers_utils.py
-index 806c401e4..b928b08d4 100644
+index 806c401e4..b5fc2b62a 100644
 --- a/python/sglang/srt/utils/hf_transformers_utils.py
 +++ b/python/sglang/srt/utils/hf_transformers_utils.py
-@@ -622,6 +622,32 @@ def get_config(
-     if config.model_type == "multi_modality":
-         config.update({"architectures": ["MultiModalityCausalLM"]})
+@@ -625,6 +625,31 @@ def get_config(
+     if config.model_type == "longcat_flash":
+         config.update({"architectures": ["LongcatFlashForCausalLM"]})
  
 +    if config.model_type == "gemma4":
 +        # Gemma4 configs use base attributes for SWA layers and `global_*`
 +        # variants for full-attention layers.  SGLang expects the opposite:
 +        # base = full-attention, `swa_*` = sliding-window overrides.
-+        # Remap here so the rest of the stack sees a uniform convention.
-+        text_config = config.text_config
++        text_config = get_hf_text_config(config=config)
 +        global_head_dim = getattr(text_config, "global_head_dim", None)
 +        global_kv_heads = getattr(text_config, "num_global_key_value_heads", None)
 +
@@ -2842,159 +1839,6 @@ index 806c401e4..b928b08d4 100644
 +        if not hasattr(text_config, "swa_v_head_dim"):
 +            text_config.swa_v_head_dim = text_config.swa_head_dim
 +
-     if config.model_type == "longcat_flash":
-         config.update({"architectures": ["LongcatFlashForCausalLM"]})
+     if model_override_args:
+         config.update(model_override_args)
  
-@@ -837,9 +863,25 @@ def get_tokenizer(
-         )
-         raise RuntimeError(err_msg) from e
-     except ValueError as e:
-+        # MistralCommon tokenizers reject standard HF kwargs like
-+        # trust_remote_code, use_fast etc. Retry without them.
-+        if "are not supported by" in str(e) and "MistralCommon" in str(e):
-+            for k in (
-+                "trust_remote_code",
-+                "tokenizer_revision",
-+                "use_fast",
-+                "_from_auto",
-+                "clean_up_tokenization_spaces",
-+            ):
-+                kwargs.pop(k, None)
-+            tokenizer = AutoTokenizer.from_pretrained(
-+                tokenizer_name,
-+                *args,
-+                **kwargs,
-+            )
-         # If the error pertains to the tokenizer class not existing or not
-         # currently being imported, suggest using the --trust-remote-code flag.
--        if not trust_remote_code and (
-+        elif not trust_remote_code and (
-             "does not exist or is not currently imported." in str(e)
-             or "requires you to execute the tokenizer file" in str(e)
-         ):
-@@ -875,6 +917,7 @@ def get_tokenizer(
-             "slowdown. Consider using a fast tokenizer instead."
-         )
- 
-+    _patch_mistral_common_tokenizer(tokenizer)
-     _fix_special_tokens_pattern(tokenizer)
-     attach_additional_stop_token_ids(tokenizer)
-     tokenizer = patch_tokenizer(tokenizer)
-@@ -1267,6 +1310,22 @@ def get_processor(
-                 revision=revision,
-                 **kwargs,
-             )
-+        elif (
-+            "are not supported by" in error_message and "MistralCommon" in error_message
-+        ):
-+            logger.info(
-+                "AutoProcessor for %s rejected standard kwargs, "
-+                "retrying without trust_remote_code/use_fast",
-+                tokenizer_name,
-+            )
-+            kwargs.pop("use_fast", None)
-+            kwargs.pop("_from_auto", None)
-+            processor = AutoProcessor.from_pretrained(
-+                tokenizer_name,
-+                *args,
-+                revision=revision,
-+                **kwargs,
-+            )
-         elif "Unrecognized feature extractor" in error_message:
-             logger.info(
-                 "AutoProcessor failed on feature extractor for %s, "
-@@ -1315,6 +1374,7 @@ def get_processor(
-         )
- 
-     tokenizer = get_tokenizer_from_processor(processor)
-+    _patch_mistral_common_tokenizer(tokenizer)
- 
-     if tokenizer.chat_template is None:
-         local_path = download_from_hf(
-@@ -1341,6 +1401,86 @@ def attach_additional_stop_token_ids(tokenizer):
-         tokenizer.additional_stop_token_ids = None
- 
- 
-+def _patch_mistral_common_tokenizer(tokenizer):
-+    """Patch MistralCommonTokenizer/Backend to be compatible with HF tokenizer API.
-+
-+    MistralCommon tokenizers (used by Voxtral, Pixtral, etc.) reject several
-+    standard kwargs and lack some attributes that sglang expects.  We wrap the
-+    offending methods once at load time so that the rest of the codebase does
-+    not need any special-casing.
-+    """
-+    cls_name = type(tokenizer).__name__
-+    if "MistralCommon" not in cls_name:
-+        return tokenizer
-+    if getattr(tokenizer, "_mistral_common_patched", False):
-+        return tokenizer
-+    tokenizer._mistral_common_patched = True
-+
-+    # Missing attributes
-+    if not hasattr(tokenizer, "get_added_vocab"):
-+        tokenizer.get_added_vocab = lambda: {}
-+
-+    # Set a chat_template containing "audio" so that sglang's content format
-+    # detector returns "openai" (which preserves audio_url extraction).
-+    # The actual template rendering is done by MistralCommon's apply_chat_template.
-+    if not hasattr(tokenizer, "chat_template") or tokenizer.chat_template is None:
-+        tokenizer.chat_template = "<!-- audio/image multimodal -->"
-+
-+    # convert_tokens_to_ids asserts on multi-token strings
-+    _orig_convert = tokenizer.convert_tokens_to_ids
-+
-+    def _safe_convert(val):
-+        try:
-+            return _orig_convert(val)
-+        except AssertionError:
-+            return getattr(tokenizer, "unk_token_id", None)
-+
-+    tokenizer.convert_tokens_to_ids = _safe_convert
-+
-+    # Wrap methods that reject certain kwargs
-+    def _drop_kwargs(fn, keys):
-+        def wrapper(*args, **kwargs):
-+            for k in keys:
-+                kwargs.pop(k, None)
-+            return fn(*args, **kwargs)
-+
-+        return wrapper
-+
-+    tokenizer.decode = _drop_kwargs(tokenizer.decode, ["spaces_between_special_tokens"])
-+    tokenizer.batch_decode = _drop_kwargs(
-+        tokenizer.batch_decode, ["spaces_between_special_tokens"]
-+    )
-+
-+    # Save original apply_chat_template for processors that need it (e.g. Voxtral)
-+    tokenizer._orig_apply_chat_template = tokenizer.apply_chat_template
-+
-+    def _safe_apply_chat_template(messages, **kwargs):
-+        """Wrapper that strips unsupported kwargs and non-text content parts.
-+
-+        When sglang extracts audio/image URLs, it replaces content blocks with
-+        {"type": "audio"} or {"type": "image"} (no URL).  MistralCommon fails
-+        on these stripped blocks.  We convert them to text-only messages.
-+        """
-+        kwargs.pop("add_generation_prompt", None)
-+        cleaned = []
-+        for msg in messages:
-+            if isinstance(msg, dict):
-+                content = msg.get("content", "")
-+                if isinstance(content, list):
-+                    text_parts = [
-+                        p.get("text", "")
-+                        for p in content
-+                        if isinstance(p, dict) and p.get("type") == "text"
-+                    ]
-+                    msg = {**msg, "content": " ".join(text_parts) if text_parts else ""}
-+                cleaned.append(msg)
-+            else:
-+                cleaned.append(msg)
-+        return tokenizer._orig_apply_chat_template(cleaned, **kwargs)
-+
-+    tokenizer.apply_chat_template = _safe_apply_chat_template
-+
-+
- def check_gguf_file(model: Union[str, os.PathLike]) -> bool:
-     """Check if the file is a GGUF model."""
-     model = Path(model)

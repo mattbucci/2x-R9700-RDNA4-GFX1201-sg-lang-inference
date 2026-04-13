@@ -13,7 +13,6 @@ High-throughput LLM inference on AMD Radeon AI PRO R9700 (gfx1201, RDNA4) with R
 - **Coder-30B REAP (auto-round)** — [cerebras/Qwen3-Coder-REAP-25B-A3B](https://huggingface.co/cerebras/Qwen3-Coder-REAP-25B-A3B) hits 134 tok/s on 3090s. Pre-quantized, just download and try `--quantization auto-round`. Check if auto-round kernels work on RDNA4.
 - **Qwen3.5-35B-A3B MoE** — REAM/REAP pipeline ready (`scripts/quantize/REAM.md`). Download model, run REAM (256→192 experts), then GPTQ calibrate + CT→AWQ convert. DeltaNet layers must stay BF16.
 - **Compressed-tensors backend on RDNA4** — `CompressedTensorsWNA16` (dense layers) falls back to Marlin which is CUDA-only. Need to add HIP fallback (torch dequant or route to our Triton AWQ kernel) for `--quantization compressed-tensors` to work on dense models.
-- **Regenerate patches** — Gemma4ForCausalLM multimodal bypass fix was applied to `components/sglang/` source but not captured in `.patch` files yet.
 
 ### Findings from NVIDIA 3090 system
 
@@ -279,15 +278,15 @@ pip install -e components/sglang/python
 
 ## Patches
 
-7 patches on top of SGLang v0.5.10 (~8,600 lines across 50 files):
+7 patches on top of SGLang v0.5.10 (~8,000 lines across 46 files):
 
-1. **001-upstream-sync** (3,000 LOC) — Cherry-picks from upstream main: Gemma 4 model, Qwen3.5/3-Next, attention, SWA, pool_configurator. No RDNA4 changes.
+1. **001-upstream-sync** (1,844 LOC) — Cherry-picks from upstream main: Gemma 4 model, Qwen3.5/3-Next, attention, SWA, pool_configurator. Gemma4ForCausalLM multimodal detection bypass.
 2. **002-torch-compile-disable** (56 LOC) — Disable `@torch.compile` on HIP (prevents inductor stalls)
 3. **003-sgl-kernel-fallbacks** (669 LOC) — sgl-kernel graceful degradation with torch-native fallbacks
 4. **004-moe-fixes** (1,386 LOC) — MoE topk/align fallbacks + 8 Triton 3.6 configs for R9700
 5. **005-fp8-fallbacks** (247 LOC) — FP8 torch-native paths for gfx1201
-6. **006-awq-kernels** (2,415 LOC) — Fused AWQ Triton GEMM + HIP GEMV (4x decode speedup)
-7. **007-model-fixes** (811 LOC) — Gemma4 CT-GPTQ fix, Qwen3.5 TP cache, AWQ gelu, Devstral BOS fix
+6. **006-awq-kernels** (2,439 LOC) — Fused AWQ Triton GEMM + HIP GEMV (4x decode speedup), BF16 activation support
+7. **007-model-fixes** (1,367 LOC) — Gemma4 num_experts fix, Qwen3.5 TP cache, AWQ gelu, Devstral BOS fix
 
 | Component | Version | Source |
 |-----------|---------|--------|

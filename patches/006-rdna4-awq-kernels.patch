@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/layers/quantization/awq.py b/python/sglang/srt/layers/quantization/awq.py
-index c05aa091a..e85474279 100644
+index c05aa091a..a7484ce31 100644
 --- a/python/sglang/srt/layers/quantization/awq.py
 +++ b/python/sglang/srt/layers/quantization/awq.py
 @@ -2,6 +2,7 @@
@@ -41,7 +41,20 @@ index c05aa091a..e85474279 100644
  
  ScalarType, scalar_types = get_scalar_types()
  
-@@ -186,6 +203,8 @@ class AWQConfig(QuantizationConfig):
+@@ -137,7 +154,11 @@ class AWQConfig(QuantizationConfig):
+         return "awq"
+ 
+     def get_supported_act_dtypes(self) -> List[torch.dtype]:
+-        return [torch.float16] if not _is_npu else [torch.float16, torch.bfloat16]
++        # BF16 supported on HIP/ROCm: AWQ dequant is FP16 but matmul uses BF16
++        # accumulation to avoid overflow on large models (hidden_size > 4096)
++        if _is_hip or _is_npu:
++            return [torch.float16, torch.bfloat16]
++        return [torch.float16]
+ 
+     @classmethod
+     def get_min_capability(cls) -> int:
+@@ -186,6 +207,8 @@ class AWQConfig(QuantizationConfig):
              if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
                  return UnquantizedLinearMethod()
              return AWQLinearMethod(self)
@@ -50,7 +63,7 @@ index c05aa091a..e85474279 100644
          return None
  
  
-@@ -455,8 +474,24 @@ class AWQLinearMethod(LinearMethodBase):
+@@ -455,8 +478,35 @@ class AWQLinearMethod(LinearMethodBase):
          pack_factor = self.quant_config.pack_factor
          out_shape = x.shape[:-1] + (qweight.shape[-1] * pack_factor,)
          reshaped_x = x.reshape(-1, x.shape[-1])
@@ -62,22 +75,33 @@ index c05aa091a..e85474279 100644
 +        # - M>1: Dequantize to FP16 + hipBLAS GEMM (no Triton — avoids
 +        #   gfx1201 HSACO crash when multiple Triton kernels compile together)
 +        if _is_hip:
++            act_dtype = reshaped_x.dtype
 +            M = reshaped_x.shape[0]
 +            if M == 1 and _has_hip_gemv:
++                # HIP GEMV kernel operates in FP16. For BF16 activations,
++                # cast at boundaries (BF16→FP16 input, FP16→BF16 output).
++                # Scales must be FP16 for the kernel.
++                scales_fp16 = scales.half() if scales.dtype != torch.float16 else scales
 +                out = awq_gemv_hip_ext.awq_gemv_hip(
-+                    reshaped_x, qweight, scales, qzeros, 0
-+                ).unsqueeze(0)
++                    reshaped_x.half(), qweight, scales_fp16, qzeros, 0
++                ).to(act_dtype).unsqueeze(0)
 +            else:
-+                # Pure PyTorch dequant + hipBLAS matmul — zero Triton involvement
-+                out = awq_dequantize_decomposition(qweight, scales, qzeros)
-+                out = torch.matmul(reshaped_x, out)
++                # M>1 (prefill): PyTorch dequant + hipBLAS matmul.
++                # AWQ dequant produces FP16 weights; cast to activation dtype
++                # for the matmul. BF16 avoids FP16 overflow on large models
++                # (Gemma 31B: hidden=5376 exceeds FP16 max at layer 2).
++                dequant_w = awq_dequantize_decomposition(qweight, scales, qzeros)
++                if act_dtype != dequant_w.dtype:
++                    out = torch.matmul(reshaped_x, dequant_w.to(act_dtype))
++                else:
++                    out = torch.matmul(reshaped_x, dequant_w)
 +        else:
 +            out = awq_dequantize(qweight, scales, qzeros)
 +            out = torch.matmul(reshaped_x, out)
  
          if bias is not None:
              out.add_(bias)
-@@ -864,6 +899,227 @@ class AWQMoEMethod(FusedMoEMethodBase):
+@@ -864,6 +914,227 @@ class AWQMoEMethod(FusedMoEMethodBase):
          return self.runner.run(dispatch_output, quant_info)
  
  
