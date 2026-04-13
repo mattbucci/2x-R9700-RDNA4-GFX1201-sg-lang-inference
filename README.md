@@ -7,6 +7,15 @@ High-throughput LLM inference on AMD Radeon AI PRO R9700 (gfx1201, RDNA4) with R
 - **Gemma 4 31B Dense** — Working (RTN AWQ 4-bit, BF16 activations, ~19 tok/s). Quality degrades after ~30 tokens with RTN quantization — needs proper GPTQ calibration in BF16 for production use. See [Gemma 31B notes](#gemma-4-31b-dense-notes) below.
 - **GLM-4.5-Air REAP** — Blocked. CT format needs Marlin (CUDA-only). CT-to-AWQ conversion done but `moe_intermediate_size=1408` is not TP=2 aligned with group_size=128. Needs AWQ loader patch for non-aligned group boundaries.
 
+### Findings from NVIDIA 3090 system
+
+The sister [2x RTX 3090 repo](https://github.com/mattbucci/2x-3090-GA102-300-A1-sglang-inference) found:
+
+- **DeltaNet Triton kernel bf16/fp16 mismatch** — `causal_conv1d_triton.py` has an if/else branch where `load_init_state` loads conv_state (bf16) but the else branch creates zeros with `x_ptr.dtype` (fp16 under AWQ). Fix: `.to(x_ptr.dtype.element_ty)` on all conv_state loads. Patch 003 in the NVIDIA repo. This may also affect RDNA4 if running Qwen3.5 with fp16 activations.
+- **Gemma 4 multimodal detection bypass** — `Gemma4ForCausalLM` (text-only) inherits `vision_config`/`audio_config` as class defaults from `Gemma4Config`, causing SGLang to treat it as multimodal. Fix: skip multimodal detection for `*ForCausalLM` architectures not in `multimodal_model_archs`. Patch 004 in the NVIDIA repo.
+- **Gemma 4 REAP (26B→21B)** — GPTQ calibration requires `group_size=32` because `moe_intermediate_size=704` is not divisible by 128. Use `config_groups` with `QuantizationScheme` instead of `scheme="W4A16"`.
+- **Coder-30B REAP (25B) at 134 tok/s** — [cerebras/Qwen3-Coder-REAP-25B-A3B](https://huggingface.co/cerebras/Qwen3-Coder-REAP-25B-A3B) with `auto-round` quantization runs at 134 tok/s on 3090s with 131K context. Uses `--quantization auto-round`.
+
 ## Quick Start
 
 ```bash
