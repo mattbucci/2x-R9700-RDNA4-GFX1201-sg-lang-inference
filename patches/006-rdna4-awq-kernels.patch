@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/layers/quantization/awq.py b/python/sglang/srt/layers/quantization/awq.py
-index c05aa091a..a7484ce31 100644
+index c05aa091a..8c602dd16 100644
 --- a/python/sglang/srt/layers/quantization/awq.py
 +++ b/python/sglang/srt/layers/quantization/awq.py
 @@ -2,6 +2,7 @@
@@ -63,7 +63,7 @@ index c05aa091a..a7484ce31 100644
          return None
  
  
-@@ -455,8 +478,35 @@ class AWQLinearMethod(LinearMethodBase):
+@@ -455,8 +478,36 @@ class AWQLinearMethod(LinearMethodBase):
          pack_factor = self.quant_config.pack_factor
          out_shape = x.shape[:-1] + (qweight.shape[-1] * pack_factor,)
          reshaped_x = x.reshape(-1, x.shape[-1])
@@ -78,30 +78,31 @@ index c05aa091a..a7484ce31 100644
 +            act_dtype = reshaped_x.dtype
 +            M = reshaped_x.shape[0]
 +            if M == 1 and _has_hip_gemv:
-+                # HIP GEMV kernel operates in FP16. For BF16 activations,
-+                # cast at boundaries (BF16→FP16 input, FP16→BF16 output).
-+                # Scales must be FP16 for the kernel.
-+                scales_fp16 = scales.half() if scales.dtype != torch.float16 else scales
-+                out = awq_gemv_hip_ext.awq_gemv_hip(
-+                    reshaped_x.half(), qweight, scales_fp16, qzeros, 0
-+                ).to(act_dtype).unsqueeze(0)
-+            else:
-+                # M>1 (prefill): PyTorch dequant + hipBLAS matmul.
-+                # AWQ dequant produces FP16 weights; cast to activation dtype
-+                # for the matmul. BF16 avoids FP16 overflow on large models
-+                # (Gemma 31B: hidden=5376 exceeds FP16 max at layer 2).
-+                dequant_w = awq_dequantize_decomposition(qweight, scales, qzeros)
-+                if act_dtype != dequant_w.dtype:
-+                    out = torch.matmul(reshaped_x, dequant_w.to(act_dtype))
++                if act_dtype == torch.bfloat16:
++                    # BF16 path: dequant in BF16, matmul in BF16.
++                    # HIP GEMV is FP16-only so we use torch matmul instead.
++                    dequant_w = awq_dequantize_decomposition(
++                        qweight, scales, qzeros, out_dtype=torch.bfloat16)
++                    out = torch.matmul(reshaped_x.unsqueeze(0), dequant_w)
 +                else:
-+                    out = torch.matmul(reshaped_x, dequant_w)
++                    # FP16 path: use fast HIP GEMV kernel
++                    out = awq_gemv_hip_ext.awq_gemv_hip(
++                        reshaped_x, qweight, scales, qzeros, 0
++                    ).unsqueeze(0)
++            else:
++                # M>1 (prefill): dequant in activation dtype, hipBLAS matmul.
++                # BF16 dequant avoids FP16 precision loss on deep models
++                # (Gemma 31B: 60 layers, errors compound through residual stream).
++                dequant_w = awq_dequantize_decomposition(
++                    qweight, scales, qzeros, out_dtype=act_dtype)
++                out = torch.matmul(reshaped_x, dequant_w)
 +        else:
 +            out = awq_dequantize(qweight, scales, qzeros)
 +            out = torch.matmul(reshaped_x, out)
  
          if bias is not None:
              out.add_(bias)
-@@ -864,6 +914,227 @@ class AWQMoEMethod(FusedMoEMethodBase):
+@@ -864,6 +915,227 @@ class AWQMoEMethod(FusedMoEMethodBase):
          return self.runner.run(dispatch_output, quant_info)
  
  
@@ -330,7 +331,7 @@ index c05aa091a..a7484ce31 100644
      def __init__(self, quant_config: AWQConfig):
          self.quant_config = quant_config
 diff --git a/python/sglang/srt/layers/quantization/awq_triton.py b/python/sglang/srt/layers/quantization/awq_triton.py
-index b83dd79fb..b0b60e245 100644
+index b83dd79fb..94af86d9b 100644
 --- a/python/sglang/srt/layers/quantization/awq_triton.py
 +++ b/python/sglang/srt/layers/quantization/awq_triton.py
 @@ -212,9 +212,9 @@ def awq_gemm_kernel(
@@ -454,6 +455,41 @@ index b83dd79fb..b0b60e245 100644
  # input   - [M, K]
  # qweight - [K, N // 8]
  # qzeros  - [K // G, N // 8]
+@@ -343,7 +445,15 @@ def awq_dequantize_decomposition(
+     qweight: torch.Tensor,
+     scales: torch.Tensor,
+     zeros: torch.Tensor,
++    out_dtype: torch.dtype = None,
+ ) -> torch.Tensor:
++    """Dequantize AWQ INT4 weights to float using pure PyTorch.
++
++    Args:
++        out_dtype: Override output dtype. If None, uses scales.dtype (FP16).
++                   Pass torch.bfloat16 for models that overflow FP16 (e.g. Gemma 31B).
++    """
++    compute_dtype = out_dtype if out_dtype is not None else scales.dtype
+     qweight_tmp = qweight
+     qzeros_tmp = zeros
+     qweight_list = []
+@@ -354,15 +464,15 @@ def awq_dequantize_decomposition(
+         qzeros_list.append((qzeros_tmp.reshape(-1, 1) >> shift_num) & 0xF)
+         qweight_list.append((qweight_tmp.reshape(-1, 1) >> shift_num) & 0xF)
+     qzeros_tmp = (
+-        torch.cat(qzeros_list, dim=-1).reshape(qzeros_tmp.shape[0], -1).to(scales.dtype)
++        torch.cat(qzeros_list, dim=-1).reshape(qzeros_tmp.shape[0], -1).to(compute_dtype)
+     )
+     qweight_tmp = (
+         torch.cat(qweight_list, dim=-1)
+         .reshape(qweight_tmp.shape[0], -1)
+-        .to(scales.dtype)
++        .to(compute_dtype)
+     )
+     res = (
+         qweight_tmp.reshape(qzeros_tmp.shape[0], -1, qzeros_tmp.shape[1])
+         - qzeros_tmp.unsqueeze(1)
+-    ) * scales.unsqueeze(1)
++    ) * scales.to(compute_dtype).unsqueeze(1)
+     return res.reshape(qweight_tmp.shape[0], -1)
 diff --git a/sgl-kernel/csrc/quantization/awq/awq_gemv_hip.cu b/sgl-kernel/csrc/quantization/awq/awq_gemv_hip.cu
 new file mode 100644
 index 000000000..5c4fc5806
