@@ -1,102 +1,111 @@
 #!/usr/bin/env python3
-"""Unified benchmark for all SGLang models on RDNA4.
+"""Unified benchmark for SGLang models on RDNA4.
 
-Runs single-user context sweep + concurrency throughput sweep.
-Outputs results to stdout and JSON file.
+Runs context sweep + concurrency sweep using sglang.bench_serving for proper
+TPOT/TTFT measurement. Outputs JSON with per-point metrics.
 
-Usage: python bench_all_unified.py --port 23334 --name "Model Name" --output benchmarks/out.json
+Usage:
+    python bench_all_unified.py --name "Model Name" --port 23334
+    python bench_all_unified.py --name "Devstral" --port 23334 --context-max 32768
 """
 import argparse
 import json
-import time
-import sys
 import os
-import concurrent.futures
+import re
+import subprocess
+import sys
+import time
+
 import requests
 
-def chat(base, prompt, max_tokens=100, timeout=300):
-    start = time.time()
-    r = requests.post(f"{base}/v1/chat/completions", json={
-        "model": "model",
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
-        "temperature": 0,
-    }, timeout=timeout)
-    elapsed = time.time() - start
-    d = r.json()
-    ct = d["usage"]["completion_tokens"]
-    pt = d["usage"]["prompt_tokens"]
-    content = d["choices"][0]["message"]["content"] or ""
-    return {"elapsed": elapsed, "ct": ct, "pt": pt, "content": content}
+
+def run_bench_serving(port, model, input_len, output_len, num_prompts, request_rate):
+    """Run sglang.bench_serving and return parsed metrics."""
+    cmd = [
+        sys.executable, "-m", "sglang.bench_serving",
+        "--backend", "sglang",
+        "--base-url", f"http://localhost:{port}",
+        "--model", model,
+        "--dataset-name", "random",
+        "--random-input", str(input_len),
+        "--random-output", str(output_len),
+        "--num-prompts", str(num_prompts),
+        "--request-rate", str(request_rate),
+        "--disable-ignore-eos",
+        "--disable-tqdm",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    output = result.stdout + result.stderr
+
+    def extract(field):
+        m = re.search(rf"{field}:\s+([\d.]+)", output)
+        return float(m.group(1)) if m else None
+
+    return {
+        "tpot_ms": extract("Mean TPOT"),
+        "ttft_ms": extract("Mean TTFT"),
+        "throughput": extract("Output token throughput"),
+        "e2e_ms": extract("Mean E2E Latency"),
+        "raw": output,
+    }
 
 
-def bench_context_sweep(base, context_lengths, output_tokens=100):
-    """Single-user latency at various context lengths."""
+def context_sweep(port, model, context_levels, output_tokens):
+    """Single-user TPOT at various context lengths."""
     results = []
-    for ctx in context_lengths:
-        filler = "word " * max(0, (ctx - 30) // 2)
-        prompt = f"{filler}Explain what gravity is in two sentences."
-        try:
-            r = chat(base, prompt, output_tokens, timeout=600)
-            tps = r["ct"] / r["elapsed"] if r["elapsed"] > 0 else 0
+    print(f"--- Context sweep (single-user, {output_tokens} output tokens) ---")
+    for ctx in context_levels:
+        input_len = max(32, ctx // 2)
+        metrics = run_bench_serving(port, model, input_len, output_tokens, 1, 1)
+        tpot = metrics["tpot_ms"]
+        ttft = metrics["ttft_ms"]
+
+        if tpot and tpot > 0:
+            tok_s = round(1000.0 / tpot, 1)
+            print(f"  ctx={ctx:>6}: input={input_len:>6} TPOT={tpot:.1f}ms = {tok_s} tok/s  TTFT={ttft:.1f}ms")
             results.append({
                 "context": ctx,
-                "prompt_tokens": r["pt"],
-                "completion_tokens": r["ct"],
-                "elapsed": round(r["elapsed"], 2),
-                "tok_per_sec": round(tps, 1),
+                "input_len": input_len,
+                "tpot_ms": tpot,
+                "tok_per_sec": tok_s,
+                "ttft_ms": ttft,
+                "throughput": metrics["throughput"],
             })
-            print(f"  ctx={ctx:>6}: prompt={r['pt']:>6} compl={r['ct']:>4} time={r['elapsed']:>6.1f}s speed={tps:>5.1f} tok/s")
-        except Exception as e:
-            print(f"  ctx={ctx:>6}: ERROR — {str(e)[:80]}")
-            results.append({"context": ctx, "error": str(e)[:200]})
-            # If OOM/crash, skip larger contexts
-            if "Connection" in str(e):
-                print("  Server appears down, stopping context sweep")
+        else:
+            print(f"  ctx={ctx:>6}: FAILED")
+            # Check if server is still alive
+            try:
+                requests.get(f"http://localhost:{port}/health", timeout=5)
+            except Exception:
+                print("  Server down, stopping context sweep")
                 break
     return results
 
 
-def bench_throughput(base, concurrency_levels, output_tokens=200):
+def concurrency_sweep(port, model, conc_levels, output_tokens):
     """Throughput at various concurrency levels."""
     results = []
-    prompts_pool = [
-        "Write a Python function to check if a number is prime.",
-        "Explain the difference between a stack and a queue.",
-        "What causes earthquakes? Brief answer.",
-        "Write a bash command to find large files.",
-        "What is the time complexity of binary search?",
-        "Explain how a hash table works.",
-        "Write a SQL query to find duplicate rows.",
-        "What is the difference between TCP and UDP?",
-    ]
-    for conc in concurrency_levels:
-        prompts = [prompts_pool[i % len(prompts_pool)] for i in range(conc)]
-        start = time.time()
-        total_toks = 0
-        errors = 0
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(conc, 32)) as pool:
-            futs = [pool.submit(chat, base, p, output_tokens, 600) for p in prompts]
-            for f in concurrent.futures.as_completed(futs):
-                try:
-                    r = f.result()
-                    total_toks += r["ct"]
-                except:
-                    errors += 1
-        elapsed = time.time() - start
-        tps = total_toks / elapsed if elapsed > 0 else 0
-        err_str = f" ({errors} err)" if errors else ""
-        results.append({
-            "concurrency": conc,
-            "total_tokens": total_toks,
-            "elapsed": round(elapsed, 2),
-            "tok_per_sec": round(tps, 1),
-            "errors": errors,
-        })
-        print(f"  conc={conc:>3}: {total_toks:>5} tokens in {elapsed:>6.1f}s = {tps:>6.1f} tok/s{err_str}")
-        if errors == conc:
-            print("  All requests failed, stopping throughput sweep")
-            break
+    print(f"\n--- Concurrency sweep (128 input, {output_tokens} output tokens) ---")
+    for conc in conc_levels:
+        metrics = run_bench_serving(port, model, 128, output_tokens, conc, conc)
+        tpot = metrics["tpot_ms"]
+        throughput = metrics["throughput"]
+
+        if throughput and throughput > 0:
+            print(f"  conc={conc:>3}: throughput={throughput:.1f} tok/s  TPOT={tpot:.1f}ms")
+            results.append({
+                "concurrency": conc,
+                "throughput": throughput,
+                "tpot_ms": tpot,
+                "ttft_ms": metrics["ttft_ms"],
+            })
+        else:
+            print(f"  conc={conc:>3}: FAILED")
+            try:
+                requests.get(f"http://localhost:{port}/health", timeout=5)
+            except Exception:
+                print("  Server down, stopping concurrency sweep")
+                break
     return results
 
 
@@ -110,47 +119,51 @@ def main():
     p.add_argument("--concurrency-max", type=int, default=32)
     args = p.parse_args()
 
-    base = f"http://localhost:{args.port}"
-
     # Verify server
     try:
-        requests.get(f"{base}/health", timeout=5)
-    except:
+        requests.get(f"http://localhost:{args.port}/health", timeout=5)
+    except Exception:
         print(f"Server not responding on port {args.port}")
         sys.exit(1)
 
+    # Get served model name
+    try:
+        r = requests.get(f"http://localhost:{args.port}/v1/models", timeout=5)
+        model = r.json()["data"][0]["id"]
+    except Exception:
+        model = "default"
+
     print(f"=== {args.name} ===")
-    print(f"Port: {args.port}, Output tokens: {args.output_tokens}")
+    print(f"Port: {args.port}, Model: {model}")
+    print(f"Method: sglang.bench_serving (TPOT-based)")
     print()
 
     # Warmup
-    print("Warming up...")
-    for _ in range(3):
+    print("Warming up (3 requests)...")
+    for i in range(3):
         try:
-            chat(base, "Hello", 5, 120)
-        except:
+            requests.post(f"http://localhost:{args.port}/v1/chat/completions", json={
+                "model": model, "messages": [{"role": "user", "content": f"Warmup {i}"}],
+                "max_tokens": 10, "temperature": 0,
+            }, timeout=120)
+        except Exception:
             pass
     print()
 
-    # Context sweep — try from small to large
-    ctx_levels = [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144]
-    ctx_levels = [c for c in ctx_levels if c <= args.context_max]
-
-    print(f"--- Single-user context sweep ({args.output_tokens} output tokens) ---")
-    context_results = bench_context_sweep(base, ctx_levels, args.output_tokens)
+    # Context sweep
+    ctx_levels = [c for c in [128, 256, 512, 1024, 2048, 4096, 8192, 16384,
+                               32768, 65536, 131072, 262144] if c <= args.context_max]
+    context_results = context_sweep(args.port, model, ctx_levels, args.output_tokens)
 
     # Concurrency sweep
-    conc_levels = [1, 2, 4, 8, 16, 32]
-    conc_levels = [c for c in conc_levels if c <= args.concurrency_max]
-
-    print()
-    print(f"--- Concurrent throughput ({args.output_tokens} output tokens each) ---")
-    throughput_results = bench_throughput(base, conc_levels, args.output_tokens)
+    conc_levels = [c for c in [1, 2, 4, 8, 16, 32, 64] if c <= args.concurrency_max]
+    throughput_results = concurrency_sweep(args.port, model, conc_levels, args.output_tokens)
 
     # Save
     all_results = {
         "model": args.name,
         "engine": "SGLang",
+        "method": "sglang.bench_serving",
         "hardware": "2x R9700 TP=2",
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "output_tokens": args.output_tokens,
@@ -163,11 +176,10 @@ def main():
         json.dump(all_results, f, indent=2)
     print(f"\nResults saved to {out_path}")
 
-    # Regenerate benchmark charts
+    # Regenerate charts
     chart_script = os.path.join(os.path.dirname(__file__), "generate_charts.py")
     if os.path.exists(chart_script):
         print("\nRegenerating benchmark charts...")
-        import subprocess
         subprocess.run([sys.executable, chart_script], check=False)
 
 

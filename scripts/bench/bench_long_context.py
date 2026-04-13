@@ -1,76 +1,60 @@
 #!/usr/bin/env python3
-"""Benchmark long-context performance for Qwen3.5 at various context lengths.
+"""Benchmark decode speed at various context lengths using sglang.bench_serving.
 
-Tests prefill speed and decode speed at different context sizes up to 256k.
+Measures TPOT (decode latency) and TTFT (prefill latency) separately at each
+context length. Uses sglang.bench_serving for proper measurement.
+
+Usage:
+    python bench_long_context.py --port 23334
+    python bench_long_context.py --port 23334 --output-tokens 50 --max-context 131072
 """
-
 import argparse
 import json
+import re
+import subprocess
 import sys
-import time
 import urllib.request
 
 
-def bench_completions(base_url, input_len, output_len, label=""):
-    """Run a single benchmark at given input/output lengths."""
-    # Generate a prompt of approximately input_len tokens using repeated text
-    # Each word is roughly 1-2 tokens, use simple repetition
-    word = "hello world test data benchmark context length padding "  # ~8 tokens per repeat
-    repeats = max(1, input_len // 8)
-    prompt_text = (word * repeats)[:input_len * 4]  # rough char estimate
+def run_bench_serving(port, model, input_len, output_len):
+    """Run sglang.bench_serving and return parsed metrics."""
+    cmd = [
+        sys.executable, "-m", "sglang.bench_serving",
+        "--backend", "sglang",
+        "--base-url", f"http://localhost:{port}",
+        "--model", model,
+        "--dataset-name", "random",
+        "--random-input", str(input_len),
+        "--random-output", str(output_len),
+        "--num-prompts", "1",
+        "--request-rate", "1",
+        "--disable-ignore-eos",
+        "--disable-tqdm",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    output = result.stdout + result.stderr
 
-    body = json.dumps({
-        "model": "default",
-        "prompt": prompt_text,
-        "max_tokens": output_len,
-        "temperature": 0,
-        "ignore_eos": True,
-    }).encode()
-    req = urllib.request.Request(
-        f"{base_url}/v1/completions",
-        data=body,
-        headers={"Content-Type": "application/json"},
-    )
+    def extract(field):
+        m = re.search(rf"{field}:\s+([\d.]+)", output)
+        return float(m.group(1)) if m else None
 
-    t0 = time.time()
-    with urllib.request.urlopen(req, timeout=600) as r:
-        data = json.loads(r.read())
-    elapsed = time.time() - t0
-
-    usage = data["usage"]
-    prompt_tokens = usage["prompt_tokens"]
-    completion_tokens = usage["completion_tokens"]
-
-    # Estimate prefill and decode time
-    # Total time = prefill + decode
-    # We can't separate them perfectly from the API, but we can estimate
-    decode_time = elapsed  # Will be dominated by decode for short outputs
-    tpot = (elapsed / completion_tokens * 1000) if completion_tokens > 0 else 0
-    throughput = completion_tokens / elapsed if elapsed > 0 else 0
-
-    print(f"  {label:30s}  in={prompt_tokens:>7d}  out={completion_tokens:>4d}  "
-          f"time={elapsed:>6.1f}s  TPOT={tpot:>6.1f}ms  {throughput:>5.1f} tok/s")
     return {
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "elapsed": elapsed,
-        "tpot_ms": tpot,
-        "throughput": throughput,
+        "tpot_ms": extract("Mean TPOT"),
+        "ttft_ms": extract("Mean TTFT"),
+        "throughput": extract("Output token throughput"),
     }
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=23334)
-    parser.add_argument("--output-tokens", type=int, default=64,
-                        help="Number of output tokens per test")
+    parser.add_argument("--output-tokens", type=int, default=50)
+    parser.add_argument("--max-context", type=int, default=262144)
     args = parser.parse_args()
-
-    base_url = f"http://localhost:{args.port}"
 
     # Check health
     try:
-        with urllib.request.urlopen(f"{base_url}/health", timeout=5):
+        with urllib.request.urlopen(f"http://localhost:{args.port}/health", timeout=5):
             pass
     except Exception as e:
         print(f"Server not ready: {e}")
@@ -78,47 +62,58 @@ def main():
 
     # Get model info
     try:
-        with urllib.request.urlopen(f"{base_url}/v1/models", timeout=5) as r:
+        with urllib.request.urlopen(f"http://localhost:{args.port}/v1/models", timeout=5) as r:
             models = json.loads(r.read())
-        model_id = models["data"][0]["id"].split("/")[-1]
-    except:
-        model_id = "unknown"
+        model = models["data"][0]["id"]
+    except Exception:
+        model = "default"
 
     out = args.output_tokens
-    print(f"Model: {model_id}")
+    print(f"Model: {model}")
     print(f"Output tokens per test: {out}")
-    print(f"{'Label':30s}  {'Input':>9s}  {'Out':>5s}  {'Time':>7s}  {'TPOT':>8s}  {'Throughput':>10s}")
-    print("-" * 85)
+    print(f"Method: sglang.bench_serving (TPOT-based)")
+    print(f"{'Context':>10s}  {'Input':>7s}  {'TPOT':>8s}  {'tok/s':>7s}  {'TTFT':>8s}")
+    print("-" * 50)
 
-    # Test at various context lengths
     tests = [
-        (256, "256 tokens (baseline)"),
-        (1024, "1K tokens"),
-        (4096, "4K tokens"),
-        (8192, "8K tokens"),
-        (16384, "16K tokens"),
-        (32768, "32K tokens"),
-        (65536, "64K tokens"),
-        (131072, "128K tokens"),
-        (200000, "200K tokens"),
-        (250000, "250K tokens"),
+        (128, "128"),
+        (512, "512"),
+        (1024, "1K"),
+        (2048, "2K"),
+        (4096, "4K"),
+        (8192, "8K"),
+        (16384, "16K"),
+        (32768, "32K"),
+        (65536, "64K"),
+        (131072, "128K"),
+        (262144, "256K"),
     ]
 
     results = []
     for input_len, label in tests:
+        if input_len > args.max_context:
+            break
         try:
-            r = bench_completions(base_url, input_len, out, label)
-            results.append((label, r))
+            m = run_bench_serving(args.port, model, input_len, out)
+            tpot = m["tpot_ms"]
+            ttft = m["ttft_ms"]
+            if tpot and tpot > 0:
+                tok_s = round(1000.0 / tpot, 1)
+                print(f"  {label:>8s}  {input_len:>7d}  {tpot:>6.1f}ms  {tok_s:>6.1f}  {ttft:>6.1f}ms")
+                results.append({"context": input_len, "label": label,
+                                "tpot_ms": tpot, "tok_per_sec": tok_s, "ttft_ms": ttft})
+            else:
+                print(f"  {label:>8s}  FAILED (no TPOT returned)")
         except Exception as e:
-            print(f"  {label:30s}  ERROR: {e}")
-            results.append((label, None))
+            print(f"  {label:>8s}  ERROR: {str(e)[:60]}")
 
     # Summary
-    print(f"\n{'='*85}")
-    print(f"Summary: TPOT at different context lengths (output={out} tokens)")
-    for label, r in results:
-        if r:
-            print(f"  {label:30s}  TPOT={r['tpot_ms']:>6.1f}ms  {r['throughput']:>5.1f} tok/s  (prefill {r['prompt_tokens']} tok in {r['elapsed']:.1f}s)")
+    if results:
+        print(f"\n{'='*50}")
+        best = min(results, key=lambda r: r["tpot_ms"])
+        worst = max(results, key=lambda r: r["tpot_ms"])
+        print(f"Best:  {best['label']} — {best['tok_per_sec']} tok/s (TPOT {best['tpot_ms']:.1f}ms)")
+        print(f"Worst: {worst['label']} — {worst['tok_per_sec']} tok/s (TPOT {worst['tpot_ms']:.1f}ms)")
 
 
 if __name__ == "__main__":
