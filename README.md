@@ -4,8 +4,16 @@ High-throughput LLM inference on AMD Radeon AI PRO R9700 (gfx1201, RDNA4) with R
 
 ## Known Issues
 
-- **Gemma 4 31B Dense** — Working (RTN AWQ 4-bit, BF16 activations, ~19 tok/s). Quality degrades after ~30 tokens with RTN quantization — needs proper GPTQ calibration in BF16 for production use. See [Gemma 31B notes](#gemma-4-31b-dense-notes) below.
+- **Gemma 4 31B Dense** — GPTQ calibration in progress (llmcompressor, group_size=128). RTN AWQ degraded after ~30 tokens due to error accumulation through 60 layers. Old GPTQModel pipeline was broken (wrong format fed to converter). New pipeline: llmcompressor → CT → AWQ.
 - **GLM-4.5-Air REAP** — Blocked. CT format needs Marlin (CUDA-only). CT-to-AWQ conversion done but `moe_intermediate_size=1408` is not TP=2 aligned with group_size=128. Needs AWQ loader patch for non-aligned group boundaries.
+
+## Next to Try
+
+- **Gemma 31B GPTQ AWQ** — Calibration running. Convert with `convert_gemma4_31b_ct_to_awq.py`, test with `launch.sh gemma4-31b`. Fall back to `launch.sh gemma4-31b-ct` (compressed-tensors direct) if AWQ conversion degrades quality.
+- **Coder-30B REAP (auto-round)** — [cerebras/Qwen3-Coder-REAP-25B-A3B](https://huggingface.co/cerebras/Qwen3-Coder-REAP-25B-A3B) hits 134 tok/s on 3090s. Pre-quantized, just download and try `--quantization auto-round`. Check if auto-round kernels work on RDNA4.
+- **Qwen3.5-35B-A3B MoE** — REAM/REAP pipeline ready (`scripts/quantize/REAM.md`). Download model, run REAM (256→192 experts), then GPTQ calibrate + CT→AWQ convert. DeltaNet layers must stay BF16.
+- **Compressed-tensors backend on RDNA4** — `CompressedTensorsWNA16` (dense layers) falls back to Marlin which is CUDA-only. Need to add HIP fallback (torch dequant or route to our Triton AWQ kernel) for `--quantization compressed-tensors` to work on dense models.
+- **Regenerate patches** — Gemma4ForCausalLM multimodal bypass fix was applied to `components/sglang/` source but not captured in `.patch` files yet.
 
 ### Findings from NVIDIA 3090 system
 
