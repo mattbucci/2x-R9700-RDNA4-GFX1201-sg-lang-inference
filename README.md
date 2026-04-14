@@ -38,7 +38,7 @@ High-throughput LLM inference on AMD Radeon AI PRO R9700 (gfx1201, RDNA4) with R
 ### Other Models
 
 - **Coder-30B REAP (auto-round)** — [cerebras/Qwen3-Coder-REAP-25B-A3B](https://huggingface.co/cerebras/Qwen3-Coder-REAP-25B-A3B) hits 134 tok/s on 3090s. Pre-quantized, just download and try `--quantization auto-round`. Check if auto-round kernels work on RDNA4.
-- **Qwen3.5-35B-A3B MoE** — Model loads (11.58 GB/GPU), hybrid GDN backend initializes, config shims working. Blocked by DeltaNet TP=2 causal_conv1d dim mismatch (weight 8192 vs conv_state 4096). Needs 3090 repo patch 009 DeltaNet TP replication logic. Architecture: 16Q/2KV (8:1 GQA), 256 experts, 40 layers (30 DeltaNet + 10 full attn). Uses `moe_wna16` quant.
+- **Qwen3.5-35B-A3B MoE** — **Working at 24 tok/s** with official GPTQ-Int4 (`moe_wna16`). DeltaNet hybrid + MoE (256 experts, 30 DeltaNet + 10 full attn). Reasoning + coding quality excellent. Required fixes: moe_wna16 ROCm allow, config shims (norm_topk_prob, layers_block_type, hybrid_gdn_config duck-typing), vision skip for text-only GPTQ, DeltaNet conv state tp_size=1.
 
 ### Research Findings
 
@@ -126,6 +126,7 @@ Primary use case: agent and coding workflows with maximum context at fast decode
 | Qwen3.5-27B AWQ | DeltaNet hybrid | 16K | 26 | 38ms | `launch.sh qwen35` | Working |
 | Coder-Next 80B AWQ | MoE+DeltaNet (512 experts) | 8K | 24 | 41ms | `launch.sh coder-next` | Working |
 | Coder-Next REAM 60B | MoE+DeltaNet (384 experts) | 32K | 25 | 41ms | `launch.sh coder-next-ream` | Working |
+| Qwen3.5-35B MoE GPTQ | MoE+DeltaNet (256 experts) | 32K | 24 | 42ms | `launch.sh qwen35-moe` | Working |
 
 All numbers measured with `sglang.bench_serving` (TPOT = Time Per Output Token, decode only).
 *Working but RTN quantization — quality degrades on long generation. Needs GPTQ-in-BF16 calibration for production use.
