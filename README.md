@@ -13,18 +13,23 @@ High-throughput LLM inference on AMD Radeon AI PRO R9700 (gfx1201, RDNA4) with R
 
 ### Gemma 31B Next Steps
 
-**Current state:** 17 tok/s decode with Triton AWQ GEMV + triton attention backend. Short-context quality is excellent (200 tokens). Long-context quality (>400 tokens) under testing — initial FP16 dequant degraded, FP32 dequant fix deployed but needs verification on longer sequences.
+**Current state:** 15 tok/s decode with Triton AWQ GEMV + torch_native attention. Full quality verified at 659 tokens (464 words, clean coherent output, no degradation). 50x speedup from 0.3 tok/s baseline.
 
 **Speed path (solved):** Three changes unlocked 17 tok/s (from 0.3):
 1. **Triton attention backend** — Replaced `create_flashinfer_kv_indices_triton` (HSA crash on RDNA4) with PyTorch fallback `_create_kv_indices()` at all 9 call sites. Triton decode/extend attention kernels with FP32 intermediates (patch 011) work correctly.
 2. **Triton AWQ GEMV** — New fused M=1 kernel with full FP32 dequantization: `(b.to(fp32) - zeros.to(fp32)) * scales.to(fp32)`. Replaces unfused dequant+matmul (was 100x slower). HIP GEMV crashes on Gemma4 dimensions (HSA exception).
 3. **AWQ converter fixed** — Full dequant→requant for symmetric GPTQ→AWQ conversion (50.4% negative scales). Cross-shard tensor loading. BF16→FP16 norm conversion.
 
-**Quality concern (OPEN):** Both FP16 and FP32 dequant in Triton GEMV degrade at ~400 tokens ("l l l l" repetition). The precision loss is NOT in the dequantization step — full FP32 dequant shows identical degradation. Root cause is elsewhere: possibly BF16 activation precision compounding through 60 layers, or the unfused M>1 prefill path, or subtle differences in the Triton GEMV vs PyTorch matmul accumulation pattern. The slow unfused path (0.3 tok/s) produces coherent 200-token output but was never tested at 400+ tokens.
+**Quality isolation (SOLVED):** Systematic testing confirmed the 400-token degradation is caused by **triton attention kernels** (not the GEMV):
+- `torch_native attention + Triton GEMV` → **CLEAN at 659 tokens** (15 tok/s)
+- `triton attention + Triton GEMV` → degrades at ~400 tokens (17 tok/s)
+- `triton attention + unfused AWQ` → HSA crash at ~400 tokens (0.3 tok/s)
+- All Triton kernels pass in isolation (tested kv_indices, GEMV, decode attention at 500+ steps)
+- Root cause: triton attention kernels interact incorrectly with SGLang's SWA pool / KV cache pipeline for Gemma4's 60-layer mixed attention. Patch 011 FP32 fixes help short context but insufficient for 400+ tokens.
 
 **AutoRound calibration on our hardware:** The 59 GB BF16 model cannot be calibrated on 2×30 GB + 62 GB RAM. Needs single GPU with >60 GB VRAM (A100-80G, H100).
 
-1. **Verify long-context quality with FP32 GEMV** — Test 800+ token generation with the full FP32 dequant fix. If quality is good, Gemma4-31B is production-ready at 17 tok/s.
+1. **Fix triton attention for Gemma4 SWA** — Triton decode attention + SGLang SWA pipeline crashes/degrades at 400+ tokens. Works in isolation. Likely a buffer indexing or SWA pool translation issue. Would unlock 17 tok/s (vs 15 tok/s with torch_native).
 
 2. **Optimize prefill speed** — M>1 path still uses unfused dequant+matmul. Could use Triton AWQ GEMM with FP32 dequant for faster prefill.
 
@@ -117,7 +122,7 @@ Primary use case: agent and coding workflows with maximum context at fast decode
 | Devstral-24B AWQ | Dense | 32K | 37 | 27ms | `launch.sh devstral` | Working |
 | Coder-30B AWQ | MoE (128 experts) | 32K | 30 | 34ms | `launch.sh coder-30b` | Working |
 | Gemma 4 26B AWQ | MoE (128 experts) | 4K | 30 | 33ms | `launch.sh gemma4` | Working |
-| Gemma 4 31B AWQ | Dense | 8K | 17 | 59ms | `launch.sh gemma4-31b` | Testing* |
+| Gemma 4 31B AWQ | Dense | 8K | 15 | 68ms | `launch.sh gemma4-31b` | Working |
 | Qwen3.5-27B AWQ | DeltaNet hybrid | 16K | 26 | 38ms | `launch.sh qwen35` | Working |
 | Coder-Next 80B AWQ | MoE+DeltaNet (512 experts) | 8K | 24 | 41ms | `launch.sh coder-next` | Working |
 | Coder-Next REAM 60B | MoE+DeltaNet (384 experts) | 32K | 25 | 41ms | `launch.sh coder-next-ream` | Working |

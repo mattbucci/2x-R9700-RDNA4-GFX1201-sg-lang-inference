@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/layers/quantization/awq.py b/python/sglang/srt/layers/quantization/awq.py
-index 75769d402..a92818a33 100644
+index 75769d402..17f8fa207 100644
 --- a/python/sglang/srt/layers/quantization/awq.py
 +++ b/python/sglang/srt/layers/quantization/awq.py
 @@ -486,27 +486,14 @@ class AWQLinearMethod(LinearMethodBase):
@@ -27,7 +27,7 @@ index 75769d402..a92818a33 100644
 +                out = awq_gemv_hip_ext.awq_gemv_hip(
 +                    reshaped_x, qweight, scales, qzeros, 0
 +                ).unsqueeze(0)
-+            elif M == 1:
++            elif M == 1 and not os.environ.get("AWQ_FORCE_UNFUSED"):
 +                # Triton GEMV with FP32 accumulation for BF16 models
 +                out = awq_gemv_triton(reshaped_x, qweight, scales, qzeros)
              else:

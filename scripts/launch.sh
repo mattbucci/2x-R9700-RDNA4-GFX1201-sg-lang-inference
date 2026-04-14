@@ -83,10 +83,13 @@ apply_preset() {
             ;;
         gemma4-31b)
             # AutoRound GPTQ→AWQ converted (sym→asym re-quantized)
+            # torch_native attention required — triton attention crashes at ~400 tokens
+            # Triton GEMV handles M=1 decode at 15 tok/s with FP32 dequant
             MODEL="${MODEL:-$MODELS_DIR/gemma-4-31B-it-AutoRound-AWQ}"
             TOKENIZER="--tokenizer-path $MODELS_DIR/gemma-4-31B-it-BF16"
             QUANT="awq"
             DTYPE="bfloat16"
+            ATTN_BACKEND="${ATTN_BACKEND:-torch_native}"
             CTX=8192; MAX_RUNNING=8; CHUNKED=4096
             WARMUP="--skip-server-warmup"; WATCHDOG=1800
             OVERLAP=""
