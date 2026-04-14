@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/layers/quantization/awq.py b/python/sglang/srt/layers/quantization/awq.py
-index 75769d402..17f8fa207 100644
+index 75769d402..10014bbde 100644
 --- a/python/sglang/srt/layers/quantization/awq.py
 +++ b/python/sglang/srt/layers/quantization/awq.py
 @@ -486,27 +486,14 @@ class AWQLinearMethod(LinearMethodBase):
@@ -37,76 +37,12 @@ index 75769d402..17f8fa207 100644
                  dequant_w = awq_dequantize_decomposition(
                      qweight, scales, qzeros, out_dtype=act_dtype)
                  out = torch.matmul(reshaped_x, dequant_w)
-diff --git a/python/sglang/srt/layers/quantization/awq_triton.py b/python/sglang/srt/layers/quantization/awq_triton.py
-index 94af86d9b..01cfc2aab 100644
---- a/python/sglang/srt/layers/quantization/awq_triton.py
-+++ b/python/sglang/srt/layers/quantization/awq_triton.py
-@@ -290,12 +290,12 @@ def awq_gemv_kernel(
-     BLOCK_SIZE_K: tl.constexpr,
-     SPLIT_K: tl.constexpr,
- ):
--    """AWQ GEMV kernel for M=1 decode. No M-dimension tiling overhead."""
-+    """AWQ GEMV kernel for M=1 decode. FP32 accumulation for BF16 precision."""
-     pid_n = tl.program_id(0)
-     pid_z = tl.program_id(1)
+@@ -1061,7 +1048,7 @@ class AWQTritonMoEMethod(FusedMoEMethodBase):
+         top_k = topk_ids.shape[1]
+         intermediate = layer.w2_qweight.shape[1]
  
--    accumulator_dtype = c_ptr.type.element_ty
--    accumulator = tl.zeros((BLOCK_SIZE_N,), dtype=accumulator_dtype)
-+    # FP32 accumulator — critical for BF16 models (prevents precision loss)
-+    accumulator = tl.zeros((BLOCK_SIZE_N,), dtype=tl.float32)
+-        if _has_hip_gemv:
++        if _has_hip_gemv and not os.environ.get("AWQ_MOE_FORCE_LOOP"):
+             return self._apply_hip_gemv(layer, x, topk_weights, topk_ids,
+                                         M, K, top_k, intermediate)
  
-     # AWQ unpack order: [0, 4, 1, 5, 2, 6, 3, 7]
-     reverse_awq_order = ((tl.arange(0, 2) * 4)[None, :] + tl.arange(0, 4)[:, None]).reshape(8)
-@@ -340,19 +340,19 @@ def awq_gemv_kernel(
- 
-         b = (b >> shifts) & 0xF
-         zeros = (zeros >> shifts) & 0xF
--        b = (b - zeros) * scales
--        b = b.to(a_ptr.type.element_ty)
-+        # Dequantize entirely in FP32 — FP16 scales × int4 in FP16 loses precision
-+        b = (b.to(tl.float32) - zeros.to(tl.float32)) * scales.to(tl.float32)
- 
--        # GEMV: accumulate a[k] * b[k, n] over K
--        accumulator += tl.sum(a[:, None] * b, axis=0).to(accumulator_dtype)
-+        # GEMV: accumulate a[k] * b[k, n] in FP32
-+        accumulator += tl.sum(a.to(tl.float32)[:, None] * b, axis=0)
- 
-         offsets_k += BLOCK_SIZE_K * SPLIT_K
-         a_ptrs += BLOCK_SIZE_K * SPLIT_K
-         b_ptrs += BLOCK_SIZE_K * SPLIT_K * (N // 8)
- 
--    # Store
-+    # Store FP32 result (reduction happens in wrapper)
-     c_ptrs = c_ptr + pid_z * N + offsets_sn
--    tl.store(c_ptrs, accumulator.to(c_ptr.type.element_ty), mask=offsets_sn < N)
-+    tl.store(c_ptrs, accumulator, mask=offsets_sn < N)
- 
- 
- def awq_gemv_triton(
-@@ -364,14 +364,15 @@ def awq_gemv_triton(
-     block_size_n: int = 64,
-     block_size_k: int = 64,
- ) -> torch.Tensor:
--    """AWQ GEMV for M=1 decode. Avoids GEMM tile overhead."""
-+    """AWQ GEMV for M=1 decode. FP32 accumulation, output in input dtype."""
-     assert input.shape[0] == 1, "GEMV kernel requires M=1"
-     M, K = input.shape
-     N = qweight.shape[1] * 8
-     group_size = qweight.shape[0] // qzeros.shape[0]
- 
-     grid = (triton.cdiv(N, block_size_n), split_k_iters)
--    result = torch.zeros((split_k_iters, N), dtype=scales.dtype, device=input.device)
-+    # FP32 intermediate for split-K reduction
-+    result = torch.zeros((split_k_iters, N), dtype=torch.float32, device=input.device)
- 
-     awq_gemv_kernel[grid](
-         input, qweight, result, qzeros, scales,
-@@ -380,7 +381,7 @@ def awq_gemv_triton(
-         BLOCK_SIZE_K=block_size_k,
-         SPLIT_K=split_k_iters,
-     )
--    return result.sum(0).unsqueeze(0)  # [1, N]
-+    return result.sum(0, dtype=torch.float32).to(input.dtype).unsqueeze(0)  # [1, N]
- 
- 
- # input   - [M, K]
