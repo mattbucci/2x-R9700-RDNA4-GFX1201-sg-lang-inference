@@ -99,26 +99,53 @@ for fname in (
         shutil.copy2(fname, dst)
         print(f"  Copied {os.path.basename(fname)}")
 
-# Process each safetensors shard
+# Build global weight index for cross-shard tensor access
 shard_files = sorted(glob.glob(f"{SRC_DIR}/model*.safetensors"))
 if not shard_files:
     print(f"No model*.safetensors files found in {SRC_DIR}")
     exit(1)
 
+# Read source weight map to handle cross-shard splits
+src_index_path = os.path.join(SRC_DIR, "model.safetensors.index.json")
+if os.path.exists(src_index_path):
+    with open(src_index_path) as f:
+        src_weight_map = json.load(f)["weight_map"]
+else:
+    # Single shard — build map from the file
+    src_weight_map = {}
+    for sp in shard_files:
+        sf = safe_open(sp, framework="pt")
+        for k in sf.keys():
+            src_weight_map[k] = os.path.basename(sp)
+
+# Cache open shard files for cross-shard access
+shard_cache = {}
+def get_tensor(name):
+    """Load a tensor from any shard."""
+    shard_name = src_weight_map[name]
+    if shard_name not in shard_cache:
+        shard_cache[shard_name] = safe_open(os.path.join(SRC_DIR, shard_name), framework="pt")
+    return shard_cache[shard_name].get_tensor(name)
+
+all_keys = list(src_weight_map.keys())
 weight_map = {}
 total_converted = 0
 total_kept = 0
 total_skipped_vision = 0
 
-for shard_idx, shard_path in enumerate(shard_files):
-    shard_name = os.path.basename(shard_path)
+# Group keys by output shard (use same shard boundaries as source)
+from collections import defaultdict
+shard_keys = defaultdict(list)
+for key in all_keys:
+    shard_keys[src_weight_map[key]].append(key)
+
+processed = set()
+
+for shard_name in sorted(shard_keys.keys()):
+    keys = shard_keys[shard_name]
     print(f"\n=== {shard_name} ===")
 
-    f = safe_open(shard_path, framework="pt")
-    keys = list(f.keys())
-
     converted = OrderedDict()
-    processed = set()
 
     for key in keys:
         if key in processed:
@@ -134,16 +161,16 @@ for shard_idx, shard_path in enumerate(shard_files):
             # GPTQ quantized weight — convert to AWQ format
             base = key[: -len(".qweight")]
 
-            qweight_gptq = f.get_tensor(key)  # [K//8, N] int32
+            qweight_gptq = get_tensor(key)  # [K//8, N] int32
             scale_key = f"{base}.scales"
             zeros_key = f"{base}.qzeros"
 
-            if scale_key not in keys or zeros_key not in keys:
+            if scale_key not in src_weight_map or zeros_key not in src_weight_map:
                 print(f"  SKIP {base}: missing scales or qzeros")
                 continue
 
-            scales_gptq = f.get_tensor(scale_key)   # [groups, N] fp16
-            qzeros_gptq = f.get_tensor(zeros_key)   # [groups, N//8] int32
+            scales_gptq = get_tensor(scale_key)   # [groups, N] fp16
+            qzeros_gptq = get_tensor(zeros_key)   # [groups, N//8] int32
 
             K = qweight_gptq.shape[0] * PACK_FACTOR
             N = qweight_gptq.shape[1]
@@ -151,41 +178,59 @@ for shard_idx, shard_path in enumerate(shard_files):
             # 1. Unpack GPTQ sequential K-packed → raw 4-bit [K, N]
             w_int = unpack_gptq_to_4bit(qweight_gptq)
 
-            # 2. Scales: GPTQ [groups, N] → check for negative (symmetric quant)
-            scales_raw = scales_gptq.to(torch.float32)
-
-            # 3. Zero points: unpack GPTQ → raw [groups, N]
+            # 2. Unpack zero points
             zp_raw = unpack_gptq_zeros(qzeros_gptq)  # [groups, N] actual zp
             if zp_raw.shape[1] > N:
                 zp_raw = zp_raw[:, :N]
 
-            # 4. Handle negative scales (symmetric GPTQ, e.g. AutoRound sym=True)
-            # AWQ format requires positive scales. For groups with scale < 0:
-            #   (w - zp) * scale = (zp - w) * |scale| = ((15-w) - (15-zp)) * |scale|
-            # So flip w_int and zp to 15-x, then use |scale|.
-            neg_mask = scales_raw < 0  # [groups, N]
-            neg_count = neg_mask.sum().item()
-            if neg_count > 0:
-                groups = scales_raw.shape[0]
-                for g in range(groups):
-                    neg_cols = neg_mask[g]  # [N] bool
-                    if neg_cols.any():
-                        start = g * GROUP_SIZE
-                        end = min(start + GROUP_SIZE, K)
-                        # Flip weight values for negative-scale columns
-                        w_int[start:end, neg_cols] = 15 - w_int[start:end, neg_cols]
-                        # Flip zero point for negative-scale columns
-                        zp_raw[g, neg_cols] = 15 - zp_raw[g, neg_cols]
-                scales_raw = scales_raw.abs()
-                print(f"    Fixed {neg_count} negative scales ({100*neg_count/scales_raw.numel():.0f}%)")
+            # 3. Full FP32 dequant → re-quantize as asymmetric AWQ
+            # This handles symmetric GPTQ (negative scales) correctly by
+            # computing the actual float weights and re-quantizing with
+            # positive-only scales and proper zero points.
+            scales_fp32 = scales_gptq.to(torch.float32)
+            has_neg = (scales_fp32 < 0).any().item()
 
-            # 5. Repack weights with AWQ interleaved order along N dimension
+            if has_neg:
+                # Dequantize fully in FP32
+                groups = scales_fp32.shape[0]
+                w_float = torch.zeros(K, N, dtype=torch.float32)
+                for g in range(groups):
+                    s, e = g * GROUP_SIZE, min((g + 1) * GROUP_SIZE, K)
+                    w_float[s:e] = (w_int[s:e].float() - zp_raw[g].float()) * scales_fp32[g]
+
+                # Re-quantize as asymmetric AWQ (positive scales, proper zp)
+                new_w_int = torch.zeros_like(w_int)
+                new_zp = torch.zeros_like(zp_raw)
+                new_scales = torch.zeros_like(scales_fp32)
+                for g in range(groups):
+                    s, e = g * GROUP_SIZE, min((g + 1) * GROUP_SIZE, K)
+                    block = w_float[s:e]  # [group_size, N]
+                    # Per-column min/max
+                    w_min = block.min(dim=0).values  # [N]
+                    w_max = block.max(dim=0).values  # [N]
+                    # Scale = (max - min) / 15
+                    sc = (w_max - w_min) / 15.0
+                    sc = sc.clamp(min=1e-10)  # avoid div by zero
+                    # Zero point = round(-min / scale), clamped to 0-15
+                    zp = torch.round(-w_min / sc).clamp(0, 15).to(torch.int8)
+                    # Quantize: round((w / scale) + zp)
+                    w_q = torch.round(block / sc.unsqueeze(0) + zp.unsqueeze(0).float())
+                    w_q = w_q.clamp(0, 15).to(torch.int8)
+                    new_w_int[s:e] = w_q
+                    new_zp[g] = zp
+                    new_scales[g] = sc
+                w_int = new_w_int
+                zp_raw = new_zp
+                scales_fp32 = new_scales
+                print(f"    Re-quantized (had negative scales)")
+
+            # 4. Repack weights with AWQ interleaved order along N dimension
             qweight_awq = pack_4bit_to_int32_awq(w_int)  # [K, N//8]
 
-            # 6. Clamp scales to FP16 range
-            scales_awq = scales_raw.clamp(-65504, 65504).to(torch.float16)
+            # 5. Clamp scales to FP16 range
+            scales_awq = scales_fp32.clamp(0, 65504).to(torch.float16)
 
-            # 7. Repack zero points with AWQ order
+            # 6. Repack zero points with AWQ order
             qzeros_awq = pack_4bit_to_int32_awq(zp_raw)  # [groups, N//8]
 
             converted[f"{base}.qweight"] = qweight_awq
@@ -204,15 +249,17 @@ for shard_idx, shard_path in enumerate(shard_files):
             )
 
         elif key.endswith(".scales") or key.endswith(".qzeros") or key.endswith(".g_idx"):
+            processed.add(key)
             continue  # Handled with qweight
 
         else:
             # Non-quantized weight — convert BF16 to FP16 for AWQ compatibility
             # (AWQ models expect FP16 norms; BF16 norms cause NaN in SGLang)
-            tensor = f.get_tensor(key)
+            tensor = get_tensor(key)
             if tensor.dtype == torch.bfloat16:
                 tensor = tensor.to(torch.float16)
             converted[key] = tensor
+            processed.add(key)
             total_kept += 1
 
     # Save converted shard

@@ -82,8 +82,8 @@ apply_preset() {
             OVERLAP=""
             ;;
         gemma4-31b)
-            # RTN AWQ 4-bit, torch_native attention (triton BF16 precision patched)
-            MODEL="${MODEL:-$MODELS_DIR/gemma-4-31B-it-AWQ-RTN-128g}"
+            # AutoRound GPTQ→AWQ converted (sym→asym re-quantized)
+            MODEL="${MODEL:-$MODELS_DIR/gemma-4-31B-it-AutoRound-AWQ}"
             TOKENIZER="--tokenizer-path $MODELS_DIR/gemma-4-31B-it-BF16"
             QUANT="awq"
             DTYPE="bfloat16"
