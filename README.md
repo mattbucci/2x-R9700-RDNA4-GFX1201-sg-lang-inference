@@ -20,7 +20,7 @@ High-throughput LLM inference on AMD Radeon AI PRO R9700 (gfx1201, RDNA4) with R
 2. **Triton AWQ GEMV** — New fused M=1 kernel with full FP32 dequantization: `(b.to(fp32) - zeros.to(fp32)) * scales.to(fp32)`. Replaces unfused dequant+matmul (was 100x slower). HIP GEMV crashes on Gemma4 dimensions (HSA exception).
 3. **AWQ converter fixed** — Full dequant→requant for symmetric GPTQ→AWQ conversion (50.4% negative scales). Cross-shard tensor loading. BF16→FP16 norm conversion.
 
-**Quality concern:** First Triton GEMV test (FP16 dequant) degraded at ~400 tokens ("l l l l" repetition). Root cause: `(b - zeros) * scales` in FP16 before FP32 cast. Fixed to do all dequant in FP32. Needs verification on 800+ token generation.
+**Quality concern (OPEN):** Both FP16 and FP32 dequant in Triton GEMV degrade at ~400 tokens ("l l l l" repetition). The precision loss is NOT in the dequantization step — full FP32 dequant shows identical degradation. Root cause is elsewhere: possibly BF16 activation precision compounding through 60 layers, or the unfused M>1 prefill path, or subtle differences in the Triton GEMV vs PyTorch matmul accumulation pattern. The slow unfused path (0.3 tok/s) produces coherent 200-token output but was never tested at 400+ tokens.
 
 **AutoRound calibration on our hardware:** The 59 GB BF16 model cannot be calibrated on 2×30 GB + 62 GB RAM. Needs single GPU with >60 GB VRAM (A100-80G, H100).
 
@@ -171,7 +171,7 @@ Gemma models were [never designed for FP16 inference](https://huggingface.co/goo
 | AWQ + BF16 torch dequant fallback | Coherent ~100 tokens | 0.34 tok/s | Confirmed BF16 is the fix |
 | AWQ + BF16 HIP GEMV kernel | Coherent ~60 tokens | 12.4 tok/s | FP16 bit-tricks, FP16→BF16 scale loss |
 | AWQ + Triton GEMV (FP16 dequant) | Degrades ~400 tokens | 17 tok/s | FP16 dequant before FP32 cast |
-| AWQ + Triton GEMV (FP32 dequant) | Under testing | 17 tok/s | Full FP32 dequant: `(b.fp32 - z.fp32) * s.fp32` |
+| AWQ + Triton GEMV (FP32 dequant) | Degrades ~400 tokens | 17 tok/s | Full FP32 dequant — precision loss NOT in dequant |
 | HIP GEMV + BF16→FP16 cast | HSA crash | — | HIP kernel crashes on Gemma4 dimensions |
 | FP32 softcapping fix | No improvement alone | — | Correct but not the bottleneck |
 | Mixed-precision CT (23 BF16 + 37 INT4, FP8 KV) | Degrades at ~50 tokens | 0.9 tok/s | Edge + global attention in BF16, not enough |

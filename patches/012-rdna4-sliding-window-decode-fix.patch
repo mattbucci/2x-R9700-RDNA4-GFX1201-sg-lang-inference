@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/layers/attention/triton_backend.py b/python/sglang/srt/layers/attention/triton_backend.py
-index ac03c1af2..eff1a2546 100644
+index ac03c1af2..d64790314 100644
 --- a/python/sglang/srt/layers/attention/triton_backend.py
 +++ b/python/sglang/srt/layers/attention/triton_backend.py
 @@ -9,7 +9,6 @@ import triton.language as tl
@@ -10,28 +10,66 @@ index ac03c1af2..eff1a2546 100644
  from sglang.srt.layers.dp_attention import get_attention_tp_size
  from sglang.srt.layers.radix_attention import AttentionType
  from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
-@@ -27,6 +26,20 @@ if TYPE_CHECKING:
+@@ -27,6 +26,58 @@ if TYPE_CHECKING:
      from sglang.srt.speculative.spec_info import SpecInput
  
  
++@triton.jit
++def _kv_indices_kernel(
++    req_to_token_ptr, req_pool_indices_ptr, page_kernel_lens_ptr,
++    kv_indptr, kv_start_idx, kv_indices_ptr,
++    req_to_token_ptr_stride: tl.constexpr,
++    HAS_START_IDX: tl.constexpr,
++):
++    """Copy token indices from req_to_token pool into kv_indices.
++    Split from create_flashinfer_kv_indices_triton to avoid the `if ptr:`
++    null-check pattern that crashes on RDNA4 (gfx1201)."""
++    BLOCK_SIZE: tl.constexpr = 256  # Reduced from 512 for RDNA4 register pressure
++    pid = tl.program_id(axis=0)
++
++    req_pool_index = tl.load(req_pool_indices_ptr + pid)
++    kv_indices_offset = tl.load(kv_indptr + pid)
++
++    kv_start = tl.zeros([], dtype=tl.int32)
++    if HAS_START_IDX:
++        kv_start = tl.load(kv_start_idx + pid).to(tl.int32)
++    kv_end = kv_start + tl.load(page_kernel_lens_ptr + pid).to(tl.int32)
++
++    num_loop = tl.cdiv(kv_end - kv_start, BLOCK_SIZE)
++    for i in range(num_loop):
++        offset = tl.arange(0, BLOCK_SIZE).to(tl.int64) + i * BLOCK_SIZE
++        mask = offset < kv_end - kv_start
++        data = tl.load(
++            req_to_token_ptr
++            + req_pool_index.to(tl.int64) * req_to_token_ptr_stride
++            + kv_start.to(tl.int64)
++            + offset,
++            mask=mask,
++        )
++        tl.store(kv_indices_ptr + kv_indices_offset.to(tl.int64) + offset, data, mask=mask)
++
++
 +def _create_kv_indices(req_to_token, req_pool_indices, page_kernel_lens,
 +                       kv_indptr, kv_start_idx, kv_indices):
-+    """PyTorch replacement for create_flashinfer_kv_indices_triton.
-+    The Triton kernel crashes with HSA exception on RDNA4 (gfx1201)."""
++    """RDNA4-safe replacement for create_flashinfer_kv_indices_triton.
++    Uses constexpr HAS_START_IDX instead of runtime null-pointer check."""
 +    bs = req_pool_indices.shape[0]
-+    for i in range(bs):
-+        rpi = req_pool_indices[i].item()
-+        kv_len = page_kernel_lens[i].item()
-+        offset = kv_indptr[i].item()
-+        start = kv_start_idx[i].item() if kv_start_idx is not None else 0
-+        if kv_len > 0:
-+            kv_indices[offset:offset + kv_len] = req_to_token[rpi, start:start + kv_len]
++    if bs == 0:
++        return
++    _kv_indices_kernel[(bs,)](
++        req_to_token, req_pool_indices, page_kernel_lens,
++        kv_indptr,
++        kv_start_idx if kv_start_idx is not None else req_pool_indices,  # dummy ptr
++        kv_indices,
++        req_to_token.stride(0),
++        HAS_START_IDX=(kv_start_idx is not None),
++    )
 +
 +
  def logit_capping_mod(logit_capping_method, logit_cap):
      # positive logit_cap -> tanh cap
      if logit_capping_method == "tanh":
-@@ -261,31 +274,29 @@ class TritonAttnBackend(AttentionBackend):
+@@ -261,31 +312,29 @@ class TritonAttnBackend(AttentionBackend):
                  kv_indices = torch.empty(
                      forward_batch.seq_lens_sum, dtype=torch.int64, device=self.device
                  )
@@ -80,7 +118,7 @@ index ac03c1af2..eff1a2546 100644
                      )
                      window_num_kv_splits = torch.empty(
                          (bs,), dtype=torch.int32, device=self.device
-@@ -335,14 +346,9 @@ class TritonAttnBackend(AttentionBackend):
+@@ -335,14 +384,9 @@ class TritonAttnBackend(AttentionBackend):
              kv_indices = torch.empty(
                  kv_indptr[-1], dtype=torch.int64, device=self.device
              )
@@ -98,7 +136,7 @@ index ac03c1af2..eff1a2546 100644
              )
  
              if self.sliding_window_size is not None and self.sliding_window_size > 0:
-@@ -403,14 +409,9 @@ class TritonAttnBackend(AttentionBackend):
+@@ -403,14 +447,9 @@ class TritonAttnBackend(AttentionBackend):
                  dtype=torch.int64,
                  device=self.device,
              )
@@ -116,7 +154,7 @@ index ac03c1af2..eff1a2546 100644
              )
              # Sliding window
              if self.sliding_window_size is not None and self.sliding_window_size > 0:
-@@ -558,14 +559,9 @@ class TritonAttnBackend(AttentionBackend):
+@@ -558,14 +597,9 @@ class TritonAttnBackend(AttentionBackend):
                  kv_indptr[1 : bs + 1] = torch.cumsum(seq_lens, dim=0)
                  kv_indptr = kv_indptr[: bs + 1]
                  kv_indices = self.cuda_graph_kv_indices
@@ -134,7 +172,7 @@ index ac03c1af2..eff1a2546 100644
                  )
                  if (
                      self.sliding_window_size is not None
-@@ -608,14 +604,9 @@ class TritonAttnBackend(AttentionBackend):
+@@ -608,14 +642,9 @@ class TritonAttnBackend(AttentionBackend):
              kv_indptr = self.kv_indptr[: bs + 1]
              kv_indptr[1 : bs + 1] = torch.cumsum(seq_lens, dim=0)
              kv_indices = self.cuda_graph_kv_indices
@@ -152,7 +190,7 @@ index ac03c1af2..eff1a2546 100644
              )
  
              if self.sliding_window_size is not None and self.sliding_window_size > 0:
-@@ -657,14 +648,9 @@ class TritonAttnBackend(AttentionBackend):
+@@ -657,14 +686,9 @@ class TritonAttnBackend(AttentionBackend):
              kv_indptr = self.kv_indptr[: bs + 1]
              kv_indptr[1 : bs + 1] = torch.cumsum(seq_lens, dim=0)
              kv_indices = self.cuda_graph_kv_indices
@@ -170,7 +208,7 @@ index ac03c1af2..eff1a2546 100644
              )
              custom_mask = None
              mask_indptr = None
-@@ -718,14 +704,9 @@ class TritonAttnBackend(AttentionBackend):
+@@ -718,14 +742,9 @@ class TritonAttnBackend(AttentionBackend):
              if spec_info is None:
                  kv_indptr[1 : bs + 1] = torch.cumsum(seq_lens[:bs], dim=0)
                  kv_indptr = kv_indptr[: bs + 1]
@@ -188,7 +226,7 @@ index ac03c1af2..eff1a2546 100644
                  )
                  num_token = bs
                  if (
-@@ -766,14 +747,9 @@ class TritonAttnBackend(AttentionBackend):
+@@ -766,14 +785,9 @@ class TritonAttnBackend(AttentionBackend):
              kv_indptr = self.kv_indptr[: bs + 1]
              kv_indptr[1 : bs + 1] = torch.cumsum(seq_lens, dim=0)
              kv_indices = self.cuda_graph_kv_indices
@@ -206,7 +244,7 @@ index ac03c1af2..eff1a2546 100644
              )
              if self.sliding_window_size is not None and self.sliding_window_size > 0:
                  window_num_kv_splits = self.cuda_graph_window_num_kv_splits
-@@ -810,14 +786,9 @@ class TritonAttnBackend(AttentionBackend):
+@@ -810,14 +824,9 @@ class TritonAttnBackend(AttentionBackend):
              kv_indptr = self.kv_indptr[: bs + 1]
              kv_indptr[1 : bs + 1] = torch.cumsum(seq_lens, dim=0)
              kv_indices = self.cuda_graph_kv_indices
@@ -224,7 +262,7 @@ index ac03c1af2..eff1a2546 100644
              )
          else:
              raise ValueError(
-@@ -1404,18 +1375,14 @@ def update_sliding_window_buffer(
+@@ -1404,18 +1413,14 @@ def update_sliding_window_buffer(
      )
      window_kv_indptr[1 : bs + 1] = torch.cumsum(window_kv_lens, dim=0)
      window_kv_indptr = window_kv_indptr[: bs + 1]
@@ -248,7 +286,7 @@ index ac03c1af2..eff1a2546 100644
      )
      # full to swa index mapping
      if hasattr(token_to_kv_pool_allocator, "translate_loc_from_full_to_swa"):
-@@ -1445,14 +1412,9 @@ def update_sliding_window_buffer_cuda_graph(
+@@ -1445,14 +1450,9 @@ def update_sliding_window_buffer_cuda_graph(
      window_kv_indptr[1 : bs + 1] = torch.cumsum(window_kv_lens, dim=0)
      window_kv_indptr = window_kv_indptr[: bs + 1]
      window_kv_start_idx = seq_lens - window_kv_lens
