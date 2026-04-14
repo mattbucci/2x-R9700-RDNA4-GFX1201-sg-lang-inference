@@ -113,7 +113,7 @@ apply_preset() {
             CTX=32768; MAX_RUNNING=32; CHUNKED=4096; DECODE_STEPS=8
             MAMBA_CACHE="--max-mamba-cache-size 10"
             REASONING="--reasoning-parser qwen3"
-            EXTRA_ARGS=""
+            WARMUP="--skip-server-warmup"
             OVERLAP=""
             ;;
         qwen35)

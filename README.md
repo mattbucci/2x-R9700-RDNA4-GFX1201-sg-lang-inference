@@ -38,7 +38,7 @@ High-throughput LLM inference on AMD Radeon AI PRO R9700 (gfx1201, RDNA4) with R
 ### Other Models
 
 - **Coder-30B REAP (auto-round)** — [cerebras/Qwen3-Coder-REAP-25B-A3B](https://huggingface.co/cerebras/Qwen3-Coder-REAP-25B-A3B) hits 134 tok/s on 3090s. Pre-quantized, just download and try `--quantization auto-round`. Check if auto-round kernels work on RDNA4.
-- **Qwen3.5-35B-A3B MoE** — Official GPTQ-Int4 downloaded ([Qwen/Qwen3.5-35B-A3B-GPTQ-Int4](https://huggingface.co/Qwen/Qwen3.5-35B-A3B-GPTQ-Int4)). Uses `moe_wna16` quant (only MoE experts INT4, attn+DeltaNet in BF16). Blocked by SGLang v0.5.10 config compat — missing `norm_topk_prob`, `layers_block_type` attrs. Needs SGLang update or config shims. Architecture: 16Q/2KV (8:1 GQA), 256 experts, 40 layers (30 DeltaNet + 10 full attn).
+- **Qwen3.5-35B-A3B MoE** — Model loads (11.58 GB/GPU), hybrid GDN backend initializes, config shims working. Blocked by DeltaNet TP=2 causal_conv1d dim mismatch (weight 8192 vs conv_state 4096). Needs 3090 repo patch 009 DeltaNet TP replication logic. Architecture: 16Q/2KV (8:1 GQA), 256 experts, 40 layers (30 DeltaNet + 10 full attn). Uses `moe_wna16` quant.
 
 ### Research Findings
 
