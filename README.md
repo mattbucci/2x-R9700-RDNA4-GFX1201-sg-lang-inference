@@ -4,8 +4,7 @@ High-throughput LLM inference on AMD Radeon AI PRO R9700 (gfx1201, RDNA4) with R
 
 ## Known Issues
 
-- **Triton attention BF16 precision** — Triton attention kernels accumulate in BF16 on RDNA4, causing quality degradation after ~50 tokens on deep models (60 layers). Workaround: `--attention-backend torch_native`. Affects Gemma 31B and potentially other deep models. See [investigation](#gemma-4-31b-dense-investigation).
-- **Gemma 4 31B Dense** — Works with `--attention-backend torch_native` + AutoRound/GPTQ INT4. Triton attention path broken due to BF16 precision. Speed limited by torch_native (~0.5 tok/s). Needs triton kernel FP32 precision fix for production speed.
+- **Gemma 4 31B Dense** — FIXED with patch 011 (FP32 triton attention) + Intel AutoRound INT4. Quality near-perfect (159-word coherent paragraphs, perfect code). Requires `--kv-cache-dtype fp8_e4m3` (BF16 KV cache degrades — FP8's range compression helps). See [investigation](#gemma-4-31b-dense-investigation).
 - **GLM-4.5-Air REAP** — Blocked. CT format needs Marlin (CUDA-only). CT-to-AWQ conversion done but `moe_intermediate_size=1408` is not TP=2 aligned with group_size=128. Needs AWQ loader patch for non-aligned group boundaries.
 
 ## Next to Try
