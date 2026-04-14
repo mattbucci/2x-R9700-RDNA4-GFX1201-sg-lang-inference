@@ -4,8 +4,9 @@ High-throughput LLM inference on AMD Radeon AI PRO R9700 (gfx1201, RDNA4) with R
 
 ## Known Issues
 
-- **Gemma 4 31B Dense** — Quality FIXED (patch 011: FP32 triton attention). Currently limited to ~2 tok/s via GPTQ torch fallback. AWQ path blocked by sliding window decode metadata bug. See [investigation](#gemma-4-31b-dense-investigation) and [next steps](#gemma-31b-next-steps).
-- **Sliding window decode metadata bug** — `triton_backend.py:278` discards `window_kv_start_idx` in decode mode (4th return of `update_sliding_window_buffer`). Causes `_assert_async` crash on models with sliding window attention (Gemma) when using AWQ format. Extend mode handles it correctly (lines 350-354).
+- **Gemma 4 31B Dense** — Quality FIXED (patch 011: FP32 triton attention). GPTQ path works at ~2 tok/s. AWQ path blocked by negative scales from symmetric GPTQ→AWQ conversion. See [investigation](#gemma-4-31b-dense-investigation) and [next steps](#gemma-31b-next-steps).
+- **GPTQ→AWQ symmetric scale conversion** — AutoRound GPTQ uses `sym=True`, producing 50.4% negative scales. Standard AWQ assumes positive-only scales. `awq_dequantize_decomposition` produces NaN on BF16 broadcast with negative scales. Fix: absorb sign into zero points during conversion, or handle negative scales in dequant.
+- **Sliding window decode metadata bug** — `triton_backend.py:278` discards `window_kv_start_idx` in decode mode (4th return of `update_sliding_window_buffer`). Fixed in patch 012. Extend mode handles it correctly (lines 350-354).
 - **GLM-4.5-Air REAP** — Blocked. CT format needs Marlin (CUDA-only). CT-to-AWQ conversion done but `moe_intermediate_size=1408` is not TP=2 aligned with group_size=128. Needs AWQ loader patch for non-aligned group boundaries.
 
 ## Next Steps
@@ -14,9 +15,13 @@ High-throughput LLM inference on AMD Radeon AI PRO R9700 (gfx1201, RDNA4) with R
 
 **Current state:** Near-perfect quality at ~2 tok/s (Intel AutoRound GPTQ + torch dequant fallback + FP32 triton attention + FP8 KV cache). Need 10-20x speedup to be usable.
 
-1. **Fix sliding window decode metadata bug** (triton_backend.py:278) — Unblocks AWQ format, which uses fast Triton AWQ kernel (~12-19 tok/s). GPTQ→AWQ converter verified mathematically correct (`scripts/quantize/convert_gptq_to_awq.py`), AWQ dequant produces clean weights (no NaN/Inf). The crash is purely in the SWA metadata path.
+**Root cause of AWQ crash (solved):** GPTQ→AWQ converter preserved negative scales from AutoRound's symmetric quantization (`sym=True`). 50.4% of scales are negative. SGLang's `awq_dequantize_decomposition` does `(w_int - zp) * scale` via BF16 3D broadcast reshape — with negative FP16 scales cast to BF16, this produces NaN at layer 8. The RTN AWQ model (always positive scales) works fine through the same AWQ code path, confirming the issue is scale sign, not the code.
 
-2. **Run AutoRound with `--format auto_awq`** — Intel's AutoRound can export directly to AWQ format, skipping our GPTQ→AWQ conversion entirely. `pip install auto-round && auto-round --model google/gemma-4-31B-it --format auto_awq --output_dir ./out`. Needs the quant conda env (dependency conflicts with SGLang).
+**AutoRound calibration on our hardware:** The 59 GB BF16 model cannot be calibrated on 2×30 GB + 62 GB RAM. Accelerate's weight dispatcher stalls at 62% (734/1188 tensors) at the GPU↔CPU boundary regardless of `max_memory` settings. Needs single GPU with >60 GB VRAM (A100-80G, H100).
+
+1. **Fix GPTQ→AWQ converter for symmetric quantization** — Absorb negative scales: when `scale < 0`, flip the quantized values (`w_int = 15 - w_int` for 4-bit) and negate the scale. This produces AWQ-compatible positive-only scales while preserving the dequantized values. Script: `scripts/quantize/convert_gptq_to_awq.py`.
+
+2. **Sliding window decode metadata bug** — Fixed in patch 012 (`window_kv_offsets` captured instead of discarded).
 
 3. **Build native GPTQ HIP kernels** — Compile `gptq_gemm`/`gptq_shuffle` for ROCm so AutoRound GPTQ format runs at native speed. Currently these ops are only built for CUDA (`if _is_cuda:` guard in gptq.py).
 

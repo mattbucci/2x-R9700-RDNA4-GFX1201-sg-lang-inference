@@ -1,0 +1,36 @@
+diff --git a/python/sglang/srt/layers/attention/triton_backend.py b/python/sglang/srt/layers/attention/triton_backend.py
+index ac03c1af2..20e02a954 100644
+--- a/python/sglang/srt/layers/attention/triton_backend.py
++++ b/python/sglang/srt/layers/attention/triton_backend.py
+@@ -275,17 +275,20 @@ class TritonAttnBackend(AttentionBackend):
+                     self.sliding_window_size is not None
+                     and self.sliding_window_size > 0
+                 ):
+-                    window_kv_indptr, window_kv_indices, window_kv_lens, _ = (
+-                        update_sliding_window_buffer(
+-                            self.window_kv_indptr,
+-                            self.req_to_token,
+-                            self.sliding_window_size,
+-                            forward_batch.seq_lens,
+-                            forward_batch.req_pool_indices,
+-                            bs,
+-                            self.device,
+-                            self.token_to_kv_pool_allocator,
+-                        )
++                    (
++                        window_kv_indptr,
++                        window_kv_indices,
++                        window_kv_lens,
++                        window_kv_offsets,
++                    ) = update_sliding_window_buffer(
++                        self.window_kv_indptr,
++                        self.req_to_token,
++                        self.sliding_window_size,
++                        forward_batch.seq_lens,
++                        forward_batch.req_pool_indices,
++                        bs,
++                        self.device,
++                        self.token_to_kv_pool_allocator,
+                     )
+                     window_num_kv_splits = torch.empty(
+                         (bs,), dtype=torch.int32, device=self.device

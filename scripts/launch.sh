@@ -39,7 +39,7 @@ CUDA_GRAPH="--disable-cuda-graph"
 MAMBA_CACHE=""
 CHAT_TEMPLATE=""
 REASONING=""
-ATTN_BACKEND="triton"
+ATTN_BACKEND="${ATTN_BACKEND:-triton}"
 OVERLAP="--disable-overlap-schedule"
 WARMUP=""
 WATCHDOG=600
@@ -82,12 +82,12 @@ apply_preset() {
             OVERLAP=""
             ;;
         gemma4-31b)
-            # AutoRound INT4 with torch_native attention (triton BF16 precision bug)
-            MODEL="${MODEL:-$MODELS_DIR/gemma-4-31B-it-int4-AutoRound}"
+            # RTN AWQ 4-bit, torch_native attention (triton BF16 precision patched)
+            MODEL="${MODEL:-$MODELS_DIR/gemma-4-31B-it-AWQ-RTN-128g}"
             TOKENIZER="--tokenizer-path $MODELS_DIR/gemma-4-31B-it-BF16"
-            QUANT="auto-round"
+            QUANT="awq"
             DTYPE="bfloat16"
-            ATTN_BACKEND="torch_native"  # Required: triton attention degrades at 60 layers
+            ATTN_BACKEND="${ATTN_BACKEND:-torch_native}"
             CTX=8192; MAX_RUNNING=8; CHUNKED=4096
             WARMUP="--skip-server-warmup"; WATCHDOG=1800
             OVERLAP=""

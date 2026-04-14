@@ -151,16 +151,41 @@ for shard_idx, shard_path in enumerate(shard_files):
             # 1. Unpack GPTQ sequential K-packed → raw 4-bit [K, N]
             w_int = unpack_gptq_to_4bit(qweight_gptq)
 
-            # 2. Repack with AWQ interleaved order along N dimension
-            qweight_awq = pack_4bit_to_int32_awq(w_int)  # [K, N//8]
+            # 2. Scales: GPTQ [groups, N] → check for negative (symmetric quant)
+            scales_raw = scales_gptq.to(torch.float32)
 
-            # 3. Scales: GPTQ [groups, N] → AWQ [K//G, N] (same layout)
-            scales_awq = scales_gptq.clamp(-65504, 65504).to(torch.float16)
-
-            # 4. Zero points: unpack GPTQ → repack AWQ
+            # 3. Zero points: unpack GPTQ → raw [groups, N]
             zp_raw = unpack_gptq_zeros(qzeros_gptq)  # [groups, N] actual zp
             if zp_raw.shape[1] > N:
                 zp_raw = zp_raw[:, :N]
+
+            # 4. Handle negative scales (symmetric GPTQ, e.g. AutoRound sym=True)
+            # AWQ format requires positive scales. For groups with scale < 0:
+            #   (w - zp) * scale = (zp - w) * |scale| = ((15-w) - (15-zp)) * |scale|
+            # So flip w_int and zp to 15-x, then use |scale|.
+            neg_mask = scales_raw < 0  # [groups, N]
+            neg_count = neg_mask.sum().item()
+            if neg_count > 0:
+                groups = scales_raw.shape[0]
+                for g in range(groups):
+                    neg_cols = neg_mask[g]  # [N] bool
+                    if neg_cols.any():
+                        start = g * GROUP_SIZE
+                        end = min(start + GROUP_SIZE, K)
+                        # Flip weight values for negative-scale columns
+                        w_int[start:end, neg_cols] = 15 - w_int[start:end, neg_cols]
+                        # Flip zero point for negative-scale columns
+                        zp_raw[g, neg_cols] = 15 - zp_raw[g, neg_cols]
+                scales_raw = scales_raw.abs()
+                print(f"    Fixed {neg_count} negative scales ({100*neg_count/scales_raw.numel():.0f}%)")
+
+            # 5. Repack weights with AWQ interleaved order along N dimension
+            qweight_awq = pack_4bit_to_int32_awq(w_int)  # [K, N//8]
+
+            # 6. Clamp scales to FP16 range
+            scales_awq = scales_raw.clamp(-65504, 65504).to(torch.float16)
+
+            # 7. Repack zero points with AWQ order
             qzeros_awq = pack_4bit_to_int32_awq(zp_raw)  # [groups, N//8]
 
             converted[f"{base}.qweight"] = qweight_awq
@@ -182,8 +207,11 @@ for shard_idx, shard_path in enumerate(shard_files):
             continue  # Handled with qweight
 
         else:
-            # Non-quantized weight — keep original dtype (BF16 models need BF16 norms)
+            # Non-quantized weight — convert BF16 to FP16 for AWQ compatibility
+            # (AWQ models expect FP16 norms; BF16 norms cause NaN in SGLang)
             tensor = f.get_tensor(key)
+            if tensor.dtype == torch.bfloat16:
+                tensor = tensor.to(torch.float16)
             converted[key] = tensor
             total_kept += 1
 
