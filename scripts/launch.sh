@@ -105,7 +105,10 @@ apply_preset() {
             OVERLAP=""
             ;;
         qwen35-moe)
-            MODEL="${MODEL:-$MODELS_DIR/Qwen3.5-35B-A3B-REAM-BF16-AWQ}"
+            # Official Qwen GPTQ: only MoE experts quantized, attn+shared+DeltaNet in BF16
+            MODEL="${MODEL:-$MODELS_DIR/Qwen3.5-35B-A3B-GPTQ-Int4}"
+            QUANT="moe_wna16"
+            DTYPE="bfloat16"
             CTX=32768; MAX_RUNNING=32; CHUNKED=4096; DECODE_STEPS=8
             MAMBA_CACHE="--max-mamba-cache-size 10"
             REASONING="--reasoning-parser qwen3"
