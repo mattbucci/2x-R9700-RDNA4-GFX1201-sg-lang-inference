@@ -140,12 +140,17 @@ All numbers measured with `sglang.bench_serving` (TPOT = Time Per Output Token, 
 | Coder-Next REAM 60B | 50 @16 | 16 | 32K | Working |
 | Gemma 4 26B AWQ | 27 @32 | 32 | 4K | Working |
 
-**Weights:** Community AWQ checkpoints work for standard architectures (Coder-30B, Coder-Next) but fail for others:
-- **Devstral** — community AWQ includes a BOS token that causes `<unk>` output, and vision is broken from quantization damaging the vision-language alignment
-- **Gemma 4 26B** — standard GPTQ only calibrated 1/128 experts (inter-expert routing imbalance); we use forced-routing calibration to cover all 128
-- **Qwen3.5** — community AWQ produces garbage on DeltaNet layers; we calibrate with GPTQ and keep DeltaNet/SSM layers in BF16
+**Weights:** We publish RDNA4-optimized AWQ models on HuggingFace. Community checkpoints fail for several architectures (BOS issues, MoE under-calibration, DeltaNet destruction), so we self-calibrate:
 
-Self-calibrated models use the pipeline in `scripts/quantize/` (GPTQ calibration → CT→AWQ conversion).
+| Model | HuggingFace | Base model |
+|-------|-------------|------------|
+| Devstral-24B AWQ | [mattbucci/Devstral-24B-AWQ-4bit-calibrated](https://huggingface.co/mattbucci/Devstral-24B-AWQ-4bit-calibrated) | [mistralai/Devstral-Small-2507](https://huggingface.co/mistralai/Devstral-Small-2507) |
+| Qwen3.5-27B AWQ | [mattbucci/Qwen3.5-27B-AWQ-4bit-calibrated](https://huggingface.co/mattbucci/Qwen3.5-27B-AWQ-4bit-calibrated) | [Qwen/Qwen3.5-27B](https://huggingface.co/Qwen/Qwen3.5-27B) |
+| Gemma 4 26B MoE AWQ | [mattbucci/gemma-4-26B-A4B-it-AWQ-GPTQ-v2-fixed](https://huggingface.co/mattbucci/gemma-4-26B-A4B-it-AWQ-GPTQ-v2-fixed) | [google/gemma-4-26b-a4b-it](https://huggingface.co/google/gemma-4-26b-a4b-it) |
+| Gemma 4 31B AWQ | [mattbucci/gemma-4-31B-it-AutoRound-AWQ](https://huggingface.co/mattbucci/gemma-4-31B-it-AutoRound-AWQ) | [google/gemma-4-31b-it](https://huggingface.co/google/gemma-4-31b-it) |
+| Qwen3-Coder-30B AWQ | [mattbucci/Qwen3-Coder-30B-A3B-AWQ](https://huggingface.co/mattbucci/Qwen3-Coder-30B-A3B-AWQ) | [Qwen/Qwen3-Coder-30B-A3B](https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B) |
+
+Self-calibrated using the pipeline in `scripts/quantize/` (GPTQ calibration → CT→AWQ conversion).
 
 **Dense AWQ:** HIP GEMV for FP16 models (M=1 decode, 30% faster), Triton GEMV with FP32 dequant for BF16 models (50x faster than unfused). Dequant+matmul for M>1 prefill.
 
