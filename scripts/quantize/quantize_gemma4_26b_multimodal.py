@@ -37,9 +37,16 @@ model = AutoModelForImageTextToText.from_pretrained(
 print(f"Model loaded: {type(model).__name__}")
 
 # GPTQ recipe: exclude vision tower and multimodal projector
+# group_size=32 because moe_intermediate_size=704 is not divisible by 128
+from compressed_tensors.quantization import QuantizationArgs, QuantizationScheme
 recipe = GPTQModifier(
     targets="Linear",
-    scheme="W4A16",
+    config_groups={
+        "group_32": QuantizationScheme(
+            targets=["Linear"],
+            weights=QuantizationArgs(num_bits=4, type="int", strategy="group", group_size=32),
+        ),
+    },
     ignore=[
         "lm_head",
         r"re:model\.vision_tower.*",
