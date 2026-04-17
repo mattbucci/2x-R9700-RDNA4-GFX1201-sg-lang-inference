@@ -1,0 +1,2887 @@
+diff --git a/python/sglang/srt/models/gemma4_causal.py b/python/sglang/srt/models/gemma4_causal.py
+index 8f83f4e43..9c8873cd1 100644
+--- a/python/sglang/srt/models/gemma4_causal.py
++++ b/python/sglang/srt/models/gemma4_causal.py
+@@ -1053,10 +1053,4 @@ class Gemma4ForCausalLM(PreTrainedModel):
+         return loaded_params
+ 
+ 
+-# Text-only alias for multimodal architecture name
+-# Allows loading Gemma4ForConditionalGeneration models without vision
+-class Gemma4ForConditionalGeneration(Gemma4ForCausalLM):
+-    pass
+-
+-
+-EntryClass = [Gemma4ForCausalLM, Gemma4ForConditionalGeneration]
++EntryClass = [Gemma4ForCausalLM]
+--- /dev/null	2026-04-04 12:35:46.219885937 -0700
++++ b/python/sglang/srt/layers/clippable_linear.py	2026-04-17 01:33:08.554661475 -0700
+@@ -0,0 +1,283 @@
++# Copyright 2025 SGLang Team
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++# ==============================================================================
++"""TP-sharded linear wrappers with per-tensor activation clamping.
++
++Used by the Gemma 4 vision and audio encoders.  Each wrapper owns a parallel
++linear and four scalar clip buffers (``input_min/max``, ``output_min/max``)
++that default to ±inf (no-op) and are populated from the checkpoint.
++
++For fused projections (QKV, GateUp), input bounds are shared (the checkpoint
++stores identical copies per projection — last write wins during loading) and
++output bounds are per-projection.
++"""
++
++from typing import Optional, Tuple
++
++import torch
++import torch.nn as nn
++
++from sglang.srt.layers.dp_attention import get_attention_tp_size
++from sglang.srt.layers.linear import (
++    ColumnParallelLinear,
++    MergedColumnParallelLinear,
++    QKVParallelLinear,
++    RowParallelLinear,
++)
++from sglang.srt.layers.quantization.base_config import QuantizationConfig
++from sglang.srt.utils import add_prefix
++
++_INF = float("inf")
++
++
++class ClippableRowParallelLinear(nn.Module):
++    """``RowParallelLinear`` with input/output activation clamping.
++
++    Checkpoint weight at ``<name>.weight`` is remapped to ``<name>.linear.weight``
++    by the model's ``load_weights``.
++    """
++
++    def __init__(
++        self,
++        input_size: int,
++        output_size: int,
++        *,
++        bias: bool = True,
++        quant_config: Optional[QuantizationConfig] = None,
++        prefix: str = "",
++    ):
++        super().__init__()
++        self.linear = RowParallelLinear(
++            input_size=input_size,
++            output_size=output_size,
++            bias=bias,
++            quant_config=quant_config,
++            prefix=add_prefix("linear", prefix),
++        )
++        self.input_min = nn.parameter.Buffer(torch.tensor(-_INF), persistent=False)
++        self.input_max = nn.parameter.Buffer(torch.tensor(_INF), persistent=False)
++        self.output_min = nn.parameter.Buffer(torch.tensor(-_INF), persistent=False)
++        self.output_max = nn.parameter.Buffer(torch.tensor(_INF), persistent=False)
++
++    def forward(self, x: torch.Tensor) -> torch.Tensor:
++        x = torch.clamp(x, self.input_min, self.input_max)
++        x, _ = self.linear(x)
++        x = torch.clamp(x, self.output_min, self.output_max)
++        return x
++
++
++class ClippableColumnParallelLinear(nn.Module):
++    """``ColumnParallelLinear`` with input/output activation clamping."""
++
++    def __init__(
++        self,
++        input_size: int,
++        output_size: int,
++        *,
++        bias: bool = False,
++        quant_config: Optional[QuantizationConfig] = None,
++        prefix: str = "",
++    ):
++        super().__init__()
++        self.linear = ColumnParallelLinear(
++            input_size=input_size,
++            output_size=output_size,
++            bias=bias,
++            quant_config=quant_config,
++            prefix=add_prefix("linear", prefix),
++        )
++        self.input_min = nn.parameter.Buffer(torch.tensor(-_INF), persistent=False)
++        self.input_max = nn.parameter.Buffer(torch.tensor(_INF), persistent=False)
++        self.output_min = nn.parameter.Buffer(torch.tensor(-_INF), persistent=False)
++        self.output_max = nn.parameter.Buffer(torch.tensor(_INF), persistent=False)
++
++    def forward(self, x: torch.Tensor) -> torch.Tensor:
++        x = torch.clamp(x, self.input_min, self.input_max)
++        x, _ = self.linear(x)
++        x = torch.clamp(x, self.output_min, self.output_max)
++        return x
++
++
++class ClippableQKVParallelLinear(nn.Module):
++    """Fused QKV projection with per-projection activation clamping.
++
++    Owns a single ``QKVParallelLinear`` for the fused matmul.  Clip bounds
++    are stored as flat buffers: shared ``input_min/max`` (applied before the
++    matmul) and per-projection ``q/k/v_output_min/max`` (applied after split).
++    """
++
++    def __init__(
++        self,
++        hidden_size: int,
++        head_size: int,
++        total_num_heads: int,
++        total_num_kv_heads: int,
++        *,
++        bias: bool = False,
++        quant_config: Optional[QuantizationConfig] = None,
++        prefix: str = "",
++    ):
++        super().__init__()
++        tp_size = get_attention_tp_size()
++        self.q_size = (total_num_heads // tp_size) * head_size
++        self.kv_size = (total_num_kv_heads // tp_size) * head_size
++
++        self.qkv_proj = QKVParallelLinear(
++            hidden_size=hidden_size,
++            head_size=head_size,
++            total_num_heads=total_num_heads,
++            total_num_kv_heads=total_num_kv_heads,
++            bias=bias,
++            quant_config=quant_config,
++            prefix=add_prefix("qkv_proj", prefix),
++        )
++        self.input_min = nn.parameter.Buffer(torch.tensor(-_INF), persistent=False)
++        self.input_max = nn.parameter.Buffer(torch.tensor(_INF), persistent=False)
++        self.q_output_min = nn.parameter.Buffer(torch.tensor(-_INF), persistent=False)
++        self.q_output_max = nn.parameter.Buffer(torch.tensor(_INF), persistent=False)
++        self.k_output_min = nn.parameter.Buffer(torch.tensor(-_INF), persistent=False)
++        self.k_output_max = nn.parameter.Buffer(torch.tensor(_INF), persistent=False)
++        self.v_output_min = nn.parameter.Buffer(torch.tensor(-_INF), persistent=False)
++        self.v_output_max = nn.parameter.Buffer(torch.tensor(_INF), persistent=False)
++
++    def forward(
++        self, hidden_states: torch.Tensor
++    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++        x = torch.clamp(hidden_states, self.input_min, self.input_max)
++        qkv, _ = self.qkv_proj(x)
++        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
++        q = torch.clamp(q, self.q_output_min, self.q_output_max)
++        k = torch.clamp(k, self.k_output_min, self.k_output_max)
++        v = torch.clamp(v, self.v_output_min, self.v_output_max)
++        return q, k, v
++
++
++class ClippableGLUParallelLinear(nn.Module):
++    """Fused linear + GLU gating with correct TP sharding.
++
++    Used by the audio encoder's ``LightConv1d``, where a single linear
++    projects to ``[hidden * 2]`` and GLU splits into value/gate halves.
++    A plain ``ColumnParallelLinear`` is *incorrect* here under TP because it
++    shards the output contiguously, mixing value and gate across ranks.
++    This wrapper uses ``MergedColumnParallelLinear`` to shard each half
++    independently, then applies GLU (``value * sigmoid(gate)``) on each
++    rank's correctly-paired shard.
++
++    Output clamping is applied once *after* the GLU gate, using a single
++    ``output_min/max`` pair (matching the checkpoint layout).
++
++    The checkpoint stores a single fused ``[hidden * 2, input]`` weight.
++    A custom ``weight_loader`` on the inner param automatically splits it
++    into value (first half) and gate (second half) shards, so no special
++    handling is needed in the model's ``load_weights``.
++    """
++
++    def __init__(
++        self,
++        input_size: int,
++        hidden_size: int,
++        *,
++        bias: bool = False,
++        quant_config: Optional[QuantizationConfig] = None,
++        prefix: str = "",
++    ):
++        super().__init__()
++        tp_size = get_attention_tp_size()
++        self.proj_size = hidden_size // tp_size
++
++        self.linear = MergedColumnParallelLinear(
++            input_size=input_size,
++            output_sizes=[hidden_size, hidden_size],
++            bias=bias,
++            quant_config=quant_config,
++            prefix=add_prefix("linear", prefix),
++        )
++
++        # The checkpoint has a single fused weight; MergedColumnParallelLinear
++        # expects per-shard loading.  Wrap the original weight_loader so that
++        # a call *without* shard_id (the generic load_weights path) splits
++        # automatically.
++        orig_loader = self.linear.weight.weight_loader
++
++        def _fused_weight_loader(param, loaded_weight, loaded_shard_id=None):
++            if loaded_shard_id is not None:
++                return orig_loader(param, loaded_weight, loaded_shard_id)
++            half = loaded_weight.shape[0] // 2
++            orig_loader(param, loaded_weight[:half], 0)
++            orig_loader(param, loaded_weight[half:], 1)
++
++        self.linear.weight.weight_loader = _fused_weight_loader
++
++        self.input_min = nn.parameter.Buffer(torch.tensor(-_INF), persistent=False)
++        self.input_max = nn.parameter.Buffer(torch.tensor(_INF), persistent=False)
++        self.output_min = nn.parameter.Buffer(torch.tensor(-_INF), persistent=False)
++        self.output_max = nn.parameter.Buffer(torch.tensor(_INF), persistent=False)
++
++    def forward(self, x: torch.Tensor) -> torch.Tensor:
++        x = torch.clamp(x, self.input_min, self.input_max)
++        merged, _ = self.linear(x)
++        value, gate = merged.split([self.proj_size, self.proj_size], dim=-1)
++        x = value * torch.sigmoid(gate)
++        x = torch.clamp(x, self.output_min, self.output_max)
++        return x
++
++
++class ClippableGateUpParallelLinear(nn.Module):
++    """Fused gate/up projection with per-projection activation clamping.
++
++    Used by the MLP layers in the vision/audio encoders.  Owns a single
++    ``MergedColumnParallelLinear`` for the fused matmul and returns the
++    two projections separately so the caller can apply its own activation
++    (e.g. ``SiLU(gate) * up``).
++
++    Output clamping is applied *per-projection before* the caller's
++    activation, using separate ``gate_output_min/max`` and
++    ``up_output_min/max`` bounds.
++    """
++
++    def __init__(
++        self,
++        input_size: int,
++        intermediate_size: int,
++        *,
++        bias: bool = False,
++        quant_config: Optional[QuantizationConfig] = None,
++        prefix: str = "",
++    ):
++        super().__init__()
++        tp_size = get_attention_tp_size()
++        self.proj_size = intermediate_size // tp_size
++
++        self.gate_up_proj = MergedColumnParallelLinear(
++            input_size=input_size,
++            output_sizes=[intermediate_size, intermediate_size],
++            bias=bias,
++            quant_config=quant_config,
++            prefix=add_prefix("gate_up_proj", prefix),
++        )
++        self.input_min = nn.parameter.Buffer(torch.tensor(-_INF), persistent=False)
++        self.input_max = nn.parameter.Buffer(torch.tensor(_INF), persistent=False)
++        self.gate_output_min = nn.parameter.Buffer(
++            torch.tensor(-_INF), persistent=False
++        )
++        self.gate_output_max = nn.parameter.Buffer(torch.tensor(_INF), persistent=False)
++        self.up_output_min = nn.parameter.Buffer(torch.tensor(-_INF), persistent=False)
++        self.up_output_max = nn.parameter.Buffer(torch.tensor(_INF), persistent=False)
++
++    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
++        x = torch.clamp(x, self.input_min, self.input_max)
++        gate_up, _ = self.gate_up_proj(x)
++        gate, up = gate_up.split([self.proj_size, self.proj_size], dim=-1)
++        gate = torch.clamp(gate, self.gate_output_min, self.gate_output_max)
++        up = torch.clamp(up, self.up_output_min, self.up_output_max)
++        return gate, up
+--- /dev/null	2026-04-04 12:35:46.219885937 -0700
++++ b/python/sglang/srt/models/gemma4_audio.py	2026-04-17 01:31:13.966970672 -0700
+@@ -0,0 +1,873 @@
++# Copyright 2025 SGLang Team
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++# ==============================================================================
++"""SGLang-native TP-sharded audio encoder for Gemma 4.
++
++Architecture: Conformer-based USM (Universal Speech Model) with SSCP convolution
++projection. Adapted from gemma3n_audio.py with Gemma 4 specific changes:
++  - Activation clamping (clippable linears) on all conformer linears
++  - per_dim_key_scale in attention
++  - LayerNorm (not CumulativeGroupNorm) in SSCP convolution blocks
++  - Semicausal SSCP padding
++  - Mask propagation through SSCP
++  - Output projection (hidden_size -> output_proj_dims)
++"""
++
++import math
++from typing import Optional, Tuple
++
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
++from transformers import Gemma4AudioConfig
++
++from sglang.srt.layers.clippable_linear import (
++    ClippableColumnParallelLinear,
++    ClippableGLUParallelLinear,
++    ClippableQKVParallelLinear,
++    ClippableRowParallelLinear,
++)
++from sglang.srt.layers.dp_attention import (
++    get_attention_tp_rank,
++    get_attention_tp_size,
++)
++from sglang.srt.layers.layernorm import Gemma4RMSNorm
++from sglang.srt.layers.linear import (
++    ColumnParallelLinear,
++    RowParallelLinear,
++)
++from sglang.srt.layers.quantization.base_config import QuantizationConfig
++from sglang.srt.utils import add_prefix, make_layers, set_weight_attrs
++
++# SSCP convolution constants (no longer in config.json, never varied across models)
++_SSCP_INPUT_FEAT_SIZE = 128
++_SSCP_CONV_KERNEL_SIZES = ((3, 3), (3, 3))
++_SSCP_CONV_STRIDE_SIZES = ((2, 2), (2, 2))
++
++# ---------------------------------------------------------------------------
++# Relative Position Embedding
++# ---------------------------------------------------------------------------
++
++
++class Gemma4AudioRelativePositionEmbedding(nn.Module):
++    def __init__(
++        self,
++        config: Gemma4AudioConfig,
++        quant_config: Optional[QuantizationConfig] = None,
++        prefix: str = "",
++    ):
++        super().__init__()
++        self.config = config
++
++        tp_size = get_attention_tp_size()
++        total_num_heads = config.num_attention_heads
++        self.channels = config.hidden_size
++        self.head_dim = self.channels // total_num_heads
++        self.num_heads = total_num_heads // tp_size
++        self.max_backward = max(0, config.attention_context_left - 1)
++        self.max_forward = config.attention_context_right
++
++        self.pos_proj = ColumnParallelLinear(
++            self.channels,
++            config.hidden_size,
++            bias=False,
++            quant_config=quant_config,
++            prefix=add_prefix("pos_proj", prefix),
++        )
++
++        min_timescale = 1.0
++        max_timescale = 1.0e4
++        num_timescales = self.channels // 2
++        log_timescale_increment = math.log(
++            float(max_timescale) / float(min_timescale)
++        ) / max(num_timescales - 1, 1)
++        inv_timescales = min_timescale * torch.exp(
++            torch.arange(num_timescales) * -log_timescale_increment
++        )
++        self.register_buffer(
++            "inv_timescales",
++            inv_timescales.float().unsqueeze(0).unsqueeze(0),
++            persistent=False,
++        )
++
++    def _get_timing_signal_1d_pos(
++        self, position: torch.Tensor, dtype: torch.dtype
++    ) -> torch.Tensor:
++        assert position.ndim == 2
++        position = position.float().unsqueeze(-1)
++        scaled_time = position * self.inv_timescales.to(
++            device=position.device, dtype=torch.float32
++        )
++        timing_signal = torch.cat(
++            [torch.sin(scaled_time), torch.cos(scaled_time)], dim=-1
++        )
++        return timing_signal.type(dtype)
++
++    def _relative_shift(
++        self,
++        term_bd_before_shift: torch.Tensor,
++        batch_size: int,
++        num_heads: int,
++        num_query_blocks: int,
++        query_block_size: int,
++        key_context_size: int,
++        max_span_plus_1: int,
++    ) -> torch.Tensor:
++        pad_amount_last_dim = (key_context_size + 1) - max_span_plus_1
++        padding_tuple = (0, pad_amount_last_dim)
++
++        term_bd_padded = F.pad(term_bd_before_shift, padding_tuple)
++        term_bd_reshaped = term_bd_padded.reshape(
++            (
++                batch_size,
++                num_heads,
++                num_query_blocks,
++                query_block_size * (key_context_size + 1),
++            )
++        )
++        term_bd_sliced = term_bd_reshaped[
++            :, :, :, : query_block_size * key_context_size
++        ]
++        term_bd_shifted = term_bd_sliced.reshape(
++            (
++                batch_size,
++                num_heads,
++                num_query_blocks,
++                query_block_size,
++                key_context_size,
++            )
++        )
++        return term_bd_shifted
++
++    def forward(self, queries: torch.Tensor, keys: torch.Tensor) -> torch.Tensor:
++        batch_size, num_query_blocks, query_block_size, num_heads, head_dim = (
++            queries.shape
++        )
++        _, _, key_context_size, _, _ = keys.shape
++
++        pos_indices = torch.arange(
++            self.max_backward, -self.max_forward - 1, -1, device=queries.device
++        ).unsqueeze(0)
++        max_span_plus_1 = pos_indices.shape[1]
++
++        sin_emb_timing_signal = self._get_timing_signal_1d_pos(
++            pos_indices, dtype=queries.dtype
++        )
++        # pos_proj is a ColumnParallelLinear (no implicit dtype promotion);
++        # project in weight dtype, then cast back to queries' dtype for the matmuls.
++        projected_sin_emb, _ = self.pos_proj(
++            sin_emb_timing_signal.to(self.pos_proj.weight.dtype)
++        )
++        projected_sin_emb = projected_sin_emb.to(queries.dtype)
++        sin_emb = projected_sin_emb.reshape(
++            1, max_span_plus_1, self.num_heads, self.head_dim
++        ).squeeze(0)
++
++        queries_p = queries.permute(0, 3, 1, 2, 4)
++        keys_p_t = keys.permute(0, 3, 1, 4, 2)
++        term_ac = torch.matmul(queries_p, keys_p_t)
++
++        q_permuted = queries.permute(0, 3, 1, 2, 4)
++        s_permuted = sin_emb.permute(1, 2, 0)
++        q_reshaped = q_permuted.reshape(
++            batch_size, num_heads, num_query_blocks * query_block_size, head_dim
++        )
++        term_bd_unshifed_matmul = torch.matmul(q_reshaped, s_permuted)
++        term_bd_unshifed = term_bd_unshifed_matmul.reshape(
++            batch_size,
++            num_heads,
++            num_query_blocks,
++            query_block_size,
++            max_span_plus_1,
++        )
++
++        term_bd_shifted = self._relative_shift(
++            term_bd_unshifed,
++            batch_size,
++            num_heads,
++            num_query_blocks,
++            query_block_size,
++            key_context_size,
++            max_span_plus_1,
++        )
++
++        return term_ac + term_bd_shifted
++
++
++# ---------------------------------------------------------------------------
++# Local Dot-Product Attention (with per_dim_key_scale)
++# ---------------------------------------------------------------------------
++
++
++class Gemma4AudioAttention(nn.Module):
++    def __init__(
++        self,
++        config: Gemma4AudioConfig,
++        quant_config: Optional[QuantizationConfig] = None,
++        prefix: str = "",
++    ):
++        super().__init__()
++        self.config = config
++
++        tp_size = get_attention_tp_size()
++        total_num_heads = config.num_attention_heads
++        self.hidden_size = config.hidden_size
++        self.head_dim = self.hidden_size // total_num_heads
++        self.num_heads = total_num_heads // tp_size
++
++        self.chunk_size = config.attention_chunk_size
++        self.max_future_horizon = config.attention_context_right
++        self.max_past_horizon = max(0, config.attention_context_left - 1)
++        self.attention_logits_soft_cap = config.attention_logit_cap
++        self.context_size = (
++            self.chunk_size + self.max_past_horizon + self.max_future_horizon
++        )
++
++        self.relative_position_embedding = Gemma4AudioRelativePositionEmbedding(
++            config,
++            quant_config,
++            prefix=add_prefix("relative_position_embedding", prefix),
++        )
++        self.per_dim_scale = nn.Parameter(torch.zeros((self.head_dim,)))
++
++        self.qkv = ClippableQKVParallelLinear(
++            hidden_size=self.hidden_size,
++            head_size=self.head_dim,
++            total_num_heads=total_num_heads,
++            total_num_kv_heads=total_num_heads,
++            bias=False,
++            quant_config=quant_config,
++            prefix=prefix,
++        )
++
++        self.q_scale = (self.head_dim**-0.5) / math.log(2)
++        self.k_scale = math.log(1 + math.e) / math.log(2)
++
++        self.register_buffer(
++            "softcap",
++            torch.tensor(self.attention_logits_soft_cap).float(),
++            persistent=False,
++        )
++
++    # ------ block / context helpers (identical to Gemma3n) ------------------
++
++    def _pad_dim1(
++        self, x: torch.Tensor, dim10_val: int, dim11_val: int
++    ) -> torch.Tensor:
++        padding_tuple = [0] * x.ndim * 2
++        dim_idx_from_end = x.ndim - 2
++        start_idx_for_dim = 2 * dim_idx_from_end
++        padding_tuple[start_idx_for_dim] = dim10_val
++        padding_tuple[start_idx_for_dim + 1] = dim11_val
++        return F.pad(x, tuple(padding_tuple))
++
++    def _convert_to_block(self, x: torch.Tensor) -> torch.Tensor:
++        shape = x.shape
++        b, t = shape[:2]
++        num_blocks = (t + self.chunk_size - 1) // self.chunk_size
++        if (padding_len := num_blocks * self.chunk_size - t) > 0:
++            x = self._pad_dim1(x, 0, padding_len)
++        permute_dims = (b, num_blocks, self.chunk_size) + shape[2:]
++        return x.reshape(permute_dims).contiguous()
++
++    def _extract_block_context(self, x: torch.Tensor) -> torch.Tensor:
++        pad_left = self.max_past_horizon
++        pad_right = self.max_future_horizon + self.chunk_size - 1
++        x = self._pad_dim1(x, pad_left, pad_right)
++        frame_len = self.context_size
++        frame_step = self.chunk_size
++        x_unfolded = x.unfold(dimension=1, size=frame_len, step=frame_step)
++        if x.ndim > 2 and x_unfolded.ndim > 3:
++            x_unfolded = torch.movedim(x_unfolded, source=-1, destination=2)
++        return x_unfolded.contiguous()
++
++    # ------ forward ---------------------------------------------------------
++
++    def forward(
++        self,
++        x: torch.Tensor,
++        mask: torch.BoolTensor,
++        causal_valid_mask: torch.BoolTensor,
++    ) -> torch.Tensor:
++        q, k, v = self.qkv(x)
++        qkv_shape = (*x.shape[:-1], self.num_heads, self.head_dim)
++        query_states = q.float().reshape(qkv_shape).contiguous()
++        key_states = k.float().reshape(qkv_shape).contiguous()
++        value_states = v.float().reshape(qkv_shape).contiguous()
++
++        per_dim_scale_sp = F.softplus(self.per_dim_scale)
++        broadcast_shape = (1, 1, 1, self.head_dim)
++        query_states = (
++            query_states * self.q_scale * per_dim_scale_sp.view(broadcast_shape)
++        )
++
++        key_states = key_states * self.k_scale
++
++        batch_size, q_time = query_states.shape[:2]
++
++        query_blocks = self._convert_to_block(query_states)
++        key_blocks = self._extract_block_context(key_states)
++        value_blocks = self._extract_block_context(value_states)
++        num_query_blocks = query_blocks.shape[1]
++
++        original_valid_mask = ~mask
++        extracted_valid_mask_blocks = self._extract_block_context(original_valid_mask)
++
++        if (
++            extracted_valid_mask_blocks.ndim == 4
++            and extracted_valid_mask_blocks.shape[0] == batch_size
++            and extracted_valid_mask_blocks.shape[1] == num_query_blocks
++            and extracted_valid_mask_blocks.shape[2]
++            * extracted_valid_mask_blocks.shape[3]
++            == self.context_size
++        ):
++            extracted_valid_mask_blocks = extracted_valid_mask_blocks.reshape(
++                batch_size, num_query_blocks, self.context_size
++            )
++
++        condition_from_input_validity = extracted_valid_mask_blocks.unsqueeze(
++            1
++        ).unsqueeze(-2)
++        condition_from_causality = (
++            causal_valid_mask.unsqueeze(0).unsqueeze(0).unsqueeze(0)
++        )
++
++        final_condition_for_where = torch.logical_and(
++            condition_from_input_validity,
++            condition_from_causality.to(condition_from_input_validity.device),
++        )
++
++        logits = self.relative_position_embedding(query_blocks, key_blocks)
++
++        softcap_val = self.softcap.to(logits.device)
++        logits = logits / softcap_val
++        logits = torch.tanh(logits)
++        logits = logits * softcap_val
++
++        logits = torch.where(
++            final_condition_for_where,
++            logits,
++            self.config.attention_invalid_logits_value,
++        )
++
++        probabilities = F.softmax(logits, dim=-1, dtype=torch.float32).to(
++            dtype=value_blocks.dtype
++        )
++
++        b_dim, n_dim, u_dim, w_dim, c_dim = probabilities.shape
++        h_dim = value_blocks.shape[-1]
++        prob_bun = probabilities.permute(0, 2, 1, 3, 4).reshape(-1, w_dim, c_dim)
++        v_bun = value_blocks.permute(0, 1, 3, 2, 4).reshape(-1, c_dim, h_dim)
++        result_bmm = torch.bmm(prob_bun, v_bun)
++        context_vectors = result_bmm.reshape(b_dim, u_dim, n_dim, w_dim, h_dim).permute(
++            0, 1, 3, 2, 4
++        )
++        context_vectors = context_vectors.reshape(
++            batch_size,
++            num_query_blocks * self.chunk_size,
++            self.num_heads,
++            self.head_dim,
++        )
++        context_vectors = context_vectors[:, :q_time]
++        return context_vectors
++
++
++# ---------------------------------------------------------------------------
++# SSCP (Sub-Sample Convolution Projection)
++# ---------------------------------------------------------------------------
++
++
++class Gemma4AudioSSCPConvBlock(nn.Module):
++    """Single 2D conv block with LayerNorm and semicausal padding."""
++
++    def __init__(
++        self,
++        config: Gemma4AudioConfig,
++        idx: int,
++        input_freq_dim: int,
++    ):
++        super().__init__()
++        self.config = config
++
++        conv_channels = config.subsampling_conv_channels
++        in_channels = 1 if idx == 0 else conv_channels[idx - 1]
++        out_channels = conv_channels[idx]
++        kernel_t, kernel_f = _SSCP_CONV_KERNEL_SIZES[idx]
++        stride_t, stride_f = _SSCP_CONV_STRIDE_SIZES[idx]
++        self.time_stride = stride_t
++
++        # Semicausal padding (hardcoded — streaming is not supported)
++        pad_t_top = kernel_t // 2
++        pad_t_bottom = kernel_t // 2
++
++        pad_f_left = 1
++        pad_f_right = 1
++
++        self.manual_padding = (pad_f_left, pad_f_right, pad_t_top, pad_t_bottom)
++
++        self.conv = nn.Conv2d(
++            in_channels=in_channels,
++            out_channels=out_channels,
++            kernel_size=(kernel_t, kernel_f),
++            stride=(stride_t, stride_f),
++            padding=(0, 0),
++            bias=False,
++        )
++
++        f_in_padded = input_freq_dim + pad_f_left + pad_f_right
++        self.f_out_conv = (f_in_padded - kernel_f) // stride_f + 1
++
++        self.norm = nn.LayerNorm(
++            [out_channels],
++            eps=config.rms_norm_eps,
++            elementwise_affine=True,
++            bias=False,
++        )
++        self.activation = nn.ReLU()
++
++    def forward(
++        self, audio_encodings: torch.Tensor, audio_mel_mask: torch.Tensor
++    ) -> Tuple[torch.Tensor, torch.Tensor]:
++        mask_for_fill = audio_mel_mask.unsqueeze(1).unsqueeze(-1)
++        audio_encodings = audio_encodings.masked_fill(mask_for_fill, 0.0)
++
++        audio_encodings_padded = F.pad(
++            audio_encodings, self.manual_padding, mode="constant", value=0.0
++        ).to(self.conv.weight.dtype)
++        audio_encodings_conv = self.conv(audio_encodings_padded)
++
++        output_mask = audio_mel_mask[:, :: self.time_stride][
++            :, : audio_encodings_conv.shape[2]
++        ]
++
++        x = audio_encodings_conv.permute(0, 2, 3, 1)
++        x_normed = self.norm(x)
++        audio_encodings_normed = x_normed.permute(0, 3, 1, 2).contiguous()
++        return self.activation(audio_encodings_normed), output_mask
++
++
++class Gemma4AudioSubSampleConvProjection(nn.Module):
++    def __init__(
++        self,
++        config: Gemma4AudioConfig,
++        quant_config: Optional[QuantizationConfig] = None,
++        prefix: str = "",
++    ):
++        super().__init__()
++        self.config = config
++
++        conv_channels = config.subsampling_conv_channels
++
++        current_f = _SSCP_INPUT_FEAT_SIZE
++        calculated_f_out_dims = []
++
++        for i in range(2):
++            kernel_h, kernel_w = _SSCP_CONV_KERNEL_SIZES[i]
++            stride_h, stride_w = _SSCP_CONV_STRIDE_SIZES[i]
++
++            pad_f_left = 1
++            pad_f_right = 1
++            f_in_padded = current_f + pad_f_left + pad_f_right
++            f_out = (f_in_padded - kernel_w) // stride_w + 1
++            calculated_f_out_dims.append(f_out)
++            current_f = f_out
++
++        self.conv_0 = Gemma4AudioSSCPConvBlock(
++            idx=0,
++            input_freq_dim=_SSCP_INPUT_FEAT_SIZE,
++            config=config,
++        )
++        self.conv_1 = Gemma4AudioSSCPConvBlock(
++            idx=1,
++            input_freq_dim=calculated_f_out_dims[0],
++            config=config,
++        )
++
++        final_c_out = conv_channels[-1]
++        final_f_out = calculated_f_out_dims[-1]
++        self.input_proj_in_features = final_c_out * final_f_out
++
++        self.input_proj_linear = RowParallelLinear(
++            self.input_proj_in_features,
++            config.hidden_size,
++            bias=False,
++            input_is_parallel=False,
++            quant_config=quant_config,
++            prefix=add_prefix("input_proj_linear", prefix),
++        )
++
++    def forward(
++        self, audio_encodings: torch.Tensor, audio_mel_mask: torch.Tensor
++    ) -> Tuple[torch.Tensor, torch.Tensor]:
++        audio_encodings_reshaped = audio_encodings.unsqueeze(1)
++        x, mask = self.conv_0(audio_encodings_reshaped, audio_mel_mask)
++        x, mask = self.conv_1(x, mask)
++        b, c_out, t_out, f_out = x.shape
++        x_permuted = x.permute(0, 2, 3, 1).contiguous()
++        output_flattened = x_permuted.reshape(b, t_out, f_out * c_out)
++        output, _ = self.input_proj_linear(output_flattened)
++        return output, mask
++
++
++# ---------------------------------------------------------------------------
++# Conformer Blocks
++# ---------------------------------------------------------------------------
++
++
++class Gemma4AudioConformerAttention(nn.Module):
++    def __init__(
++        self,
++        config: Gemma4AudioConfig,
++        quant_config: Optional[QuantizationConfig] = None,
++        prefix: str = "",
++    ):
++        super().__init__()
++        self.config = config
++        self.post_in_features = config.hidden_size
++
++        self.register_buffer(
++            "gradient_clipping",
++            torch.tensor(config.gradient_clipping),
++            persistent=False,
++        )
++
++        self.pre_attn_norm = Gemma4RMSNorm(config.hidden_size, scale_shift=0.0)
++        self.attn = Gemma4AudioAttention(
++            config, quant_config, prefix=add_prefix("attn", prefix)
++        )
++        self.post = ClippableRowParallelLinear(
++            self.post_in_features,
++            config.hidden_size,
++            bias=False,
++            quant_config=quant_config,
++            prefix=add_prefix("post", prefix),
++        )
++        self.post_norm = Gemma4RMSNorm(config.hidden_size, scale_shift=0.0)
++
++    def forward(
++        self,
++        audio_encodings: torch.Tensor,
++        audio_mel_mask: torch.BoolTensor,
++        causal_valid_mask: torch.BoolTensor,
++    ) -> torch.Tensor:
++        audio_encodings_input_to_attn = audio_encodings
++        audio_encodings = torch.clamp(
++            audio_encodings, -self.gradient_clipping, self.gradient_clipping
++        )
++        audio_encodings_norm = self.pre_attn_norm(audio_encodings)
++        audio_encodings_attn_out = self.attn(
++            audio_encodings_norm, audio_mel_mask, causal_valid_mask
++        )
++
++        b, t, num_heads, head_dim = audio_encodings_attn_out.shape
++        audio_encodings_reshaped = audio_encodings_attn_out.reshape(
++            b, t, num_heads * head_dim
++        ).to(dtype=audio_encodings_input_to_attn.dtype)
++
++        audio_encodings = self.post(audio_encodings_reshaped)
++        audio_encodings = torch.clamp(
++            audio_encodings, -self.gradient_clipping, self.gradient_clipping
++        )
++        return audio_encodings_input_to_attn + self.post_norm(audio_encodings)
++
++
++class Gemma4AudioConformerFeedForward(nn.Module):
++    def __init__(
++        self,
++        config: Gemma4AudioConfig,
++        quant_config: Optional[QuantizationConfig] = None,
++        prefix: str = "",
++    ):
++        super().__init__()
++        self.config = config
++
++        self.register_buffer(
++            "gradient_clipping",
++            torch.tensor(config.gradient_clipping),
++            persistent=False,
++        )
++
++        self.pre_layer_norm = Gemma4RMSNorm(config.hidden_size, scale_shift=0.0)
++        self.ffw_layer_1 = ClippableColumnParallelLinear(
++            config.hidden_size,
++            config.hidden_size * 4,
++            bias=False,
++            quant_config=quant_config,
++            prefix=add_prefix("ffw_layer_1", prefix),
++        )
++        self.ffw_layer_2 = ClippableRowParallelLinear(
++            config.hidden_size * 4,
++            config.hidden_size,
++            bias=False,
++            quant_config=quant_config,
++            prefix=add_prefix("ffw_layer_2", prefix),
++        )
++        self.post_layer_norm = Gemma4RMSNorm(config.hidden_size, scale_shift=0.0)
++        self.post_layer_scale = config.residual_weight
++
++    def forward(self, audio_encodings: torch.Tensor) -> torch.Tensor:
++        residual = audio_encodings
++        audio_encodings = torch.clamp(
++            audio_encodings, -self.gradient_clipping, self.gradient_clipping
++        )
++        audio_encodings = self.pre_layer_norm(audio_encodings)
++        audio_encodings = self.ffw_layer_1(audio_encodings)
++        audio_encodings = F.silu(audio_encodings)
++        audio_encodings = self.ffw_layer_2(audio_encodings)
++        audio_encodings = torch.clamp(
++            audio_encodings, -self.gradient_clipping, self.gradient_clipping
++        )
++        audio_encodings = self.post_layer_norm(audio_encodings)
++        return residual + (audio_encodings * self.post_layer_scale)
++
++
++class Gemma4AudioConformerLightConv1d(nn.Module):
++    def __init__(
++        self,
++        config: Gemma4AudioConfig,
++        quant_config: Optional[QuantizationConfig] = None,
++        prefix: str = "",
++    ):
++        super().__init__()
++        self.config = config
++        self.causal_padding = config.conv_kernel_size - 1
++        tp_size = get_attention_tp_size()
++        hidden_per_tp = config.hidden_size // tp_size
++
++        self.register_buffer(
++            "gradient_clipping",
++            torch.tensor(config.gradient_clipping),
++            persistent=False,
++        )
++
++        self.pre_layer_norm = Gemma4RMSNorm(
++            config.hidden_size, eps=config.rms_norm_eps, scale_shift=0.0
++        )
++        self.linear_start = ClippableGLUParallelLinear(
++            config.hidden_size,
++            config.hidden_size,
++            bias=False,
++            quant_config=quant_config,
++            prefix=add_prefix("linear_start", prefix),
++        )
++        self.depthwise_conv1d = nn.Conv1d(
++            in_channels=hidden_per_tp,
++            out_channels=hidden_per_tp,
++            kernel_size=config.conv_kernel_size,
++            stride=1,
++            padding=0,
++            groups=hidden_per_tp,
++            bias=False,
++        )
++        self.conv_norm = Gemma4RMSNorm(
++            hidden_per_tp, eps=config.rms_norm_eps, scale_shift=0.0
++        )
++
++        tp_rank = get_attention_tp_rank()
++
++        def _shard_dim0(param, loaded_weight, _rank=tp_rank, _tp=tp_size):
++            shard = param.shape[0]
++            loaded_weight = loaded_weight.narrow(0, _rank * shard, shard)
++            param.data.copy_(loaded_weight)
++
++        set_weight_attrs(self.depthwise_conv1d.weight, {"weight_loader": _shard_dim0})
++        set_weight_attrs(self.conv_norm.weight, {"weight_loader": _shard_dim0})
++
++        self.linear_end = ClippableRowParallelLinear(
++            config.hidden_size,
++            config.hidden_size,
++            bias=False,
++            quant_config=quant_config,
++            prefix=add_prefix("linear_end", prefix),
++        )
++
++    def forward(self, audio_encodings: torch.Tensor) -> torch.Tensor:
++        audio_encodings_residual = audio_encodings
++
++        audio_encodings = self.pre_layer_norm(audio_encodings)
++        audio_encodings = self.linear_start(audio_encodings)
++
++        audio_encodings_permuted = audio_encodings.permute(0, 2, 1)
++        audio_encodings_permuted_padded = F.pad(
++            audio_encodings_permuted, (self.causal_padding, 0)
++        )
++        audio_encodings = self.depthwise_conv1d(audio_encodings_permuted_padded)
++        audio_encodings = audio_encodings.permute(0, 2, 1)
++        audio_encodings = torch.clamp(
++            audio_encodings, -self.gradient_clipping, self.gradient_clipping
++        )
++        audio_encodings = self.conv_norm(audio_encodings)
++        audio_encodings = F.silu(audio_encodings)
++        audio_encodings = self.linear_end(audio_encodings)
++        return audio_encodings + audio_encodings_residual
++
++
++class Gemma4AudioConformerBlock(nn.Module):
++    def __init__(
++        self,
++        config: Gemma4AudioConfig,
++        quant_config: Optional[QuantizationConfig] = None,
++        prefix: str = "",
++    ):
++        super().__init__()
++        self.config = config
++
++        self.ffw_layer_start = Gemma4AudioConformerFeedForward(
++            config, quant_config, prefix=add_prefix("ffw_layer_start", prefix)
++        )
++        self.attention = Gemma4AudioConformerAttention(
++            config, quant_config, prefix=add_prefix("attention", prefix)
++        )
++        self.lconv1d = Gemma4AudioConformerLightConv1d(
++            config, quant_config, prefix=add_prefix("lconv1d", prefix)
++        )
++        self.ffw_layer_end = Gemma4AudioConformerFeedForward(
++            config, quant_config, prefix=add_prefix("ffw_layer_end", prefix)
++        )
++        self.register_buffer(
++            "gradient_clipping",
++            torch.tensor(config.gradient_clipping),
++            persistent=False,
++        )
++        self.norm = Gemma4RMSNorm(config.hidden_size, scale_shift=0.0)
++
++    def forward(
++        self,
++        audio_encodings: torch.Tensor,
++        audio_mel_mask: torch.BoolTensor,
++        causal_valid_mask: torch.BoolTensor,
++    ) -> torch.Tensor:
++        audio_encodings = self.ffw_layer_start(audio_encodings)
++        audio_encodings = self.attention(
++            audio_encodings, audio_mel_mask, causal_valid_mask
++        )
++        validity_mask_for_lconv = ~audio_mel_mask
++        audio_encodings_for_lconv_input = (
++            audio_encodings
++            * validity_mask_for_lconv.unsqueeze(-1).to(audio_encodings.dtype)
++        )
++        audio_encodings = self.lconv1d(audio_encodings_for_lconv_input)
++
++        audio_encodings = self.ffw_layer_end(audio_encodings)
++        audio_encodings = torch.clamp(
++            audio_encodings, -self.gradient_clipping, self.gradient_clipping
++        )
++        return self.norm(audio_encodings)
++
++
++# ---------------------------------------------------------------------------
++# Top-level Encoder
++# ---------------------------------------------------------------------------
++
++
++class Gemma4AudioEncoder(nn.Module):
++    """SGLang-native TP-sharded Gemma 4 audio encoder (USM Conformer + SSCP)."""
++
++    def __init__(
++        self,
++        config: Gemma4AudioConfig,
++        quant_config: Optional[QuantizationConfig] = None,
++        prefix: str = "",
++    ):
++        super().__init__()
++        self.config = config
++
++        self.subsample_conv_projection = Gemma4AudioSubSampleConvProjection(
++            config, quant_config, prefix=add_prefix("subsample_conv_projection", prefix)
++        )
++        self.conformer = make_layers(
++            config.num_hidden_layers,
++            lambda idx, prefix: Gemma4AudioConformerBlock(
++                config=config,
++                quant_config=quant_config,
++                prefix=prefix,
++            ),
++            prefix=add_prefix("conformer", prefix),
++        )
++
++        if config.output_proj_dims is not None:
++            self.output_proj = RowParallelLinear(
++                config.hidden_size,
++                config.output_proj_dims,
++                bias=True,
++                input_is_parallel=False,
++                quant_config=quant_config,
++                prefix=add_prefix("output_proj", prefix),
++            )
++        else:
++            self.output_proj = None
++
++        # Precompute causal_valid_mask — depends only on static config values.
++        chunk_size = config.attention_chunk_size
++        max_future_horizon = config.attention_context_right
++        max_past_horizon = max(0, config.attention_context_left - 1)
++        upper_diagonal = max_past_horizon + max_future_horizon
++        context_size = chunk_size + max_past_horizon + max_future_horizon
++
++        lower_causal_mask = torch.tril(
++            torch.ones((context_size, chunk_size), dtype=torch.bool),
++            diagonal=0,
++        ).T
++        upper_causal_mask = torch.tril(
++            torch.ones((chunk_size, context_size), dtype=torch.bool),
++            diagonal=upper_diagonal,
++        )
++        local_causal_valid_mask = torch.ones(
++            (chunk_size, context_size), dtype=torch.bool
++        )
++        self.register_buffer(
++            "causal_valid_mask",
++            local_causal_valid_mask * lower_causal_mask * upper_causal_mask,
++            persistent=False,
++        )
++
++    @property
++    def device(self):
++        return next(self.parameters()).device
++
++    def forward(
++        self, audio_mel: torch.Tensor, audio_mel_mask: torch.BoolTensor
++    ) -> Tuple[torch.Tensor, torch.BoolTensor]:
++        """Encode a batch of mel spectrograms.
++
++        Args:
++            audio_mel: [batch, num_frames, mel_bins]
++            audio_mel_mask: [batch, num_frames], True = padding
++
++        Returns:
++            audio_encodings: [batch, reduced_frames, hidden_size/output_proj_dims]
++            audio_mel_mask: [batch, reduced_frames], True = padding
++        """
++        audio_encodings, current_mask = self.subsample_conv_projection(
++            audio_mel, audio_mel_mask
++        )
++
++        for block in self.conformer:
++            audio_encodings = block(
++                audio_encodings, current_mask, self.causal_valid_mask
++            )
++
++        if self.output_proj is not None:
++            audio_encodings, _ = self.output_proj(audio_encodings)
++
++        if current_mask.shape[1] != audio_encodings.shape[1]:
++            target_len = audio_encodings.shape[1]
++            if target_len > current_mask.shape[1]:
++                current_mask = F.pad(
++                    current_mask, (0, target_len - current_mask.shape[1]), value=True
++                )
++            else:
++                current_mask = current_mask[:, :target_len]
++
++        audio_encodings = audio_encodings.masked_fill(current_mask.unsqueeze(-1), 0.0)
++        return audio_encodings, current_mask
+--- /dev/null	2026-04-04 12:35:46.219885937 -0700
++++ b/python/sglang/srt/models/gemma4_mm.py	2026-04-17 08:25:17.196590337 -0700
+@@ -0,0 +1,956 @@
++# Copyright 2025 SGLang Team
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++# ==============================================================================
++
++
++import logging
++import re
++from functools import lru_cache
++from typing import Iterable, List, Optional, Set, Tuple, TypedDict, Union
++
++import torch
++from torch import nn
++from transformers import (
++    Gemma4AudioConfig,
++    Gemma4Config,
++    Gemma4TextConfig,
++    Gemma4VisionConfig,
++    PreTrainedModel,
++)
++
++from sglang.srt.layers.attention.triton_backend import TritonAttnBackend
++from sglang.srt.layers.layernorm import Gemma4RMSNorm
++from sglang.srt.layers.linear import ReplicatedLinear
++from sglang.srt.layers.logits_processor import LogitsProcessor
++from sglang.srt.layers.quantization.base_config import QuantizationConfig
++from sglang.srt.managers.mm_utils import (
++    MultiModalityDataPaddingPatternMultimodalTokens,
++    general_mm_embed_routine,
++)
++from sglang.srt.managers.schedule_batch import (
++    Modality,
++    MultimodalDataItem,
++    MultimodalInputs,
++    flatten_nested_list,
++)
++from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
++from sglang.srt.model_loader.weight_utils import (
++    default_weight_loader,
++    maybe_remap_kv_scale_name,
++)
++from sglang.srt.models.gemma4_audio import Gemma4AudioEncoder
++from sglang.srt.models.gemma4_causal import Gemma4TextModel
++from sglang.srt.models.gemma4_vision import Gemma4VisionEncoder
++from sglang.srt.utils import add_prefix
++from sglang.srt.utils.hf_transformers_utils import get_processor
++
++logger = logging.getLogger(__name__)
++
++cached_get_processor = lru_cache(get_processor)
++
++
++class Gemma4ImagePixelInputs(TypedDict):
++    pixel_values: torch.Tensor
++    """Shape: `(batch_size * num_images, num_channels, height, width)`"""
++
++
++class Gemma4AudioInputs(TypedDict):
++    input_features_padded: torch.Tensor
++    """Shape: `(batch_size * num_audio, seq_length, num_features)`"""
++    input_features_mask: torch.Tensor
++    """Shape: `(batch_size * num_audio, seq_length)`"""
++
++
++class Gemma4MultimodalEmbedder(nn.Module):
++    """Projects vision/audio soft tokens into LM embedding space."""
++
++    def __init__(
++        self,
++        multimodal_config: Union[Gemma4AudioConfig, Gemma4VisionConfig],
++        text_config: Gemma4TextConfig,
++        quant_config: Optional[QuantizationConfig] = None,
++        prefix: str = "",
++    ):
++        super().__init__()
++
++        self.eps = multimodal_config.rms_norm_eps
++        self.text_hidden_size = text_config.hidden_size
++
++        # Audio tower uses output_proj_dims (1536) rather than hidden_size
++        # (1024); vision uses hidden_size (768) directly.
++        embedding_dim = (
++            getattr(multimodal_config, "output_proj_dims", None)
++            or multimodal_config.hidden_size
++        )
++
++        self.embedding_projection = ReplicatedLinear(
++            embedding_dim,
++            self.text_hidden_size,
++            bias=False,
++            quant_config=quant_config,
++            prefix=add_prefix("embedding_projection", prefix),
++        )
++
++        self.embedding_pre_projection_norm = Gemma4RMSNorm(
++            embedding_dim,
++            eps=self.eps,
++            with_scale=False,
++        )
++
++    def forward(
++        self,
++        inputs_embeds: torch.Tensor,
++    ) -> torch.Tensor:
++        """Project soft tokens from a multimodal tower into LM space."""
++        embs_normed = self.embedding_pre_projection_norm(inputs_embeds)
++        embs_proj, _ = self.embedding_projection(embs_normed)
++        return embs_proj
++
++
++class Gemma4ForConditionalGeneration(PreTrainedModel):
++    config_class = Gemma4Config
++    """Gemma4 multimodal model for conditional generation."""
++
++    # BitandBytes specific attributes
++    default_bitsandbytes_target_modules = [
++        ".gate_proj.",
++        ".down_proj.",
++        ".up_proj.",
++        ".q_proj.",
++        ".k_proj.",
++        ".v_proj.",
++        ".o_proj.",
++    ]
++    bitsandbytes_stacked_params_mapping = {
++        "q_proj": ("qkv_proj", 0),
++        "k_proj": ("qkv_proj", 1),
++        "v_proj": ("qkv_proj", 2),
++        "gate_proj": ("gate_up_proj", 0),
++        "up_proj": ("gate_up_proj", 1),
++    }
++
++    packed_modules_mapping = {
++        "qkv_proj": [
++            "q_proj",
++            "k_proj",
++            "v_proj",
++        ],
++        "gate_up_proj": [
++            "gate_proj",
++            "up_proj",
++        ],
++    }
++
++    # LoRA specific attributes
++    supported_lora_modules = [
++        "qkv_proj",
++        "o_proj",
++        "gate_up_proj",
++        "down_proj",
++    ]
++    # Gemma does not apply LoRA to the embedding layer
++    embedding_modules = {}
++    embedding_padding_modules = []
++    supports_lora = True
++
++    def __init__(
++        self,
++        config: Gemma4Config,
++        quant_config: Optional[QuantizationConfig] = None,
++        prefix: str = "",
++    ) -> None:
++        super().__init__(config=config)
++        self.config = config
++        self.quant_config = quant_config
++
++        prefix = add_prefix("model", prefix)
++
++        self.vision_tower = Gemma4VisionEncoder(
++            config=config.vision_config,
++            quant_config=quant_config,
++            prefix=add_prefix("vision_tower", prefix),
++        )
++
++        self.embed_vision = Gemma4MultimodalEmbedder(
++            config.vision_config,
++            config.text_config,
++            quant_config=quant_config,
++            prefix=add_prefix("embed_vision", prefix),
++        )
++
++        # Audio components
++        if getattr(config, "audio_config", None) is not None:
++            self.audio_tower = Gemma4AudioEncoder(
++                config=config.audio_config,
++                quant_config=quant_config,
++                prefix=add_prefix("audio_tower", prefix),
++            )
++            self.embed_audio = Gemma4MultimodalEmbedder(
++                config.audio_config,
++                config.text_config,
++                quant_config=quant_config,
++                prefix=add_prefix("embed_audio", prefix),
++            )
++        else:
++            self.audio_tower = None
++            self.embed_audio = None
++
++        self.vocab_size = config.text_config.vocab_size
++        self.vocab_size_per_layer_input = getattr(
++            config.text_config,
++            "vocab_size_per_layer_input",
++            config.text_config.vocab_size,
++        )
++
++        # Text model
++        self.language_model = Gemma4TextModel(
++            config.text_config,
++            quant_config,
++            prefix=add_prefix("language_model", prefix),
++        )
++
++        # Create logits processor for the multimodal model
++        self.logits_processor = LogitsProcessor(config.text_config)
++
++        self.post_init()
++
++    def pad_input_ids(
++        self,
++        input_ids: List[int],
++        mm_inputs: MultimodalInputs,
++    ) -> List[int]:
++        """Pad input IDs with image and audio tokens."""
++        pattern = MultiModalityDataPaddingPatternMultimodalTokens()
++        return pattern.pad_input_tokens(input_ids, mm_inputs)
++
++    def get_input_embeddings(self) -> nn.Embedding:
++        return self.language_model.get_input_embeddings()
++
++    def get_attention_sliding_window_size(self):
++        return getattr(self.config.text_config, "sliding_window", -1) - 1
++
++    def prepare_attn_masks(
++        self,
++        forward_batch: ForwardBatch,
++        input_ids: torch.Tensor,
++        mask_dtype: torch.dtype,
++    ):
++        """Prepare bidirectional attention masks for image tokens.
++
++        Gemma 4 uses bidirectional attention for image soft tokens
++        during prefill. Following the HF implementation, bidirectional attention
++        is only enabled within each individual image group (same-item
++        tokens), not across items.
++        Currently only the TritonAttnBackend supports this.
++
++        TODO(kpham-sgl): Guard appropriately for gemma3_mm.py:prepare_attn_masks()
++        """
++        if not isinstance(forward_batch.attn_backend, TritonAttnBackend):
++            logger.warning_once(
++                "Bidirectional attention for image tokens requires TritonAttnBackend. "
++                "Falling back to causal attention, which may degrade image quality."
++            )
++            return
++        assert forward_batch.forward_mode == ForwardMode.EXTEND
++
++        bidirectional_attn_masks_list = []
++        bidirectional_attn_mask_indptr = torch.zeros(
++            forward_batch.batch_size + 1, dtype=torch.int32, device=input_ids.device
++        )
++
++        split_images = []
++
++        for i in range(forward_batch.batch_size):
++            extend_seq_len = forward_batch.extend_seq_lens[i]
++            prefix_len = forward_batch.extend_prefix_lens[i]
++            bidirectional_attn_mask = torch.zeros(
++                extend_seq_len,
++                extend_seq_len + prefix_len,
++                dtype=mask_dtype,
++                device=input_ids.device,
++            )
++            # Start with causal mask
++            bidirectional_attn_mask.fill_(1)
++            bidirectional_attn_mask = bidirectional_attn_mask.tril(diagonal=prefix_len)
++
++            # HF only enables bidirectional attention for image tokens,
++            # not video or audio (see create_causal_mask_mapping).
++            mm_inputs = forward_batch.mm_inputs[i]
++            if mm_inputs is not None:
++                for mm_item in mm_inputs.mm_items:
++                    if mm_item.is_image():
++                        for im_begin, im_end in mm_item.offsets:
++                            # Note(kpham-sgl): We only apply bidirectional attention when the image token span
++                            # is fully contained in the extend window. Otherwise, we silently fall back to
++                            # causal attention.
++                            # FIXME(kpham-sgl): This is a hack to work around the fact that the image token span
++                            # might not be fully contained in the extend window during chunked prefill.
++                            # We should fix this by properly making chunked prefill mask aware.
++                            if (
++                                im_begin >= prefix_len
++                                and im_end < prefix_len + extend_seq_len
++                            ):
++                                bidirectional_attn_mask[
++                                    im_begin - prefix_len : im_end + 1 - prefix_len,
++                                    im_begin : im_end + 1,
++                                ] = 1
++                            elif (
++                                im_end >= prefix_len
++                                and im_begin < prefix_len + extend_seq_len
++                            ):
++                                split_images.append((i, im_begin, im_end))
++
++            bidirectional_attn_masks_list.append(bidirectional_attn_mask.flatten())
++            bidirectional_attn_mask_indptr[i + 1] = (
++                bidirectional_attn_mask_indptr[i] + bidirectional_attn_mask.nelement()
++            )
++        if split_images:
++            num_split_images = len(split_images)
++            logger.warning_once(
++                f"{num_split_images} images are split across chunk boundaries. "
++                "Below are the first 5 images that are split across chunk boundaries: "
++            )
++            for i, im_begin, im_end in split_images[:5]:
++                logger.warning_once(
++                    f"Image {i}:{im_begin}-{im_end} is split across chunk boundaries.\n",
++                )
++            logger.warning_once(
++                "Those images will receive causal attention. Disable chunked prefill (--chunked-prefill-size=-1) for full bidirectional attention.",
++            )
++        if bidirectional_attn_masks_list:
++            bidirectional_attn_masks = torch.cat(bidirectional_attn_masks_list, dim=0)
++            forward_batch.attn_backend.forward_metadata.mask_indptr = (
++                bidirectional_attn_mask_indptr
++            )
++            forward_batch.attn_backend.forward_metadata.custom_mask = (
++                bidirectional_attn_masks
++            )
++
++    def get_image_feature(self, items: List[MultimodalDataItem]) -> torch.Tensor:
++        vt = self.vision_tower
++
++        all_embeds = []
++        for item in items:
++            all_pixel_values = flatten_nested_list([item.feature])
++            all_position_ids = flatten_nested_list(
++                [getattr(item, "image_position_ids", None)]
++            )
++            for pv_idx, pv in enumerate(all_pixel_values):
++                if (
++                    pv.dim() in (2, 3)
++                    and pv.shape[-1] == self.config.text_config.hidden_size
++                ):
++                    all_embeds.append(pv.to(self.language_model.device))
++                    continue
++
++                if pv_idx >= len(all_position_ids) or all_position_ids[pv_idx] is None:
++                    raise ValueError(
++                        f"pixel_values[{pv_idx}] has no matching image_position_ids. "
++                        "The HF image processor likely renamed this output — "
++                        "update ATTR_NAME_TO_MODALITY in the Gemma4 processor."
++                    )
++                pp = all_position_ids[pv_idx]
++
++                # Vision tower expects 3-D (batch, num_patches, ...).
++                # A single image may arrive as 2-D; add the batch dim if needed.
++                if pv.dim() == 2:
++                    pv = pv.unsqueeze(0)
++                if pp.dim() == 2:
++                    pp = pp.unsqueeze(0)
++
++                # Run vision encoder in BF16 to avoid FP16 overflow (max 65504).
++                # Gemma4 vision encoder was designed for BF16 (max 3.4e38).
++                vision_dtype = torch.bfloat16
++                pv = pv.to(device=vt.device, dtype=vision_dtype)
++                pp = pp.to(device=vt.device)
++
++                # Temporarily cast vision tower to BF16 for forward pass
++                orig_vt_dtype = next(vt.parameters()).dtype
++                if orig_vt_dtype != vision_dtype:
++                    vt = vt.to(dtype=vision_dtype)
++                pooled, pooler_mask = vt(pv, pp)
++                if orig_vt_dtype != vision_dtype:
++                    vt = vt.to(dtype=orig_vt_dtype)
++                    self.vision_tower = vt
++                # pooled is in BF16 — safe from FP16 overflow
++
++                for hs, mask in zip(pooled, pooler_mask):
++                    real_tokens = hs[mask]
++                    # Project in BF16 to avoid FP16 overflow, then cast to LM dtype
++                    lm_dtype = self.language_model.dtype()
++                    orig_ev_dtype = next(self.embed_vision.parameters()).dtype
++                    if orig_ev_dtype != vision_dtype:
++                        self.embed_vision = self.embed_vision.to(dtype=vision_dtype)
++                    projected = self.embed_vision(
++                        inputs_embeds=real_tokens.unsqueeze(0).to(dtype=vision_dtype)
++                    ).squeeze(0)
++                    if orig_ev_dtype != vision_dtype:
++                        self.embed_vision = self.embed_vision.to(dtype=orig_ev_dtype)
++                    if projected.dtype != lm_dtype:
++                        projected = projected.to(dtype=lm_dtype)
++                    all_embeds.append(projected)
++
++        if all_embeds:
++            return torch.cat(all_embeds, dim=0)
++        else:
++            return torch.empty(
++                0,
++                self.language_model.config.hidden_size,
++                device=next(self.parameters()).device,
++                dtype=self.language_model.dtype(),
++            )
++
++    def get_video_feature(self, items: List[MultimodalDataItem]) -> torch.Tensor:
++        """Encode video frames through the vision tower with video-specific pooling.
++
++        Each video is (num_frames, num_patches, patch_pixels) with matching
++        position_ids (num_frames, num_patches, 2).  Frames are flattened into
++        the batch dimension so each frame is encoded independently, then pooled
++        dynamically based on the input patch count and pooling_kernel_size.
++        """
++        vt = self.vision_tower
++
++        all_embeds = []
++        for item in items:
++            all_pixel_values = flatten_nested_list([item.feature])
++            all_position_ids = flatten_nested_list(
++                [getattr(item, "video_position_ids", None)]
++            )
++
++            for pv_idx, pv in enumerate(all_pixel_values):
++                if (
++                    pv.dim() in (2, 3)
++                    and pv.shape[-1] == self.config.text_config.hidden_size
++                ):
++                    all_embeds.append(pv.to(self.language_model.device))
++                    continue
++
++                if pv_idx >= len(all_position_ids) or all_position_ids[pv_idx] is None:
++                    raise ValueError(
++                        f"pixel_values_videos[{pv_idx}] has no matching video_position_ids."
++                    )
++                pp = all_position_ids[pv_idx]
++
++                # HF processor returns 4-D tensors
++                # (num_videos, num_frames, num_patches, ...) — collapse to
++                # 3-D (num_frames, num_patches, ...) so each frame is a
++                # batch element for the vision tower.
++                if pv.dim() == 4:
++                    pv = pv.reshape(-1, pv.shape[-2], pv.shape[-1])
++                if pp.dim() == 4:
++                    pp = pp.reshape(-1, pp.shape[-2], pp.shape[-1])
++
++                pv = pv.to(device=vt.device, dtype=self.language_model.dtype())
++                pp = pp.to(device=vt.device)
++
++                pooled, pooler_mask = vt(pv, pp)
++
++                for hs, mask in zip(pooled, pooler_mask):
++                    real_tokens = hs[mask]
++                    all_embeds.append(
++                        self.embed_vision(
++                            inputs_embeds=real_tokens.unsqueeze(0)
++                        ).squeeze(0)
++                    )
++
++        if all_embeds:
++            return torch.cat(all_embeds, dim=0)
++        else:
++            return torch.empty(
++                0,
++                self.language_model.config.hidden_size,
++                device=next(self.parameters()).device,
++                dtype=self.language_model.dtype(),
++            )
++
++    def get_audio_feature(self, items: List[MultimodalDataItem]) -> torch.Tensor:
++        if self.audio_tower is None:
++            raise ValueError(
++                "Audio inputs provided but the model does not have an audio tower."
++            )
++
++        all_input_features = flatten_nested_list([item.feature for item in items])
++        all_input_features_mask = flatten_nested_list(
++            [~item.input_features_mask for item in items]
++        )
++
++        all_embeds = []
++        for input_features, input_features_mask in zip(
++            all_input_features, all_input_features_mask
++        ):
++            if input_features.dim() == 2:
++                input_features = input_features.unsqueeze(0)
++            if input_features_mask.dim() == 1:
++                input_features_mask = input_features_mask.unsqueeze(0)
++
++            input_features = input_features.to(
++                device=self.audio_tower.device,
++                dtype=self.language_model.dtype(),
++            )
++            input_features_mask = input_features_mask.to(device=input_features.device)
++
++            # audio_mel_mask convention: True = padding
++            audio_encodings, audio_mask = self.audio_tower(
++                input_features, input_features_mask
++            )
++
++            audio_features = self.embed_audio(inputs_embeds=audio_encodings)
++
++            for enc, mask in zip(audio_features, audio_mask):
++                all_embeds.append(enc[~mask])
++
++        if all_embeds:
++            return torch.cat(all_embeds, dim=0)
++        else:
++            return torch.empty(
++                0,
++                self.language_model.config.hidden_size,
++                device=next(self.parameters()).device,
++                dtype=self.language_model.dtype(),
++            )
++
++    def get_per_layer_inputs(
++        self, input_ids: torch.LongTensor
++    ) -> Optional[torch.Tensor]:
++        return self.language_model.get_per_layer_inputs(input_ids)
++
++    def project_per_layer_inputs(
++        self,
++        inputs_embeds: torch.Tensor,
++        per_layer_inputs: Optional[torch.Tensor] = None,
++    ) -> torch.Tensor:
++        return self.language_model.project_per_layer_inputs(
++            inputs_embeds, per_layer_inputs
++        )
++
++    @torch.no_grad()
++    def forward(
++        self,
++        input_ids: torch.LongTensor,
++        positions: torch.Tensor,
++        forward_batch: ForwardBatch,
++        input_embeds: torch.Tensor = None,
++        **kwargs: object,
++    ) -> LogitsProcessor:
++        """Forward pass for multimodal Gemma4.
++
++        For text-only requests, delegates to the causal language model directly.
++        For multimodal requests, processes vision/audio embeddings then feeds
++        through the language model.
++        """
++        has_mm = (
++            forward_batch.contains_mm_inputs()
++            if hasattr(forward_batch, 'contains_mm_inputs') else False
++        )
++
++        if not has_mm:
++            # Text-only: use causal forward path (avoids mm-specific code that
++            # may crash on some hardware)
++            positions = positions + 1
++            hidden_states = self.language_model(
++                input_ids, positions, forward_batch, input_embeds, None, **kwargs
++            )
++            return self.logits_processor(
++                input_ids, hidden_states, self.language_model.embed_tokens, forward_batch
++            )
++
++        # Multimodal path
++        if (input_ids is None) ^ (input_embeds is not None):
++            raise ValueError(
++                "You must specify exactly one of input_ids or inputs_embeds"
++            )
++
++        positions = positions + 1
++        per_layer_inputs = None
++        if input_ids is not None:
++            ple_ids = input_ids.clone()
++            pad_id = self.config.text_config.pad_token_id
++            ple_ids[input_ids == self.config.image_token_id] = pad_id
++            ple_ids[input_ids == self.config.video_token_id] = pad_id
++            ple_ids[input_ids == self.config.audio_token_id] = pad_id
++            per_layer_inputs = self.get_per_layer_inputs(ple_ids)
++
++        # Prepare bidirectional attention masks for image tokens during prefill.
++        if (
++            forward_batch.forward_mode == ForwardMode.EXTEND
++            and forward_batch.contains_image_inputs()
++        ):
++            self.prepare_attn_masks(
++                forward_batch,
++                input_ids,
++                mask_dtype=torch.bool,
++            )
++
++        hidden_states = general_mm_embed_routine(
++            input_ids=input_ids,
++            forward_batch=forward_batch,
++            language_model=self.language_model,
++            data_embedding_funcs={
++                Modality.IMAGE: self.get_image_feature,
++                Modality.VIDEO: self.get_video_feature,
++                Modality.AUDIO: self.get_audio_feature,
++            },
++            positions=positions,
++            per_layer_inputs=per_layer_inputs,
++            **kwargs,
++        )
++
++        return self.logits_processor(
++            input_ids, hidden_states, self.language_model.embed_tokens, forward_batch
++        )
++
++    def tie_weights(self, recompute_mapping=False):
++        return self.language_model.tie_weights()
++
++    # Standard stacked-params mapping for fused QKV / GateUp linears
++    # in the text decoder.  Also consumed by the tower QKV remap (step 2).
++    stacked_params_mapping = [
++        # (param_name, shard_name, shard_id)
++        (".qkv_proj", ".q_proj", "q"),
++        (".qkv_proj", ".k_proj", "k"),
++        (".qkv_proj", ".v_proj", "v"),
++        (".gate_up_proj", ".up_proj", 1),
++        (".gate_up_proj", ".gate_proj", 0),
++    ]
++
++    # Regex for fused QKV in vision/audio towers.
++    # Vision: *.self_attn.{q,k,v}_proj.*  Audio: *.attn.{q,k,v}_proj.*
++    _RE_TOWER_QKV = re.compile(
++        r"(.+\.(?:self_attn|attn))\.(q_proj|k_proj|v_proj)\.(.*)"
++    )
++    # Regex for fused GateUp in the vision tower MLP.
++    _RE_TOWER_GATE_UP = re.compile(r"(.+\.mlp)\.(gate_proj|up_proj)\.(.*)")
++
++    _RE_AUDIO_LAYER = re.compile(r"(audio_tower)\.layers\.(\d+)\.(.*)")
++
++    @staticmethod
++    def _remap_audio_tower_name(name: str) -> str:
++        """Remap audio tower checkpoint names to our module tree.
++
++        Checkpoint naming (``layers``, ``self_attn``, ``feed_forward1/2``, etc.)
++        differs from our module tree (``conformer``, ``attention.attn``,
++        ``ffw_layer_start/end``, etc.).  Applied before ``_remap_tower_name``.
++        """
++        if "audio_tower." not in name:
++            return name
++
++        # SSCP conv block: layer0/layer1 → conv_0/conv_1
++        name = name.replace(
++            "subsample_conv_projection.layer0.",
++            "subsample_conv_projection.conv_0.",
++        )
++        name = name.replace(
++            "subsample_conv_projection.layer1.",
++            "subsample_conv_projection.conv_1.",
++        )
++
++        # Conformer layers: audio_tower.layers.{i} → audio_tower.conformer.{i}
++        m = Gemma4ForConditionalGeneration._RE_AUDIO_LAYER.match(name)
++        if m:
++            tower, layer_idx, suffix = m.groups()
++
++            # Order matters: more specific patterns first.
++            # relative_k_proj → relative_position_embedding.pos_proj
++            suffix = suffix.replace(
++                "self_attn.relative_k_proj.",
++                "attention.attn.relative_position_embedding.pos_proj.",
++            )
++            # self_attn.post → attention.post (the output projection)
++            suffix = suffix.replace("self_attn.post.", "attention.post.")
++            # general self_attn → attention.attn
++            suffix = suffix.replace("self_attn.", "attention.attn.")
++            # norms
++            suffix = suffix.replace("norm_pre_attn.", "attention.pre_attn_norm.")
++            suffix = suffix.replace("norm_post_attn.", "attention.post_norm.")
++            suffix = suffix.replace("norm_out.", "norm.")
++            # feed-forward blocks
++            suffix = suffix.replace("feed_forward1.", "ffw_layer_start.")
++            suffix = suffix.replace("feed_forward2.", "ffw_layer_end.")
++
++            name = f"{tower}.conformer.{layer_idx}.{suffix}"
++
++        return name
++
++    @staticmethod
++    def _remap_tower_name(name: str, params_dict: dict) -> str:
++        """Remap a vision/audio tower checkpoint name to our module tree.
++
++        Three transformations, applied in order:
++
++        1. **Fused QKV** — ``{q,k,v}_proj.*`` → ``qkv.*``
++           Weight/bias are redirected into the fused ``qkv.{proj}.{attr}``
++           namespace (stacked-params then merges them into ``qkv_proj``).
++           Clip buffers are split: ``input_*`` → shared ``qkv.input_*``,
++           ``output_*`` → per-projection ``qkv.{q,k,v}_output_*``.
++
++        2. **Fused GateUp** — ``{gate,up}_proj.*`` → ``gate_up.*``
++           Same pattern as QKV.
++
++        3. **Clippable wrapper** — ``*.weight``/``*.bias`` → ``*.linear.weight``
++           Catches the remaining (non-fused) clippable linears whose inner
++           ``RowParallelLinear``/``ColumnParallelLinear`` lives at ``.linear``.
++           Falls back to the original name when ``.linear.`` does not exist
++           in ``params_dict`` (plain linears, norms, conv weights, etc.).
++        """
++        # Step 1: fused QKV
++        m = Gemma4ForConditionalGeneration._RE_TOWER_QKV.match(name)
++        if m:
++            pfx, proj, attr = m.groups()
++            if attr in ("weight", "bias", "linear.weight", "linear.bias"):
++                bare_attr = attr.rsplit(".", 1)[-1]
++                return f"{pfx}.qkv.{proj}.{bare_attr}"
++            if attr.startswith("output_"):
++                return f"{pfx}.qkv.{proj[0]}_{attr}"
++            if attr.startswith("input_"):
++                return f"{pfx}.qkv.{attr}"
++
++        # Step 2: fused GateUp
++        m = Gemma4ForConditionalGeneration._RE_TOWER_GATE_UP.match(name)
++        if m:
++            pfx, proj, attr = m.groups()
++            short = proj.split("_")[0]  # "gate" or "up"
++            if attr in ("weight", "bias", "linear.weight", "linear.bias"):
++                bare_attr = attr.rsplit(".", 1)[-1]
++                return f"{pfx}.gate_up.{proj}.{bare_attr}"
++            if attr.startswith("output_"):
++                return f"{pfx}.gate_up.{short}_{attr}"
++            if attr.startswith("input_"):
++                return f"{pfx}.gate_up.{attr}"
++
++        # Step 3: clippable wrapper (.weight → .linear.weight)
++        if name.endswith(".weight") or name.endswith(".bias"):
++            base, attr = name.rsplit(".", 1)
++            alt = f"{base}.linear.{attr}"
++            if alt in params_dict:
++                return alt
++
++        return name
++
++    def _get_k_eq_v_layers(self) -> set:
++        """Return set of layer indices where attention_k_eq_v applies (full-attention layers)."""
++        text_config = self.config.text_config
++        if not getattr(text_config, "attention_k_eq_v", False):
++            return set()
++        return {
++            i for i, lt in enumerate(text_config.layer_types) if lt == "full_attention"
++        }
++
++    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
++        k_eq_v_layers = self._get_k_eq_v_layers()
++
++        from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
++
++        num_experts = getattr(self.config.text_config, "num_experts", 0) or 0
++
++        # Per-expert mapping for AWQ/GPTQ checkpoints (experts.0.gate_proj.qweight)
++        per_expert_params_mapping = (
++            FusedMoE.make_expert_params_mapping(
++                ckpt_gate_proj_name="gate_proj",
++                ckpt_down_proj_name="down_proj",
++                ckpt_up_proj_name="up_proj",
++                num_experts=num_experts,
++            )
++            if num_experts > 0
++            else []
++        )
++
++        # Fused mapping for BF16 checkpoints (experts.gate_up_proj [E, 2*I, H])
++        expert_params_mapping = [
++            ("experts.w13_weight", "experts.gate_up_proj", ("w1", "w3")),
++            ("experts.w2_weight", "experts.down_proj", ("w2",)),
++        ]
++
++        params_dict = dict(self.named_parameters())
++        params_dict.update(dict(self.named_buffers()))
++        non_persistent_buffers: Set[str] = set()
++        for mod_name, mod in self.named_modules():
++            for buf_name in getattr(mod, "_non_persistent_buffers_set", set()):
++                full = f"{mod_name}.{buf_name}" if mod_name else buf_name
++                non_persistent_buffers.add(full)
++
++        loaded_params: Set[str] = set()
++
++        for name, loaded_weight in weights:
++            if "embed_vision.embedding." in name or "embed_audio.embedding." in name:
++                continue
++            if self.audio_tower is None and (
++                "audio_tower." in name or "embed_audio." in name
++            ):
++                continue
++
++            name = re.sub(r"^model\.", "", name)
++
++            # HF has router.per_expert_scale and experts.* on the decoder layer;
++            # remap into our moe.* subtree since Gemma4MoE owns both.
++            name = name.replace(".router.per_expert_scale", ".moe.per_expert_scale")
++            if ".experts." in name and ".moe.experts." not in name:
++                name = name.replace(".experts.", ".moe.experts.")
++
++            # Remap audio tower checkpoint names to our module tree
++            if "audio_tower." in name:
++                name = self._remap_audio_tower_name(name)
++
++            # Remap vision / audio tower names (fused QKV/GateUp, clippable wrappers)
++            if "vision_tower." in name or "audio_tower." in name:
++                name = self._remap_tower_name(name, params_dict)
++
++            # attention_k_eq_v: full-attention layers have no v_proj in the
++            # checkpoint (K and V share weights).  When we see a k_proj weight
++            # for one of these layers, load it into both the "k" and "v" shards
++            # of the fused QKV so the forward produces v_raw == k_raw.
++            should_dup_k_to_v = (
++                ".k_proj." in name
++                and k_eq_v_layers
++                and "language_model." in name
++                and (m := re.search(r"layers\.(\d+)\.", name)) is not None
++                and int(m.group(1)) in k_eq_v_layers
++            )
++
++            # Per-expert AWQ/GPTQ weights (experts.0.gate_proj.qweight → fused w13)
++            orig_name = name
++            handled = False
++            for param_name, weight_name, expert_id, shard_id in per_expert_params_mapping:
++                if weight_name not in orig_name:
++                    continue
++                ename = orig_name.replace(weight_name, param_name)
++                if ename not in params_dict:
++                    continue
++                param = params_dict[ename]
++                weight_loader = param.weight_loader
++                weight_loader(param, loaded_weight, ename, shard_id, expert_id)
++                loaded_params.add(ename)
++                handled = True
++                break
++            if handled:
++                continue
++
++            # Fused BF16 expert weights (experts.gate_up_proj → w13_weight)
++            for param_name, weight_name, shard_ids in expert_params_mapping:
++                name = orig_name
++                if weight_name not in name:
++                    continue
++                name = name.replace(weight_name, param_name)
++                if name not in params_dict:
++                    continue
++                param = params_dict[name]
++                weight_loader = param.weight_loader
++                for i in range(num_experts):
++                    chunks = loaded_weight[i].chunk(len(shard_ids), dim=0)
++                    for chunk, sid in zip(chunks, shard_ids):
++                        weight_loader(param, chunk, name, sid, i)
++                break
++            else:
++                for param_name, weight_name, shard_id in self.stacked_params_mapping:
++                    name = orig_name
++                    if weight_name not in name:
++                        continue
++                    name = name.replace(weight_name, param_name)
++                    if name not in params_dict:
++                        continue
++                    param = params_dict[name]
++                    weight_loader = param.weight_loader
++                    weight_loader(param, loaded_weight, shard_id)
++                    if should_dup_k_to_v:
++                        weight_loader(param, loaded_weight, "v")
++                    break
++                else:
++                    name = orig_name
++                    if name.endswith(".bias") and name not in params_dict:
++                        continue
++                    name = maybe_remap_kv_scale_name(name, params_dict)
++                    if name is None:
++                        continue
++                    if name not in params_dict:
++                        continue
++                    param = params_dict[name]
++                    weight_loader = getattr(
++                        param, "weight_loader", default_weight_loader
++                    )
++                    weight_loader(param, loaded_weight)
++            loaded_params.add(name)
++        unloaded_params = params_dict.keys() - loaded_params
++        if unloaded_params:
++            param_names = set(dict(self.named_parameters()).keys())
++            buckets = {
++                logging.WARNING: (
++                    "Some weights are not initialized from checkpoints",
++                    lambda p: p in param_names,
++                ),
++                logging.INFO: (
++                    "Persistent buffers not in checkpoint (using default init)",
++                    lambda p: p not in param_names and p not in non_persistent_buffers,
++                ),
++                logging.DEBUG: (
++                    "Non-persistent buffers not in checkpoint (expected)",
++                    lambda p: p in non_persistent_buffers,
++                ),
++            }
++            for level, (msg, pred) in buckets.items():
++                names = sorted(p for p in unloaded_params if pred(p))
++                if names:
++                    logger.log(level, "%s: %s", msg, names)
++        # Debug: log loading stats
++        total_params = set(params_dict.keys()) - non_persistent_buffers
++        logger.info(f"[DEBUG] Loaded {len(loaded_params)}/{len(total_params)} params. "
++                    f"Unloaded: {len(total_params - loaded_params)}")
++        unloaded = total_params - loaded_params
++        if unloaded:
++            expert_unloaded = [p for p in unloaded if 'expert' in p]
++            other_unloaded = [p for p in unloaded if 'expert' not in p]
++            if expert_unloaded:
++                logger.warning(f"[DEBUG] {len(expert_unloaded)} expert params NOT loaded! Examples: {sorted(expert_unloaded)[:3]}")
++            if other_unloaded:
++                logger.warning(f"[DEBUG] {len(other_unloaded)} non-expert params NOT loaded: {sorted(other_unloaded)[:5]}")
++
++        return loaded_params
++
++    lora_pattern = re.compile(
++        r"^language_model\.layers\.(\d+)\.(?:self_attn|mlp)\.(?:qkv_proj|o_proj|down_proj|gate_up_proj)"
++    )
++
++    def should_apply_lora(self, module_name: str) -> bool:
++        return bool(self.lora_pattern.match(module_name))
++
++    def get_hidden_dim(self, module_name, layer_idx):
++        # return input_dim, output_dim
++        if module_name == "qkv_proj":
++            return (
++                self.config.hidden_size,
++                self.config.head_dim
++                * (
++                    self.config.num_attention_heads
++                    + self.config.num_key_value_heads * 2
++                ),
++            )
++        elif module_name == "o_proj":
++            return (
++                self.config.head_dim * self.config.num_attention_heads,
++                self.config.hidden_size,
++            )
++        elif module_name == "gate_up_proj":
++            assert len(set(self.config.intermediate_size)) == 1, (
++                "Currently SGLang requires uniform intermediate size for all layers. "
++                "Please file an issue if you need support for non-uniform intermediate sizes."
++            )
++            return self.config.hidden_size, self.config.intermediate_size[0] * 2
++        elif module_name == "down_proj":
++            assert len(set(self.config.intermediate_size)) == 1, (
++                "Currently SGLang requires uniform intermediate size for all layers. "
++                "Please file an issue if you need support for non-uniform intermediate sizes."
++            )
++            return self.config.intermediate_size[0], self.config.hidden_size
++        else:
++            raise NotImplementedError()
++
++
++EntryClass = Gemma4ForConditionalGeneration
+--- /dev/null	2026-04-04 12:35:46.219885937 -0700
++++ b/python/sglang/srt/models/gemma4_vision.py	2026-04-17 01:41:06.366227628 -0700
+@@ -0,0 +1,599 @@
++# Copyright 2025 SGLang Team
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++# ==============================================================================
++from __future__ import annotations
++
++from typing import Optional, Tuple
++
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
++from einops import rearrange
++from transformers import Gemma4VisionConfig
++
++from sglang.srt.layers.attention.vision import QKV_BACKEND_IMPL
++from sglang.srt.layers.clippable_linear import (
++    ClippableGateUpParallelLinear,
++    ClippableQKVParallelLinear,
++    ClippableRowParallelLinear,
++)
++from sglang.srt.layers.dp_attention import get_attention_tp_size
++from sglang.srt.layers.layernorm import Gemma4RMSNorm
++from sglang.srt.layers.quantization.base_config import QuantizationConfig
++from sglang.srt.utils import add_prefix, get_device_capability, is_cuda, is_hip
++
++# ---------------------------------------------------------------------------
++# 2-D Multidimensional RoPE (matches HF Gemma4RotaryEmbedding for vision)
++# ---------------------------------------------------------------------------
++
++
++def _rotate_half(x: torch.Tensor) -> torch.Tensor:
++    x1 = x[..., : x.shape[-1] // 2]
++    x2 = x[..., x.shape[-1] // 2 :]
++    return torch.cat((-x2, x1), dim=-1)
++
++
++def _apply_rotary(
++    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
++) -> torch.Tensor:
++    return (x * cos) + (_rotate_half(x) * sin)
++
++
++class Gemma4VisionRotaryEmbedding(nn.Module):
++    """Compute 2-D multidimensional RoPE cos/sin for patch positions."""
++
++    def __init__(self, config: Gemma4VisionConfig):
++        super().__init__()
++        self.head_dim = config.head_dim
++        self.rope_theta: float = config.rope_parameters["rope_theta"]
++
++    @torch.no_grad()
++    def forward(
++        self, x: torch.Tensor, patch_positions: torch.Tensor
++    ) -> Tuple[torch.Tensor, torch.Tensor]:
++        """
++        Args:
++            x: [batch, seq, hidden] – only used for device/dtype.
++            patch_positions: [batch, num_patches, 2] – (x, y) coordinates.
++        Returns:
++            (cos, sin) each of shape [batch, num_patches, head_dim].
++        """
++        ndim = patch_positions.shape[-1]  # 2
++        head_dim_per_dim = self.head_dim // ndim
++
++        all_embs = []
++        for d in range(ndim):
++            dim_inv_freq = 1.0 / (
++                self.rope_theta
++                ** (
++                    torch.arange(
++                        0, head_dim_per_dim, 2, device=x.device, dtype=torch.float
++                    )
++                    / head_dim_per_dim
++                )
++            )
++            dim_inv_freq_expanded = dim_inv_freq[None, :, None].expand(
++                patch_positions.shape[0], -1, 1
++            )
++            dim_positions = patch_positions[:, :, d].float()
++            dim_positions_expanded = dim_positions[:, None, :]
++
++            dim_freqs = (dim_inv_freq_expanded @ dim_positions_expanded).transpose(1, 2)
++            dim_emb = torch.cat((dim_freqs, dim_freqs), dim=-1)
++            all_embs.append(dim_emb)
++
++        emb = torch.cat(all_embs, dim=-1)
++        cos = emb.cos().to(dtype=x.dtype)
++        sin = emb.sin().to(dtype=x.dtype)
++        return cos, sin
++
++
++def _apply_multidimensional_rope(
++    x: torch.Tensor,
++    cos: torch.Tensor,
++    sin: torch.Tensor,
++) -> torch.Tensor:
++    """Apply 2-D RoPE to x of shape [batch*seq, heads, head_dim].
++
++    cos/sin have shape [batch, seq, head_dim]. We split along head_dim into
++    ndim=2 parts and apply standard rotary to each independently.
++    """
++    ndim = 2
++    chunk_size = x.shape[-1] // ndim
++    x_parts = x.split(chunk_size, dim=-1)
++    cos_parts = cos.split(chunk_size, dim=-1)
++    sin_parts = sin.split(chunk_size, dim=-1)
++    y_parts = [
++        _apply_rotary(x_parts[k], cos_parts[k], sin_parts[k]) for k in range(ndim)
++    ]
++    return torch.cat(y_parts, dim=-1)
++
++
++# ---------------------------------------------------------------------------
++# Vision Attention (TP-sharded, fused QKV)
++# ---------------------------------------------------------------------------
++
++
++class Gemma4VisionAttention(nn.Module):
++    """Multi-head attention for the Gemma 4 vision encoder.
++
++    QKV uses a fused ``ClippableQKVParallelLinear`` for efficient matmul with
++    per-projection clip bounds.  Output projection uses ``ClippableLinear``.
++    """
++
++    def __init__(
++        self,
++        config: Gemma4VisionConfig,
++        quant_config: Optional[QuantizationConfig] = None,
++        prefix: str = "",
++    ):
++        super().__init__()
++        self.head_dim = config.head_dim
++
++        tp_size = get_attention_tp_size()
++        self.num_heads_per_partition = config.num_attention_heads // tp_size
++        self.num_kv_heads_per_partition = config.num_key_value_heads // tp_size
++
++        self.qkv = ClippableQKVParallelLinear(
++            hidden_size=config.hidden_size,
++            head_size=config.head_dim,
++            total_num_heads=config.num_attention_heads,
++            total_num_kv_heads=config.num_key_value_heads,
++            bias=config.attention_bias,
++            quant_config=quant_config,
++            prefix=prefix,
++        )
++        self.o_proj = ClippableRowParallelLinear(
++            input_size=config.num_attention_heads * config.head_dim,
++            output_size=config.hidden_size,
++            bias=config.attention_bias,
++            quant_config=quant_config,
++            prefix=add_prefix("o_proj", prefix),
++        )
++
++        self.q_norm = Gemma4RMSNorm(self.head_dim, eps=config.rms_norm_eps)
++        self.k_norm = Gemma4RMSNorm(self.head_dim, eps=config.rms_norm_eps)
++        self.v_norm = Gemma4RMSNorm(
++            self.head_dim, eps=config.rms_norm_eps, scale_shift=0.0, with_scale=False
++        )
++
++        backend = self._select_backend()
++        self.qkv_backend = QKV_BACKEND_IMPL[backend](
++            head_dim=config.head_dim,
++            num_heads=self.num_heads_per_partition,
++            num_kv_heads=self.num_kv_heads_per_partition,
++            dropout=0.0,
++            flatten_batch=True,
++            softmax_in_single_precision=False,
++            softmax_scale=1.0,
++        )
++
++    @staticmethod
++    def _select_backend() -> str:
++        """Mirror VisionAttention._determine_attention_backend for consistency."""
++        from sglang.srt.server_args import get_global_server_args
++
++        override = get_global_server_args().mm_attention_backend
++        if override is not None:
++            return override
++        if is_cuda():
++            major, _ = get_device_capability()
++            if major == 9:
++                from sglang.srt.utils import is_blackwell_supported
++
++                if is_blackwell_supported():
++                    return "triton_attn"
++                return "fa3"
++            return "triton_attn"
++        if is_hip():
++            # RDNA4: triton_attn crashes with HSA exception in vision encoder.
++            # Use sdpa instead. May have issues with multi-image/video flatten_batch.
++            return "sdpa"
++        return "sdpa"
++
++    def forward(
++        self,
++        hidden_states: torch.Tensor,
++        cos: torch.Tensor,
++        sin: torch.Tensor,
++        attention_mask: Optional[torch.Tensor] = None,
++    ) -> torch.Tensor:
++        bsz, seq_len, _ = hidden_states.shape
++
++        q, k, v = self.qkv(hidden_states)
++
++        q = q.reshape(bsz * seq_len, self.num_heads_per_partition, self.head_dim)
++        k = k.reshape(bsz * seq_len, self.num_kv_heads_per_partition, self.head_dim)
++        v = v.reshape(bsz * seq_len, self.num_kv_heads_per_partition, self.head_dim)
++
++        q = self.q_norm(q.reshape(-1, self.head_dim)).reshape(q.shape)
++        k = self.k_norm(k.reshape(-1, self.head_dim)).reshape(k.shape)
++        v = self.v_norm(v.reshape(-1, self.head_dim)).reshape(v.shape)
++
++        cos_flat = cos.reshape(bsz * seq_len, 1, self.head_dim)
++        sin_flat = sin.reshape(bsz * seq_len, 1, self.head_dim)
++        q = _apply_multidimensional_rope(q, cos_flat, sin_flat)
++        k = _apply_multidimensional_rope(k, cos_flat, sin_flat)
++
++        if attention_mask is not None:
++            attn_mask_4d = (
++                attention_mask.unsqueeze(-1) * attention_mask.unsqueeze(1)
++            ).unsqueeze(1)
++        else:
++            attn_mask_4d = None
++
++        output = self.qkv_backend.forward(
++            q=q,
++            k=k,
++            v=v,
++            cu_seqlens=None,
++            bsz=bsz,
++            seq_len=seq_len,
++            attention_mask=attn_mask_4d,
++            softmax_scale=1.0,
++        )
++
++        output = rearrange(output, "(b s) h d -> b s (h d)", b=bsz)
++        output = self.o_proj(output)
++        return output
++
++
++# ---------------------------------------------------------------------------
++# Vision MLP (GatedGELU, TP-sharded)
++# ---------------------------------------------------------------------------
++
++
++class Gemma4VisionMLP(nn.Module):
++    def __init__(
++        self,
++        config: Gemma4VisionConfig,
++        quant_config: Optional[QuantizationConfig] = None,
++        prefix: str = "",
++    ):
++        super().__init__()
++        if config.hidden_activation != "gelu_pytorch_tanh":
++            raise ValueError(
++                f"Gemma4VisionMLP expects hidden_activation='gelu_pytorch_tanh', "
++                f"got {config.hidden_activation!r}"
++            )
++        self.gate_up = ClippableGateUpParallelLinear(
++            input_size=config.hidden_size,
++            intermediate_size=config.intermediate_size,
++            bias=False,
++            quant_config=quant_config,
++            prefix=prefix,
++        )
++        self.down_proj = ClippableRowParallelLinear(
++            input_size=config.intermediate_size,
++            output_size=config.hidden_size,
++            bias=False,
++            quant_config=quant_config,
++            prefix=add_prefix("down_proj", prefix),
++        )
++
++    def forward(self, x: torch.Tensor) -> torch.Tensor:
++        gate, up = self.gate_up(x)
++        x = F.gelu(gate, approximate="tanh") * up
++        x = self.down_proj(x)
++        return x
++
++
++# ---------------------------------------------------------------------------
++# Encoder Layer
++# ---------------------------------------------------------------------------
++
++
++class Gemma4VisionEncoderLayer(nn.Module):
++    def __init__(
++        self,
++        config: Gemma4VisionConfig,
++        layer_idx: int,
++        quant_config: Optional[QuantizationConfig] = None,
++        prefix: str = "",
++    ):
++        super().__init__()
++        self.self_attn = Gemma4VisionAttention(
++            config,
++            quant_config=quant_config,
++            prefix=add_prefix("self_attn", prefix),
++        )
++        self.mlp = Gemma4VisionMLP(
++            config,
++            quant_config=quant_config,
++            prefix=add_prefix("mlp", prefix),
++        )
++        eps = config.rms_norm_eps
++        hs = config.hidden_size
++        self.input_layernorm = Gemma4RMSNorm(hs, eps=eps)
++        self.post_attention_layernorm = Gemma4RMSNorm(hs, eps=eps)
++        self.pre_feedforward_layernorm = Gemma4RMSNorm(hs, eps=eps)
++        self.post_feedforward_layernorm = Gemma4RMSNorm(hs, eps=eps)
++
++        self.register_buffer("layer_scalar", torch.ones(()))
++
++    def forward(
++        self,
++        hidden_states: torch.Tensor,
++        cos: torch.Tensor,
++        sin: torch.Tensor,
++        attention_mask: Optional[torch.Tensor] = None,
++    ) -> torch.Tensor:
++        residual = hidden_states
++        hidden_states = self.input_layernorm(hidden_states)
++        hidden_states = self.self_attn(hidden_states, cos, sin, attention_mask)
++        hidden_states = self.post_attention_layernorm(hidden_states)
++        hidden_states = residual + hidden_states
++
++        residual = hidden_states
++        hidden_states = self.pre_feedforward_layernorm(hidden_states)
++        hidden_states = self.mlp(hidden_states)
++        hidden_states = self.post_feedforward_layernorm(hidden_states)
++        hidden_states = residual + hidden_states
++
++        hidden_states = hidden_states * self.layer_scalar
++        return hidden_states
++
++
++# ---------------------------------------------------------------------------
++# Vision Transformer (stack of encoder layers + RoPE)
++# ---------------------------------------------------------------------------
++
++
++class Gemma4VisionTransformer(nn.Module):
++    def __init__(
++        self,
++        config: Gemma4VisionConfig,
++        quant_config: Optional[QuantizationConfig] = None,
++        prefix: str = "",
++    ):
++        super().__init__()
++        self.config = config
++        self.rotary_emb = Gemma4VisionRotaryEmbedding(config)
++        self.layers = nn.ModuleList(
++            [
++                Gemma4VisionEncoderLayer(
++                    config,
++                    layer_idx=i,
++                    quant_config=quant_config,
++                    prefix=add_prefix(f"layers.{i}", prefix),
++                )
++                for i in range(config.num_hidden_layers)
++            ]
++        )
++
++    def forward(
++        self,
++        inputs_embeds: torch.Tensor,
++        attention_mask: torch.Tensor,
++        patch_positions: torch.Tensor,
++    ) -> torch.Tensor:
++        """
++        Args:
++            inputs_embeds: [batch, seq, hidden_size]
++            attention_mask: [batch, seq] — True = valid token
++            patch_positions: [batch, seq, 2]
++        Returns:
++            last_hidden_state: [batch, seq, hidden_size]
++        """
++        cos, sin = self.rotary_emb(inputs_embeds, patch_positions)
++        hidden_states = inputs_embeds
++        for layer in self.layers:
++            hidden_states = layer(hidden_states, cos, sin, attention_mask)
++        return hidden_states
++
++
++# ---------------------------------------------------------------------------
++# Patch Embedder
++# ---------------------------------------------------------------------------
++
++
++class Gemma4VisionPatchEmbedder(nn.Module):
++    def __init__(self, config: Gemma4VisionConfig):
++        super().__init__()
++        self.patch_size = config.patch_size
++        self.hidden_size = config.hidden_size
++        self.position_embedding_size = config.position_embedding_size
++
++        self.input_proj = nn.Linear(
++            3 * self.patch_size**2, self.hidden_size, bias=False
++        )
++        self.position_embedding_table = nn.Parameter(
++            torch.ones(2, self.position_embedding_size, self.hidden_size)
++        )
++
++    def _position_embeddings(
++        self, patch_positions: torch.Tensor, padding_positions: torch.Tensor
++    ) -> torch.Tensor:
++        clamped_positions = patch_positions.clamp(min=0)
++        one_hot = F.one_hot(clamped_positions, num_classes=self.position_embedding_size)
++        one_hot = one_hot.permute(0, 2, 1, 3).to(self.position_embedding_table)
++        position_embeddings = one_hot @ self.position_embedding_table
++        position_embeddings = position_embeddings.sum(dim=1)
++        position_embeddings = torch.where(
++            padding_positions.unsqueeze(-1), 0.0, position_embeddings
++        )
++        return position_embeddings
++
++    def _patch_projection(self, pixel_values: torch.Tensor) -> torch.Tensor:
++        """Project pre-patchified pixels into model space.
++
++        Args:
++            pixel_values: [batch, num_patches, patch_pixels] — already patchified
++                          by the image processor, values in [0, 1].
++        """
++        patches = 2 * (pixel_values - 0.5)
++        return self.input_proj(patches.to(self.input_proj.weight.dtype))
++
++    def forward(
++        self,
++        pixel_values: torch.Tensor,
++        pixel_position_ids: torch.Tensor,
++        padding_positions: torch.Tensor,
++    ) -> torch.Tensor:
++        """Compute patch embeddings with positional information.
++
++        Args:
++            pixel_values: [batch, num_patches, patch_pixels] — pre-patchified.
++            pixel_position_ids: [batch, num_patches, 2] — (x, y) positions,
++                                -1 for padding patches.
++            padding_positions: [batch, num_patches] — True for padding patches.
++        """
++        hidden_states = self._patch_projection(pixel_values)
++        position_embeddings = self._position_embeddings(
++            pixel_position_ids, padding_positions
++        )
++        return hidden_states + position_embeddings
++
++
++# ---------------------------------------------------------------------------
++# Pooler
++# ---------------------------------------------------------------------------
++
++
++class Gemma4VisionPooler(nn.Module):
++    def __init__(self, config: Gemma4VisionConfig):
++        super().__init__()
++        self.hidden_size = config.hidden_size
++        self.root_hidden_size = self.hidden_size**0.5
++
++    def _avg_pool_by_positions(
++        self, x: torch.Tensor, patch_positions: torch.Tensor, length: int
++    ) -> Tuple[torch.Tensor, torch.Tensor]:
++        input_seq_len = x.shape[1]
++        k = int((input_seq_len // length) ** 0.5)
++        k_squared = k**2
++        if k_squared * length != input_seq_len:
++            raise ValueError(
++                f"Cannot pool {x.shape} to {length}: {k=}^2 times {length=} must be {input_seq_len}."
++            )
++        clamped_positions = patch_positions.clamp(min=0)
++        max_x = clamped_positions[..., 0].max(dim=-1, keepdim=True)[0] + 1
++        kernel_idxs = torch.div(clamped_positions, k, rounding_mode="floor")
++        kernel_idxs = kernel_idxs[..., 0] + (max_x // k) * kernel_idxs[..., 1]
++
++        weights = F.one_hot(kernel_idxs.long(), length).float() / k_squared
++        output = weights.transpose(1, 2).to(x.dtype) @ x
++        mask = torch.logical_not((weights == 0).all(dim=1))
++        return output, mask
++
++    def forward(
++        self,
++        hidden_states: torch.Tensor,
++        patch_positions: torch.Tensor,
++        padding_positions: torch.Tensor,
++        output_length: Optional[int] = None,
++    ) -> Tuple[torch.Tensor, torch.Tensor]:
++        """
++        Returns:
++            (pooled_hidden_states, mask) where mask is True for valid tokens.
++        """
++        if output_length is None:
++            raise ValueError("output_length is required for Gemma4VisionPooler")
++        if output_length > hidden_states.shape[1]:
++            raise ValueError(
++                f"Cannot output more soft tokens (requested {output_length}) than there are patches"
++                f" ({hidden_states.shape[1]}). Change the value of `num_soft_tokens` when processing."
++            )
++        length = output_length
++        if isinstance(length, (list, tuple)):
++            length = length[0]
++        if hidden_states.shape[1] == length:
++            mask = padding_positions
++        else:
++            hidden_states, mask = self._avg_pool_by_positions(
++                hidden_states, patch_positions, length
++            )
++        hidden_states = hidden_states * self.root_hidden_size
++        return hidden_states, mask
++
++
++# ---------------------------------------------------------------------------
++# Top-level Vision Encoder (patch_embedder → transformer → pooler)
++# ---------------------------------------------------------------------------
++
++
++class Gemma4VisionEncoder(nn.Module):
++    """Drop-in replacement for HF ``Gemma4VisionEncoder`` with TP support."""
++
++    def __init__(
++        self,
++        config: Gemma4VisionConfig,
++        quant_config: Optional[QuantizationConfig] = None,
++        prefix: str = "",
++    ):
++        super().__init__()
++        self.config = config
++        self.patch_size = config.patch_size
++        self.pooling_kernel_size = config.pooling_kernel_size
++
++        self.patch_embedder = Gemma4VisionPatchEmbedder(config)
++        self.encoder = Gemma4VisionTransformer(
++            config,
++            quant_config=quant_config,
++            prefix=add_prefix("encoder", prefix),
++        )
++        self.pooler = Gemma4VisionPooler(config)
++
++        # Post-pooling standardization (normalizes vision tokens before projection)
++        self.standardize = getattr(config, "standardize", False)
++        if self.standardize:
++            self.register_buffer("std_bias", torch.zeros(config.hidden_size))
++            self.register_buffer("std_scale", torch.ones(config.hidden_size))
++
++    @property
++    def device(self) -> torch.device:
++        return self.patch_embedder.input_proj.weight.device
++
++    def forward(
++        self,
++        pixel_values: torch.Tensor,
++        pixel_position_ids: torch.Tensor,
++    ) -> Tuple[torch.Tensor, torch.Tensor]:
++        """Encode pre-patchified pixel_values into soft tokens.
++
++        Args:
++            pixel_values: [batch, num_patches, patch_pixels] — pre-patchified
++                          by the image processor.
++            pixel_position_ids: [batch, num_patches, 2] — (x, y) positions,
++                                -1 for padding patches.
++
++        Returns:
++            (hidden_states, pooler_mask) — hidden_states [batch, output_len, hidden],
++            pooler_mask [batch, output_len] True = valid.
++        """
++        k2 = self.pooling_kernel_size * self.pooling_kernel_size
++        output_length = pixel_values.shape[-2] // k2
++
++        padding_positions = (pixel_position_ids == -1).all(dim=-1)
++
++        inputs_embeds = self.patch_embedder(
++            pixel_values, pixel_position_ids, padding_positions
++        )
++
++        last_hidden = self.encoder(
++            inputs_embeds=inputs_embeds,
++            attention_mask=~padding_positions,
++            patch_positions=pixel_position_ids,
++        )
++
++        pooled, pooler_mask = self.pooler(
++            last_hidden,
++            pixel_position_ids,
++            padding_positions,
++            output_length=output_length,
++        )
++
++        if self.standardize:
++            pooled = (pooled - self.std_bias) * self.std_scale
++
++        return pooled, pooler_mask
+--- /dev/null	2026-04-04 12:35:46.219885937 -0700
++++ b/python/sglang/srt/multimodal/processors/gemma4.py	2026-04-17 01:30:30.478061083 -0700
+@@ -0,0 +1,145 @@
++# Copyright 2025 SGLang Team
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++# ==============================================================================
++
++from typing import Dict, List, Optional, Union
++
++import numpy as np
++import torch
++
++from sglang.srt.managers.multimodal_processor import (
++    BaseMultimodalProcessor as SGLangBaseProcessor,
++)
++from sglang.srt.managers.schedule_batch import Modality, MultimodalProcessorOutput
++from sglang.srt.models.gemma4_audio import _SSCP_CONV_STRIDE_SIZES
++from sglang.srt.models.gemma4_mm import Gemma4ForConditionalGeneration
++from sglang.srt.multimodal.processors.base_processor import MultimodalSpecialTokens
++from sglang.srt.utils.video_decoder import VideoDecoderWrapper
++
++
++class Gemma4SGLangProcessor(SGLangBaseProcessor):
++    """Multimodal processor for Gemma4 supporting image, video, and audio inputs."""
++
++    models = [Gemma4ForConditionalGeneration]
++
++    def __init__(self, hf_config, server_args, _processor, *args, **kwargs):
++        super().__init__(hf_config, server_args, _processor, *args, **kwargs)
++
++        self.IM_START_TOKEN_ID = hf_config.boi_token_id
++        self.IM_END_TOKEN_ID = hf_config.eoi_token_id
++
++        self.AUDIO_START_TOKEN_ID = hf_config.boa_token_id
++        self.AUDIO_END_TOKEN_ID = hf_config.eoa_token_id
++        self.mm_tokens = MultimodalSpecialTokens(
++            image_token_id=hf_config.image_token_id,
++            video_token_id=hf_config.video_token_id,
++            audio_token_id=hf_config.audio_token_id,
++        ).build(_processor)
++
++        # Register image-processor and video-processor outputs so they are stored on
++        # MultimodalDataItem via collect_mm_items_from_processor_output.
++        self.ATTR_NAME_TO_MODALITY["image_position_ids"] = Modality.IMAGE
++        self.ATTR_NAME_TO_MODALITY["video_position_ids"] = Modality.VIDEO
++
++    def _get_audio_pad_multiple(self) -> int:
++        """Derive the waveform padding alignment from processor config.
++
++        The HF processor's ceil(duration_ms / audio_ms_per_token) formula can
++        overshoot by 1 token relative to what the SSCP convolutions produce.
++        Padding waveforms to a multiple of (hop_length * first_conv_stride)
++        aligns the two calculations.
++        See: gemma-4-eap-extras/examples/gemma-4-audio-examples.ipynb
++        """
++        fe = getattr(self._processor, "feature_extractor", None)
++        hop = getattr(fe, "hop_length", 160)
++        first_stride = _SSCP_CONV_STRIDE_SIZES[0][0]
++        return hop * first_stride
++
++    def _video_decoder_to_tensor(self, vdw: VideoDecoderWrapper) -> torch.Tensor:
++        """Convert a VideoDecoderWrapper to a (sampled_frames, C, H, W) uint8 tensor.
++
++        SGLang's load_video returns VideoDecoderWrapper which the HF
++        Gemma4VideoProcessor does not recognise (expects torch.Tensor or
++        np.ndarray).  We replicate HF's uniform frame sampling here to
++        avoid materialising the entire video in memory, then delegate the
++        rest (resize, patchify, position IDs) to the HF video processor.
++        """
++        total = len(vdw)
++        num_frames = getattr(
++            getattr(self._processor, "video_processor", None),
++            "num_frames",
++            32,
++        )
++        if total <= num_frames:
++            indices = list(range(total))
++        else:
++            indices = torch.arange(0, total, total / num_frames).int().tolist()
++        frames_np = vdw.get_frames_at(indices)  # (N, H, W, C)
++        return torch.from_numpy(frames_np).permute(0, 3, 1, 2).contiguous()
++
++    def process_mm_data(
++        self, input_text, images=None, videos=None, audios=None, **kwargs
++    ):
++        if audios:
++            pad_multiple = self._get_audio_pad_multiple()
++            padded = []
++            for a in audios:
++                a = np.asarray(a)
++                remainder = len(a) % pad_multiple
++                if remainder != 0:
++                    a = np.pad(a, (0, pad_multiple - remainder), mode="constant")
++                padded.append(a)
++            audios = padded
++        if videos:
++            videos = [
++                (
++                    self._video_decoder_to_tensor(v)
++                    if isinstance(v, VideoDecoderWrapper)
++                    else v
++                )
++                for v in videos
++            ]
++            kwargs.setdefault("do_sample_frames", False)
++        return super().process_mm_data(
++            input_text, images=images, videos=videos, audios=audios, **kwargs
++        )
++
++    async def process_mm_data_async(
++        self,
++        image_data: Optional[List[Union[str, bytes, Dict]]] = None,
++        audio_data: Optional[List[Union[str, bytes, Dict]]] = None,
++        input_text: str = "",
++        request_obj=None,
++        *args,
++        **kwargs,
++    ):
++        """Process multimodal data including images, video, and audio."""
++        base_output = self.load_mm_data(
++            prompt=input_text,
++            image_data=image_data,
++            video_data=request_obj.video_data if request_obj else None,
++            audio_data=audio_data,
++            multimodal_tokens=self.mm_tokens,
++        )
++
++        mm_items, input_ids, _ = self.process_and_combine_mm_data(
++            base_output, self.mm_tokens
++        )
++
++        return MultimodalProcessorOutput(
++            input_ids=input_ids.tolist(),
++            mm_items=mm_items,
++            im_token_id=self.mm_tokens.image_token_id,
++            video_token_id=self.mm_tokens.video_token_id,
++            audio_token_id=self.mm_tokens.audio_token_id,
++        )

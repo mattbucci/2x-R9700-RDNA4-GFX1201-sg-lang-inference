@@ -43,8 +43,8 @@ ATTN_BACKEND="${ATTN_BACKEND:-triton}"
 OVERLAP="--disable-overlap-schedule"
 WARMUP=""
 WATCHDOG=600
-EXTRA_ARGS=""
-EXTRA_ENV=""
+EXTRA_ARGS="${EXTRA_ARGS:-}"
+EXTRA_ENV="${EXTRA_ENV:-}"
 
 # --- Model presets ---
 apply_preset() {
@@ -79,7 +79,7 @@ apply_preset() {
             # torch_native attention required — triton attention crashes with SWA on RDNA4
             MODEL="${MODEL:-$MODELS_DIR/gemma-4-26B-A4B-it-AWQ-GPTQ-v2-fixed}"
             TOKENIZER="--tokenizer-path $MODELS_DIR/gemma-4-26B-A4B-it-BF16"
-            ATTN_BACKEND="${ATTN_BACKEND:-torch_native}"
+            ATTN_BACKEND="torch_native"
             CTX=4096; MAX_RUNNING=8; CHUNKED=2048
             WARMUP="--skip-server-warmup"; WATCHDOG=1800
             OVERLAP=""
@@ -92,7 +92,7 @@ apply_preset() {
             TOKENIZER="--tokenizer-path $MODELS_DIR/gemma-4-31B-it-BF16"
             QUANT="awq"
             DTYPE="bfloat16"
-            ATTN_BACKEND="${ATTN_BACKEND:-torch_native}"
+            ATTN_BACKEND="torch_native"
             CTX=8192; MAX_RUNNING=8; CHUNKED=4096
             WARMUP="--skip-server-warmup"; WATCHDOG=1800
             OVERLAP=""

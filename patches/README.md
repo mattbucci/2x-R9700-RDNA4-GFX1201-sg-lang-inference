@@ -1,6 +1,6 @@
 # SGLang v0.5.10 RDNA4 Patches
 
-7 patches applied in order on `git checkout v0.5.10`:
+13 patches applied in order on `git checkout v0.5.10`:
 
 ## 001-upstream-sync (3,000 LOC)
 Cherry-picks from upstream main for model support. No RDNA4 changes.
@@ -48,6 +48,35 @@ Model-specific RDNA4 fixes.
 - Qwen3.5: mamba2_cache_params override (tp_world_size=1 for replicated DeltaNet)
 - Devstral/LLaVA: chat template BOS fix, text-only VLM warmup
 - Llama: contiguous QKV for rotary embedding compatibility
+
+## 008-rdna4-compressed-tensors-hip
+Compressed-tensors HIP fallback for AWQ/GPTQ models.
+
+## 009-qwen35-moe-causalLM / 009-rdna4-softcap-fp32
+Qwen3.5 MoE CausalLM shim + softcap FP32 for RDNA4.
+
+## 010-rdna4-gptq-hip-fallback
+GPTQ HIP kernel fallback (gptq_gemm/gptq_shuffle).
+
+## 011-rdna4-triton-attention-fp32
+FP32 accumulation in Triton decode/extend attention for RDNA4 precision.
+
+## 012-rdna4-sliding-window-decode-fix (168 LOC)
+torch_native attention backend SWA (sliding window) support for decode + extend.
+- Cap seq_lens at sliding_window_size for SWA layers
+- Offset into sliding window portion of req_to_token
+- Translate full pool indices to SWA pool via translate_loc_from_full_to_swa
+- Without this fix, torch_native + SWA models crash with HSA exception on any sequence > window_size
+
+## 013-gemma4-multimodal (2,887 LOC)
+Gemma4 multimodal pipeline: vision encoder, audio encoder, multimodal processor.
+- Custom Gemma4VisionEncoder with 2D RoPE, TP-sharded ClippableLinear layers
+- BF16 vision encoder forward (FP16 overflows after 27 transformer layers)
+- BF16 embed_vision projection (prevents inf→NaN in embedding space)
+- Gemma4MultimodalEmbedder (vision/audio → LM embedding projection)
+- Per-expert AWQ weight loading via FusedMoE.make_expert_params_mapping
+- Vision SDPA backend: sdpa (not triton_attn) for ROCm
+- Gemma4SGLangProcessor for image/video/audio multimodal input handling
 
 ## Apply
 
