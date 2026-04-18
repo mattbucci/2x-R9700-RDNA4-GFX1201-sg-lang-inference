@@ -2,6 +2,20 @@
 
 High-throughput LLM inference on AMD Radeon AI PRO R9700 (gfx1201, RDNA4) with ROCm 7.2.
 
+## Current Focus (2026-04-18)
+
+**Primary target: single-user 256K context across all supported models.** Multi-user throughput is a secondary concern. Optimizations that slow batch-32 but improve single-user long-context TPOT are acceptable trades.
+
+**Hard constraint: preserve both thinking and vision during every calibration.** Historical calibrations have silently degraded both capabilities (Qwen3.5 infinite reasoning loop, Devstral vision broken). Every requant must (1) validate an image-text roundtrip, (2) validate a thinking-tagged generation terminates cleanly. No model ships without both green.
+
+### Active work (in priority order)
+
+1. **256K single-user context sweeps** — Measure TPOT at 128 → 256K across every working model. Find KV cache ceilings (FP8 KV on by default) and document OOM points. Primary targets: Devstral-24B (262K), Qwen3.5-27B (256K), Coder-Next 80B (256K), Qwen3.5-35B MoE (256K).
+2. **Thinking + vision aware recalibration pipeline** — Mixed-dataset GPTQ calibration (`AM-Thinking-v1-Distilled` + `LLaVA-Instruct` + domain text). Rebuild Qwen3.5-27B (to stop infinite `<think>` loop) and Gemma4 26B MoE (to preserve vision MM projection + thinking channel).
+3. **Chat template validation harness** — We keep being burned by chat templates (Devstral BOS → `<unk>`, Qwen3.5 thinking tags → infinite loop, Gemma4 thinking per-request flag). Adding a `scripts/eval/validate_chat_template.py` pre-flight that runs on every quantized model before launch.
+4. **Gemma4 reasoning parser (patch 014)** — Landed today (`Gemma4Detector` for `<|channel>` / `<channel|>`). Shipped to 3090 team. Next: verify streaming behavior with `--reasoning-parser gemma4` in a long-context agent workload.
+5. **Triton attention FP32 SWA fix for Gemma4 31B** — Would unlock 17 tok/s from 15. Low-priority vs calibration work — the quality is already correct with `torch_native`.
+
 ## Known Issues
 
 - **Gemma 4 31B Dense** — Working at **15 tok/s** with torch_native attention + Triton GEMV (FP32 dequant). Triton attention degrades at ~400 tokens (known issue, kernels pass in isolation — interaction bug with SGLang SWA pipeline). See [investigation](#gemma-4-31b-dense-investigation).

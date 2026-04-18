@@ -36,3 +36,25 @@ scripts/quantize/quantize_qwen35_moe_ream.sh  # Qwen3.5-35B MoE REAM/REAP AWQ pi
 - **HIP GEMV kernel required** — `scripts/common.sh` sets `LD_LIBRARY_PATH` and `PYTHONPATH`
 - Always source `scripts/common.sh` + `activate_conda` + `setup_rdna4_env` before launching
 - **Model status and benchmarks** are in README.md (single source of truth)
+
+## Working Mode
+
+**Operate autonomously.** The user reads all output and interrupts with feedback — do not stop for confirmation. Multi-hour calibrations and benchmark sweeps are allowed without asking.
+
+**Primary optimization target: single-user 256K context performance** for all models in README. Multi-user throughput is secondary. When tuning, prioritize TPOT at large context over peak batch tok/s.
+
+**Preserve during calibration:** thinking capabilities AND vision/image handling. Past calibrations have silently broken both — validate both on every requant. 3090 team confirmed this pattern. Use thinking-aware datasets (`AM-Thinking-v1-Distilled`, `glaiveai/reasoning-v1-20m`) plus image+text pairs (`LLaVA-Instruct`).
+
+**Clean commits, shared learnings:**
+- Commit + push as progress happens (don't batch).
+- README.md is source of truth: what we've done + current known issues.
+- 3090 team sister repo at `/home/letsrtfm/AI/2x-3090-GA102-300-A1-sglang-inference` — we can read their commits for ideas and push to their README to share learnings.
+
+## Chat Template Rule
+
+Chat templates matter. We've been burned by:
+- Devstral AWQ: BOS token in template produced `<unk>` outputs → custom jinja template fix
+- Gemma4 thinking: requires `{"chat_template_kwargs": {"enable_thinking": true}, "skip_special_tokens": false}` per-request
+- Qwen3.5: thinking tags in template without calibrated thinking data → infinite `<think>` loop
+
+Any new model: inspect its chat template BEFORE launching, check BOS/EOS behavior, verify thinking token handling.
