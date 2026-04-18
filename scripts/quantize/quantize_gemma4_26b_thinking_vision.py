@@ -62,7 +62,7 @@ CT_OUTPUT = os.environ.get(
     "CT_OUTPUT",
     os.path.expanduser("~/AI/models/gemma-4-26B-A4B-it-CT-thinking-vision"),
 )
-NUM_CALIBRATION_SAMPLES = int(os.environ.get("NUM_SAMPLES", "384"))
+NUM_CALIBRATION_SAMPLES = int(os.environ.get("NUM_SAMPLES", "512"))
 MAX_SEQUENCE_LENGTH = int(os.environ.get("MAX_SEQ_LEN", "1024"))
 
 ram_gb = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / (1024**3)

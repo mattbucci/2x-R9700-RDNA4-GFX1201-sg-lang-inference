@@ -49,7 +49,7 @@ OUTPUT_DIR = os.environ.get(
     f"{MODELS_DIR}/Qwen3.5-27B-AWQ-CT-thinking",
 )
 
-NUM_CALIBRATION_SAMPLES = int(os.environ.get("NUM_SAMPLES", "384"))
+NUM_CALIBRATION_SAMPLES = int(os.environ.get("NUM_SAMPLES", "512"))
 MAX_SEQUENCE_LENGTH = int(os.environ.get("MAX_SEQ_LEN", "2048"))
 
 ram_gb = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / (1024**3)
