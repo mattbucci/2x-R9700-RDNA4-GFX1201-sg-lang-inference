@@ -1,6 +1,6 @@
 {
   "tag": "Devstral-24B",
-  "timestamp": "2026-04-17 21:43",
+  "timestamp": "2026-04-17 22:38",
   "max_context": 32768,
   "mmlu": {
     "correct": 46,
@@ -58,13 +58,13 @@
     "results": [
       {
         "context": 1024,
-        "found": false
+        "found": true
       },
       {
         "context": 4096,
-        "found": false
+        "found": true
       }
     ],
-    "score": 0.0
+    "score": 1.0
   }
 }

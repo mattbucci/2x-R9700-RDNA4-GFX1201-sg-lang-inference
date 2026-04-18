@@ -184,9 +184,9 @@ Quality eval suite: MMLU (100 samples), HumanEval pass@1 (30), LAB-Bench (7 scie
 
 | Model | MMLU | HumanEval | LAB-Bench | Needle |
 |-------|:----:|:---------:|:---------:|:------:|
-| Devstral-24B AWQ | **80.7%** | **73.3%** | 25.7% | 0% |
+| Devstral-24B AWQ | **80.7%** | **73.3%** | 25.7% | 100% |
 
-Devstral is a coding model — strong MMLU and HumanEval despite being INT4 AWQ. LAB-Bench (science research questions) is expectedly low for a coding model. Needle-in-Haystack failed at both 1K and 4K context — Devstral doesn't do well at literal retrieval tasks. More models to be evaluated.
+Devstral is a coding model — strong MMLU and HumanEval despite being INT4 AWQ. LAB-Bench (science research questions) is expectedly low for a coding model. Needle-in-Haystack passes at 1K and 4K context. More models to be evaluated.
 
 ### Gemma 4 31B Dense Investigation
 
