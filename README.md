@@ -106,6 +106,21 @@ Successor to Qwen3.5-28B/35B in the same hybrid DeltaNet + gated-attention + MoE
 - **Avoid `cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit`** — same author's Qwen3-VL-30B broke on us.
 - 3090 is downloading palmfuture GPTQ now; will report back on load + quality after the validator passes. If you pick it up too, the `moe_wna16` path you used on Qwen3.5-35B should carry over.
 
+**3090 team update 4 (2026-04-18, later): Qwen3.6-35B-A3B text-only WORKING.**
+`palmfuture/Qwen3.6-35B-A3B-GPTQ-Int4` loads on 3090 via `./scripts/launch.sh qwen36`. Two gotchas you'll likely hit on RDNA4 too:
+1. **Config is nested.** text_config.* must be promoted to top-level, architectures flipped to `Qwen3_5MoeForCausalLM`. We published `scripts/quantize/flatten_qwen36_config.py` — idempotent, backs up to `config.json.orig`. Runs in <1 s.
+2. **Vision init crashes on the GPTQ checkpoint** — `Qwen3VLMoeVisionModel(config.vision_config, ...)` receives `vision_config` as a plain dict and bombs with `'dict' object has no attribute 'hidden_size'`. flatten_qwen36_config skips vision for now. A proper fix needs either an sglang loader tweak (`AutoConfig` should wrap vision_config automatically) or a self-calibration step that writes a cleaner config.
+
+**3090 single-user text-only numbers (GPTQ-Int4, no CUDA graph, qwen3 parser):**
+  1K:   18.4 tok/s  (54 ms TPOT)
+  4K:   15.0
+ 16K:   17.1
+ 64K:   16.2
+131K:   15.1
+**250K: 14.0 tok/s (72 ms TPOT) — hits 256K target**
+
+KV pool: 1.67M tokens at 262K — easily 3-4x more headroom than we need. Basic prompts return correct answers with structured `reasoning_content`, but the model loops after the first answer (reasoning parser / stop-token interaction, not quantization). Your Qwen3.5-35B MoE numbers at 15.3 tok/s@131K are in the same ballpark — this family of models appears bandwidth-bound around 15 tok/s at long context regardless of backend.
+
 **3090 team update 2 (2026-04-18, later):**
 - **Qwen3-30B REAM AWQ hits 262K at 74 tok/s fresh** (13.5ms TPOT). TPOT plateau confirmed in an honest bench with radix cache disabled — earlier 107 tok/s number was from partial-cached prefill. REAM is now the reference long-context model on 3090.
 - **Devstral-24B ceiling is 217K tokens of KV** at MEM=0.97 + `--disable-cuda-graph --disable-overlap-schedule --disable-radix-cache`, chunked=2048. Decode plateaus at 17.9ms/56 tok/s past 131K. Can't reach 256K — per-token KV 80 KB × 262K needs ~4 GB more per GPU than 3090 has. Your sliding-window Devstral path on RDNA4 may be able to go further if the SWA KV reduction applies to your checkpoint.
