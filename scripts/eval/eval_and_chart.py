@@ -197,13 +197,12 @@ def run_eval(port, tag, mmlu_n=200, he_n=30, labbench_n=50, needle_lengths=[1024
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     max_ctx = get_max_tokens(url)
-    # Full context budget for code generation (HumanEval needs room to write)
-    # For MC questions (MMLU, LAB-Bench), cap at 512 — answer is just a letter
-    # Thinking-mode models need ~200 tokens for <think> reasoning
-    # For code (HumanEval), cap at 4096 — stop sequences handle most cases,
-    # but without cap the model can generate 30K+ tokens per problem
-    code_budget = min(4096, max_ctx - 1024)
-    mc_budget = min(512, max_ctx - 1024)
+    # MC budget: 1024 tokens — enough for <think> reasoning + answer letter.
+    # Matches 3090 sister repo. Think-tagged models stop at ~100-500 tokens;
+    # untagged models get capped to prevent runaway 4-min generations.
+    # Code budget: 4096 — stop sequences handle most cases.
+    code_budget = min(4096, max_ctx - 512)
+    mc_budget = min(1024, max_ctx - 512)
     print(f"{'=' * 50}")
     print(f"Quality Eval: {tag} (workers={workers}, max_context={max_ctx})")
     print(f"  MC budget: {mc_budget} tokens, Code budget: {code_budget} tokens")
