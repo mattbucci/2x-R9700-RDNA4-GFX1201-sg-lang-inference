@@ -50,8 +50,11 @@ EXTRA_ENV="${EXTRA_ENV:-}"
 apply_preset() {
     case "$1" in
         devstral)
+            # Long-context target: 131K.  At this context, KV cache (~65 GB at
+            # FP8 for 131K) fills most VRAM even with MAX_RUNNING=8.  For multi-
+            # user at 32K throughput, use: --context-length 32768 --max-running 64
             MODEL="${MODEL:-$MODELS_DIR/Devstral-24B-AWQ-4bit-calibrated}"
-            CTX=32768; MEM=0.90; MAX_RUNNING=64; CHUNKED=8192
+            CTX=131072; MEM=0.90; MAX_RUNNING=8; CHUNKED=8192
             OVERLAP=""
             ;;
         coder-30b)
@@ -59,15 +62,22 @@ apply_preset() {
             CTX=32768; MAX_RUNNING=32; CHUNKED=4096; DECODE_STEPS=8
             ;;
         coder-next)
+            # Long-context target: 131K by default (can push to 256K with CLI
+            # --context-length 262144 once VRAM headroom confirmed).  MoE + DeltaNet
+            # hybrid, BF16 DeltaNet/attention = ~23 GB/GPU, small window for KV.
             MODEL="${MODEL:-$MODELS_DIR/Qwen3-Coder-Next-AWQ}"
-            CTX=131072; MAX_RUNNING=64; CHUNKED=8192; DECODE_STEPS=32
-            MAMBA_CACHE="--max-mamba-cache-size 10"
+            CTX=131072; MAX_RUNNING=8; CHUNKED=8192; DECODE_STEPS=32; MEM=0.85
+            MAMBA_CACHE="--max-mamba-cache-size 8"
             WATCHDOG=1800
             ;;
         coder-next-ream)
+            # Long-context target: single-user 256K.  Drop MAX_RUNNING to 8 so
+            # KV cache can stretch to full context without batched-request
+            # contention.  BF16 DeltaNet/attention weights already dominate
+            # per-GPU VRAM (~23 GB); KV cache at FP8 adds ~8 KB/token.
             MODEL="${MODEL:-$MODELS_DIR/Qwen3-Coder-Next-REAM-AWQ}"
-            CTX=32768; MAX_RUNNING=32; CHUNKED=8192; DECODE_STEPS=24
-            MAMBA_CACHE="--max-mamba-cache-size 10"
+            CTX=131072; MAX_RUNNING=8; CHUNKED=8192; DECODE_STEPS=24; MEM=0.85
+            MAMBA_CACHE="--max-mamba-cache-size 8"
             WATCHDOG=1800
             ;;
         glm45-air)
@@ -110,12 +120,15 @@ apply_preset() {
             OVERLAP=""
             ;;
         qwen35-moe)
-            # Official Qwen GPTQ: only MoE experts quantized, attn+shared+DeltaNet in BF16
+            # Long-context target: single-user 256K.  Official Qwen GPTQ: only
+            # MoE experts quantized, attn + shared + DeltaNet stay BF16 (~15
+            # GB/GPU).  That leaves ~15 GB/GPU for KV cache — FP8 KV gives
+            # us 256K+ headroom for single user.
             MODEL="${MODEL:-$MODELS_DIR/Qwen3.5-35B-A3B-GPTQ-Int4}"
             QUANT="moe_wna16"
             DTYPE="bfloat16"
-            CTX=32768; MAX_RUNNING=32; CHUNKED=4096; DECODE_STEPS=8
-            MAMBA_CACHE="--max-mamba-cache-size 10"
+            CTX=262144; MAX_RUNNING=8; CHUNKED=8192; DECODE_STEPS=8; MEM=0.85
+            MAMBA_CACHE="--max-mamba-cache-size 8"
             REASONING="--reasoning-parser qwen3"
             WARMUP="--skip-server-warmup"
             OVERLAP=""

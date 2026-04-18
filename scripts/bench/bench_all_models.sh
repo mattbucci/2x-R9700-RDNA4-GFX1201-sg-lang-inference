@@ -16,14 +16,22 @@ BENCH="$REPO_DIR/scripts/bench/bench_all_unified.py"
 PORT=23334
 
 # Models to benchmark (launch.sh preset → display name → context max → concurrency max)
+#
+# context_max should match or be <= the launch preset's CTX value.  Primary
+# target is single-user 256K across models that support it natively; anything
+# below 256K is either (a) a sliding-window limit (Gemma4) or (b) VRAM-limited
+# after weights + BF16 layers (Coder-Next, Qwen3.5-35B MoE).
+#
+# concurrency_max stays modest (primary target is single-user, not throughput).
 ALL_MODELS=(
-    "devstral|Devstral-24B AWQ|32768|64"
+    "qwen35|Qwen3.5-27B AWQ|262144|8"
+    "devstral|Devstral-24B AWQ|131072|32"
     "coder-30b|Coder-30B AWQ|32768|32"
-    "gemma4|Gemma 4 26B AWQ|4096|32"
-    "gemma4-31b|Gemma 4 31B AWQ|8192|8"
-    "qwen35|Qwen3.5-27B AWQ|16384|8"
-    "coder-next|Coder-Next 80B AWQ|8192|8"
-    "coder-next-ream|Coder-Next REAM 60B AWQ|32768|16"
+    "coder-next|Coder-Next 80B AWQ|131072|8"
+    "coder-next-ream|Coder-Next REAM 60B AWQ|131072|8"
+    "qwen35-moe|Qwen3.5-35B MoE GPTQ|131072|8"
+    "gemma4|Gemma 4 26B AWQ|4096|16"
+    "gemma4-31b|Gemma 4 31B AWQ|8192|4"
 )
 
 # Allow running a subset: ./bench_all_models.sh devstral coder-30b
