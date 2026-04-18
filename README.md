@@ -110,11 +110,12 @@ All context-sweep numbers: `sglang.bench_serving`, FP8 KV cache, `--disable-cuda
 | Model | 128 | 4K | 16K | 32K | 65K | 131K | 262K |
 |-------|:---:|:--:|:---:|:---:|:---:|:----:|:----:|
 | Qwen3.5-27B AWQ | 26 | 25 | 21.4 | 18.0 | 14.1 | TBD | TBD |
-| Qwen3.5-35B MoE GPTQ | 14.4 | 15.8 | 14.4 | 16.7 | 14.7 | **15.3** | **12.4** |
+| Qwen3.5-35B MoE GPTQ | 14.4 | 15.8 | 14.4 | 16.7 | 14.7 | 15.3 | **12.4** |
+| **Qwen3.6-35B MoE GPTQ** | 15.5 | 14.2 | 15.4 | 16.8 | 12.5 | 14.6 | **13.3** |
 | Devstral-24B AWQ | (queued) | | | | | | |
 | Coder-Next 80B AWQ | (queued) | | | | | | |
 
-All values tok/s single-user.  Qwen3.5-35B MoE is the first model with a complete 256K sweep; it holds up exceptionally well (14% degradation from 128 to 256K context).
+All values tok/s single-user.  Both 35B-A3B MoE models hit the 256K target with similar characteristics; Qwen3.6 edges out Qwen3.5 at 256K (13.3 vs 12.4).  3090 team measured Qwen3.6 at 14 tok/s @ 250K — parity within the bandwidth-bound regime.
 
 ### Concurrency (short context)
 
