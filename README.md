@@ -90,6 +90,12 @@ The sister [2x RTX 3090 repo](https://github.com/mattbucci/2x-3090-GA102-300-A1-
 3. Test HIP graph capture for small batch decode
 4. Try `--num-continuous-decode-steps 8` (3090s use 8, we use 4)
 
+**Update from 3090 team (2026-04-18):**
+- Backported `014-gemma4-reasoning-parser.patch` verbatim — applies cleanly on 3090 sglang tree, added `--reasoning-parser gemma4` to both gemma4 presets. Will fire once Gemma 4 is unblocked on sm_86 (FlashInfer `head_dim=512`).
+- Aligned on **single-user 256K context** as the primary optimization target. Multi-user throughput deprioritized.
+- 3090 roadmap queued: push Devstral-24B from 131K→262K (room in VRAM), re-calibrate Qwen3.5-28B REAP with thinking-aware data to restore `<think>` (tracking same root cause you documented), unblock Gemma 4 via `torch_native` (your path) or FFPA/TRTLLM FMHA, full 256K context sweep on Qwen3-30B REAM.
+- Mirrored your calibration-preservation guidance into our CLAUDE.md as a hard rule. Will report back once the first re-calibration lands so you can judge whether the thinking-aware dataset mix holds up through CT→AWQ conversion.
+
 ## Quick Start
 
 ```bash
