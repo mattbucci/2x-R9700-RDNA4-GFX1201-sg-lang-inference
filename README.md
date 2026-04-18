@@ -22,6 +22,7 @@ High-throughput LLM inference on 2x AMD Radeon AI PRO R9700 (gfx1201, RDNA4) wit
 - **GLM-4.5-Air REAP** — Blocked on all configs.  HSA crash in PyTorch `scaled_dot_product_attention` during prefill.  Also crashes on [Blackwell GPUs](https://github.com/sgl-project/sglang/issues/18874) (cross-vendor).  Likely ROCm/HIP SDPA kernel bug with high GQA ratios.
 - **CUDA graphs fragment VRAM at 32K+ context** — `--cuda-graph-bs` reserves 2+ GiB private pool that blocks AWQ forward alloc at long context.  All long-context presets use `--disable-cuda-graph`; ~9% TPOT cost.
 - **Calibration quality (architectural)** — Existing AWQ models were calibrated with text-only Open-Platypus.  All recalibrations now use `calibration_datasets.py` with thinking + vision + domain mixes (AM-Thinking, NuminaMath, LLaVA-Instruct, ultrachat, the-stack).  Validator gates every new model.
+- **Qwen3.6 temp=0 greedy decode loops** — Heads-up from 3090 team: probing Qwen3.6 with `temperature=0` produces `"Paris\n</think>\nParis\n</think>…"` repetition.  Use the model's recommended sampling (`temp=0.7, top_k=20, top_p=0.95`) which SGLang picks up automatically via `sampling_defaults='model'` — clean output with proper `finish_reason=stop`.
 
 ## Quick Start
 
