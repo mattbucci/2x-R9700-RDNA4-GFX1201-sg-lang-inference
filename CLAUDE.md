@@ -16,17 +16,20 @@ Custom SGLang v0.5.10 + RDNA4 patches for 2x AMD Radeon AI PRO R9700.
 scripts/setup.sh                       # Full setup (applies all 5 patches)
 scripts/setup_sgl_kernel.sh --env X    # Native sgl_kernel (required)
 scripts/build_awq_gemv.sh --env X      # HIP GEMV kernel (required for MoE)
-scripts/launch.sh devstral             # Devstral 24B AWQ
+scripts/launch.sh devstral             # Devstral 24B AWQ (131K long-context)
 scripts/launch.sh coder-30b            # Coder-30B MoE AWQ
-scripts/launch.sh coder-next           # Coder-Next 80B AWQ
-scripts/launch.sh coder-next-ream      # Coder-Next REAM 60B AWQ (pruned)
+scripts/launch.sh coder-next           # Coder-Next 80B AWQ (131K)
+scripts/launch.sh coder-next-ream      # Coder-Next REAM 60B AWQ (131K, pruned)
 scripts/launch.sh glm45-air            # GLM-4.5-Air REAP 82B MoE AWQ
 scripts/launch.sh gemma4               # Gemma 4 26B MoE AWQ
 scripts/launch.sh gemma4-31b           # Gemma 4 31B Dense AWQ
-scripts/launch.sh qwen35               # Qwen3.5-27B DeltaNet AWQ
-scripts/launch.sh qwen35-moe           # Qwen3.5-35B-A3B MoE+DeltaNet REAM AWQ
-scripts/quantize/quantize_gemma4_gptq.sh  # Gemma 4 GPTQ calibration
-scripts/quantize/quantize_qwen35_moe_ream.sh  # Qwen3.5-35B MoE REAM/REAP AWQ pipeline
+scripts/launch.sh qwen35               # Qwen3.5-27B DeltaNet AWQ (262K)
+scripts/launch.sh qwen35-moe           # Qwen3.5-35B MoE GPTQ (262K) — supersedes → Qwen3.6 once calibrated
+# Calibration + validation pipeline
+scripts/quantize/run_full_pipeline.sh qwen35       # calib → CT→AWQ → merge vision → launch → validate
+scripts/quantize/run_full_pipeline.sh gemma4-26b   # same, for Gemma4 26B MoE
+scripts/eval/validate_capabilities.py --port 23334 # thinking + vision + basic QA gate
+scripts/bench/bench_256k_sweep.sh                   # 256K single-user suite across all long-context models
 ```
 
 ## Critical Rules
