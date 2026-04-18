@@ -51,7 +51,7 @@ run_job() {
 
     # Stop SGLang if running — CPU calibration needs the RAM
     pkill -f sglang 2>/dev/null || true
-    sleep 3
+    sleep 10   # Allow graceful cleanup of CUDA/HIP allocations
 
     # Use quant env for llm-compressor
     conda activate quant
