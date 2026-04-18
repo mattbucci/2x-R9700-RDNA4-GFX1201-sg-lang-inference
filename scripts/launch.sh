@@ -139,10 +139,9 @@ apply_preset() {
             # (Qwen3_5MoeForConditionalGeneration class) but thinking-enabled by
             # default + native multimodal.  BF16 weights are 67 GB — MUST be
             # calibrated first or it won't fit (60 GB total VRAM).  Default
-            # path assumes a thinking+vision-calibrated AWQ at
-            # Qwen3.6-35B-A3B-AWQ-thinking.  Override MODEL= to test other
-            # quants.
-            MODEL="${MODEL:-$MODELS_DIR/Qwen3.6-35B-A3B-AWQ-thinking}"
+            # path points at our thinking+vision-calibrated compressed-tensors
+            # output.  No official GPTQ from Qwen as of 2026-04-18.
+            MODEL="${MODEL:-$MODELS_DIR/Qwen3.6-35B-A3B-AWQ-CT-thinking-vision}"
             QUANT="moe_wna16"
             DTYPE="bfloat16"
             CTX=262144; MAX_RUNNING=8; CHUNKED=8192; DECODE_STEPS=8; MEM=0.85
