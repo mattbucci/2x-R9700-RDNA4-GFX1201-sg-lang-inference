@@ -153,6 +153,17 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 print(f"Saving to {OUTPUT_DIR}...")
 model.save_pretrained(OUTPUT_DIR, save_compressed=True)
 tokenizer.save_pretrained(OUTPUT_DIR)
+
+# Also save the image+video processor — tokenizer.save_pretrained omits it,
+# and SGLang's tokenizer_manager requires preprocessor_config.json to load
+# the Qwen3_5 multimodal processor class.
+try:
+    from transformers import AutoProcessor
+    proc = AutoProcessor.from_pretrained(BASE_MODEL, trust_remote_code=True)
+    proc.save_pretrained(OUTPUT_DIR)
+    print("  Saved preprocessor (image/video) config")
+except Exception as e:
+    print(f"  WARN: could not save preprocessor ({e!r}); launch may need manual copy")
 print(f"Done.  Next steps:")
 print(f"  1. python scripts/quantize/convert_qwen35_ct_to_awq.py --input {OUTPUT_DIR}")
 print(f"  2. MODEL=<awq-path> scripts/launch.sh qwen35")
