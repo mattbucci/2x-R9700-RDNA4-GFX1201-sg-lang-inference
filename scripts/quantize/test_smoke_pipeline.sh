@@ -18,8 +18,8 @@ cd "$REPO_DIR"
 source "$REPO_DIR/scripts/common.sh"
 
 MODELS_DIR="${MODELS_DIR:-$HOME/AI/models}"
-CT_INPUT="$MODELS_DIR/Qwen3.5-27B-AWQ-CT-thinking-smoke"
-AWQ_OUTPUT="$MODELS_DIR/Qwen3.5-27B-AWQ-thinking-smoke"
+CT_INPUT="${CT_INPUT:-$MODELS_DIR/Qwen3.5-27B-AWQ-CT-thinking}"
+AWQ_OUTPUT="${AWQ_OUTPUT:-$MODELS_DIR/Qwen3.5-27B-AWQ-thinking}"
 
 echo "=============================================="
 echo "Smoke pipeline test"
