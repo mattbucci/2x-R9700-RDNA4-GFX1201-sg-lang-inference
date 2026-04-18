@@ -49,12 +49,29 @@ High-throughput LLM inference on AMD Radeon AI PRO R9700 (gfx1201, RDNA4) with R
 
 **BF16 attention precision affects all new GPU architectures.** Both RDNA4 (64KB LDS) and Blackwell SM12.x (100KB SMEM) hit attention precision issues that older architectures (Ampere/Hopper) tolerate. The fix is the same: FP32 accumulation in the value dot product of the online softmax.
 
-### Findings from NVIDIA 3090 system
+### Cross-system comparison: 2x R9700 RDNA4 vs 2x RTX 3090
 
-The sister [2x RTX 3090 repo](https://github.com/mattbucci/2x-3090-GA102-300-A1-sglang-inference) found:
+The sister [2x RTX 3090 repo](https://github.com/mattbucci/2x-3090-GA102-300-A1-sglang-inference) runs the same SGLang v0.5.10 + patches stack. Key differences: 3090s have Marlin INT4 GEMM (not available on ROCm), FlashInfer attention, NVLink P2P, and CUDA graph support.
 
-- **Gemma 4 REAP (26B→21B)** — GPTQ calibration requires `group_size=32` because `moe_intermediate_size=704` is not divisible by 128. Use `config_groups` with `QuantizationScheme` instead of `scheme="W4A16"`.
-- **Coder-30B REAP (25B) at 134 tok/s** — [cerebras/Qwen3-Coder-REAP-25B-A3B](https://huggingface.co/cerebras/Qwen3-Coder-REAP-25B-A3B) with `auto-round` quantization runs at 134 tok/s on 3090s with 131K context. Uses `--quantization auto-round`.
+| Model | RDNA4 tok/s | 3090 tok/s | Gap | Why |
+|-------|:----------:|:---------:|:---:|-----|
+| Devstral-24B AWQ | 37 | 87 | 2.4x | Marlin GEMM + CUDA graphs |
+| Coder-30B AWQ | 30 | 193 | 6.4x | Marlin GEMM (4.5x alone) |
+| Qwen3.5-27B AWQ | 26 | 13.5 | **0.5x** | DeltaNet kernel faster on RDNA4 |
+| Qwen3-30B REAM | — | 197 | — | Not yet tried on RDNA4 |
+| Qwen3.5-35B MoE | 24 | 35 | 1.5x | REAP + AWQ Marlin |
+
+**Speed gap analysis:**
+- **Marlin INT4 GEMM** — Biggest factor. Marlin fuses dequant+GEMM in one kernel, ~4.5x faster than our unfused AWQ path for MoE models. Not available on ROCm. Potential fix: port Marlin to HIP or optimize our Triton AWQ GEMM for M>1.
+- **CUDA graphs** — 3090s use CUDA graph capture for decode. We disable all CUDA/HIP graphs due to RDNA4 compatibility. Potential fix: test HIP graph capture with `--cuda-graph-bs 1`.
+- **FlashInfer vs Triton attention** — 3090s use FlashInfer (hand-tuned CUDA). We use Triton attention with FP32 patches. FlashInfer is ~1.3x faster.
+- **DeltaNet advantage** — We're 2x faster on Qwen3.5-27B because our DeltaNet/linear attention Triton kernels run better on RDNA4's wave32 architecture.
+
+**Actionable improvements for RDNA4:**
+1. Try REAM (expert merging) on Qwen3-30B — should give similar speedup as 3090s
+2. Optimize Triton AWQ GEMM for M>1 prefill (currently unfused dequant+matmul)
+3. Test HIP graph capture for small batch decode
+4. Try `--num-continuous-decode-steps 8` (3090s use 8, we use 4)
 
 ## Quick Start
 
