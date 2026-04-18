@@ -28,7 +28,7 @@ import os
 import shutil
 
 
-def flatten(model_dir: str) -> None:
+def flatten(model_dir: str, arch: str = "Qwen3_5MoeForConditionalGeneration") -> None:
     cfg_path = os.path.join(model_dir, "config.json")
     backup = cfg_path + ".orig"
     if not os.path.exists(backup):
@@ -47,8 +47,13 @@ def flatten(model_dir: str) -> None:
             cfg[k] = v
             promoted += 1
 
-    cfg["architectures"] = ["Qwen3_5MoeForCausalLM"]
-    cfg["model_type"] = "qwen3_5_moe_text"
+    # RDNA4 SGLang registers Qwen3_5MoeForConditionalGeneration as the MoE
+    # entry class (patch 009).  The 3090/upstream SGLang registers
+    # Qwen3_5MoeForCausalLM.  Keep the multimodal class by default — patch
+    # 009 handles text-only serving through it.  Override with --arch if
+    # running on upstream.
+    cfg["architectures"] = [arch]
+    cfg["model_type"] = "qwen3_5_moe" if arch.endswith("ConditionalGeneration") else "qwen3_5_moe_text"
     cfg.setdefault("norm_topk_prob", True)
 
     with open(cfg_path, "w") as f:
@@ -63,5 +68,8 @@ def flatten(model_dir: str) -> None:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("model_dir", help="path to the model directory containing config.json")
+    ap.add_argument("--arch", default="Qwen3_5MoeForConditionalGeneration",
+                    help="architecture class (default: Qwen3_5MoeForConditionalGeneration for "
+                         "RDNA4 patch 009; use Qwen3_5MoeForCausalLM for upstream SGLang)")
     args = ap.parse_args()
-    flatten(args.model_dir)
+    flatten(args.model_dir, args.arch)
