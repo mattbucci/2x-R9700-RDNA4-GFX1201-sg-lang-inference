@@ -34,11 +34,16 @@ def run_bench_serving(port, model, input_len, output_len, num_prompts, request_r
         "--disable-ignore-eos",
         "--disable-tqdm",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    # At 256K context, prefill + 100 decode tokens can exceed the 10-minute default.
+    # Scale timeout with expected work: ~5min floor + ~1min per 32K context.
+    scaled_timeout = max(600, 300 + (input_len // 32768) * 60)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=scaled_timeout)
     output = result.stdout + result.stderr
 
     def extract(field):
-        m = re.search(rf"{field}:\s+([\d.]+)", output)
+        # bench_serving formats metrics like "Mean TPOT (ms):  38.73"
+        # Handle an optional "(unit)" between field name and colon.
+        m = re.search(rf"{re.escape(field)}\s*(?:\([^)]*\))?\s*:\s+([\d.]+)", output)
         return float(m.group(1)) if m else None
 
     return {
