@@ -321,6 +321,17 @@ elapsed = time.time() - t0
 
 print(f"\nGPTQ complete in {elapsed/3600:.1f}h ({elapsed:.0f}s)")
 print(f"Output: {CT_OUTPUT}")
+
+# Also save the image+video processor — tokenizer.save_pretrained omits it,
+# and SGLang's tokenizer_manager requires preprocessor_config.json at launch.
+try:
+    from transformers import AutoProcessor
+    proc = AutoProcessor.from_pretrained(BF16_MODEL, trust_remote_code=True)
+    proc.save_pretrained(CT_OUTPUT)
+    print("  Saved preprocessor (image/video) config")
+except Exception as e:
+    print(f"  WARN: could not save preprocessor ({e!r}); launch may need manual copy")
+
 print("Next:")
 print(f"  1. python scripts/quantize/convert_gemma4_26b_ct_to_awq.py --input {CT_OUTPUT}")
 print(f"  2. python scripts/quantize/merge_vision_weights.py --base {BF16_MODEL} --awq <awq-path>")

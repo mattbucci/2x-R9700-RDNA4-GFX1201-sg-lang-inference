@@ -136,6 +136,18 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 print(f"Saving to {OUTPUT_DIR}...")
 model.save_pretrained(OUTPUT_DIR, save_compressed=True)
 tokenizer.save_pretrained(OUTPUT_DIR)
+
+# SGLang's tokenizer_manager requires preprocessor_config.json for multimodal
+# models — tokenizer.save_pretrained() doesn't write it.  Save the processor
+# too.
+try:
+    from transformers import AutoProcessor
+    proc = AutoProcessor.from_pretrained(BASE_MODEL, trust_remote_code=True)
+    proc.save_pretrained(OUTPUT_DIR)
+    print("  Saved preprocessor (image/video) config")
+except Exception as e:
+    print(f"  WARN: could not save preprocessor ({e!r}); launch may need manual copy")
+
 print(f"Done.")
 print("Next:")
 print(f"  1. Launch via:  MODEL={OUTPUT_DIR} scripts/launch.sh qwen36-moe")
