@@ -44,6 +44,14 @@ scripts/bench/bench_256k_sweep.sh                   # 256K single-user suite acr
 
 **Operate autonomously.** The user reads all output and interrupts with feedback — do not stop for confirmation. Multi-hour calibrations and benchmark sweeps are allowed without asking.
 
+**Detach long-running jobs from the shell session.** `run_in_background: true` alone does NOT survive a session interrupt — the 3090 team lost 7h 45min of Qwen3.5-28B calibration (layer 13/41) when the harness restarted. Launch via `setsid` + redirect all std streams + write PID to a file so the process gets PPID=1 and its own session ID. Verify: `ps -p $PID -o ppid=` must print `1`. Pattern:
+```bash
+mkdir -p /tmp/<job>-logs
+setsid bash -c '<CMD> > /tmp/<job>-logs/run.log 2>&1 & echo $! > /tmp/<job>-logs/pid; disown' </dev/null >/dev/null 2>&1 &
+disown
+```
+Any job expected to run > 30 minutes (calibrations, long benches, 50 GB+ downloads) must use this pattern.
+
 **Primary optimization target: single-user 256K context performance** for all models in README. Multi-user throughput is secondary. When tuning, prioritize TPOT at large context over peak batch tok/s.
 
 **Preserve during calibration:** thinking capabilities AND vision/image handling. Past calibrations have silently broken both — validate both on every requant. 3090 team confirmed this pattern. Use thinking-aware datasets (`AM-Thinking-v1-Distilled`, `glaiveai/reasoning-v1-20m`) plus image+text pairs (`LLaVA-Instruct`).
