@@ -54,12 +54,18 @@ Any job expected to run > 30 minutes (calibrations, long benches, 50 GB+ downloa
 
 **Primary optimization target: single-user 256K context performance** for all models in README. Multi-user throughput is secondary. When tuning, prioritize TPOT at large context over peak batch tok/s.
 
-**Preserve during calibration:** thinking capabilities AND vision/image handling. Past calibrations have silently broken both — validate both on every requant. 3090 team confirmed this pattern. Use thinking-aware datasets (`AM-Thinking-v1-Distilled`, `glaiveai/reasoning-v1-20m`) plus image+text pairs (`LLaVA-Instruct`).
+**Preserve during calibration:** thinking + image + **video** + **audio**. Past calibrations have silently broken thinking and image; video and audio are easier to miss because the defaults of most calibration corpora are text+image only. Gemma 4 supports audio natively across all variants ([Gemma video docs](https://ai.google.dev/gemma/docs/capabilities/vision/video)); Qwen3.5/3.6 handle video via `<|vision_start|><|video_pad|><|vision_end|>` in the chat template. Validate every modality on every requant. Recipes must mix:
+- Thinking: `AM-Thinking-v1-Distilled`, `glaiveai/reasoning-v1-20m`
+- Image: `LLaVA-Instruct-150K`
+- Video (Gemma4 / Qwen3.5 / Qwen3.6): `lmms-lab/LLaVA-Video-178K`, `ShareGPT4Video`
+- Audio (Gemma4): `mozilla-foundation/common_voice`, `google/covost2`. Note: M4 team flagged that audio `preprocessor_config.json` is often missing from community checkpoints — bundle it into the saved output.
 
 **Clean commits, shared learnings:**
 - Commit + push as progress happens (don't batch).
 - README.md is source of truth: what we've done + current known issues.
-- 3090 team sister repo at `/home/letsrtfm/AI/2x-3090-GA102-300-A1-sglang-inference` — we can read their commits for ideas and push to their README to share learnings.
+- Sister projects — read their commits, push findings to their README.
+  - **3090 team (NVIDIA Ampere, AWQ_Marlin):** `~/AI/2x-3090-GA102-300-A1-sglang-inference` — long-context benchmarks reference, `validate_chat_template.py` owner.
+  - **M4 team (Apple Silicon, MLX):** `~/AI/m4-sglang-inference` — patch 013 owner (DeltaNet cache-wiring fix), identified video+audio modality gaps in community checkpoints.
 
 ## Chat Template Rule
 
