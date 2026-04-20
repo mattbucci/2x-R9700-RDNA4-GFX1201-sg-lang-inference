@@ -145,6 +145,11 @@ run_one() {
     for i in $(seq 1 300); do
         if curl -sf http://localhost:23334/health >/dev/null 2>&1; then
             echo "[$key] server up after ${i}s"
+            # --skip-server-warmup returns health=200 before the CUDA graph /
+                        # tokenizer state is fully ready; first prompt can produce
+                        # degenerate output.  Sleep 30s for state to stabilize before
+                        # running the capability validator.
+            sleep 30
             break
         fi
         sleep 1

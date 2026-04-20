@@ -172,7 +172,11 @@ def check_basic(base_url: str, model: str) -> tuple[bool, str]:
         "model": model,
         "messages": [{"role": "user", "content": "What is the capital of France?  Answer in one word."}],
         "max_tokens": 256,
-        "temperature": 0,
+        # Greedy (temp=0) sends Qwen3-family models into an immediate-EOS or
+        # infinite-thinking state; use the same sampling as check_thinking.
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "top_k": 20,
     }
     try:
         r = _http_post(f"{base_url}/v1/chat/completions", payload, timeout=120)
