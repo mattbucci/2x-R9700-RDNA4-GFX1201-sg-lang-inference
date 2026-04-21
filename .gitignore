@@ -1,6 +1,7 @@
 # Cloned and built by setup.sh
 components/sglang/
 components/triton-build/
+components/llmcompressor/
 
 # Python
 __pycache__/

@@ -1,0 +1,13 @@
+diff --git a/src/llmcompressor/modeling/qwen3_moe.py b/src/llmcompressor/modeling/qwen3_moe.py
+index 890ac32c..0648dba7 100644
+--- a/src/llmcompressor/modeling/qwen3_moe.py
++++ b/src/llmcompressor/modeling/qwen3_moe.py
+@@ -51,6 +51,8 @@ class CalibrationQwen3MoeSparseMoeBlock(MoECalibrationModule):
+         hidden_states = hidden_states.view(-1, hidden_dim)
+         # router_logits: (batch * sequence_length, n_experts)
+         router_logits = self.gate(hidden_states)
++        if isinstance(router_logits, tuple):  # transformers >=5 returns (logits, aux)
++            router_logits = router_logits[0]
+ 
+         routing_weights = torch.nn.functional.softmax(
+             router_logits, dim=1, dtype=torch.float
