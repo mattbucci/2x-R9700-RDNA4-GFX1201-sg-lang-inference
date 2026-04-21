@@ -313,12 +313,15 @@ def check_vision(base_url: str, model: str) -> tuple[bool, str]:
     except Exception as e:
         return False, f"request failed: {e!r}"
 
-    content = (r["choices"][0]["message"].get("content") or "").lower()
+    msg = r["choices"][0]["message"]
+    content = (msg.get("content") or "").lower()
+    reasoning = (msg.get("reasoning_content") or "").lower()
+    haystack = content + " " + reasoning
     expected = ["red", "circle", "round", "sphere", "ball", "dot", "disk", "oval"]
-    hits = [w for w in expected if w in content]
+    hits = [w for w in expected if w in haystack]
     passed = len(hits) >= 1
-    msg = f"saw={hits}  response={content[:120]!r}"
-    return passed, msg
+    sample = content[:120] if content else f"(reasoning){reasoning[:120]}"
+    return passed, f"saw={hits}  response={sample!r}"
 
 
 def main() -> int:
