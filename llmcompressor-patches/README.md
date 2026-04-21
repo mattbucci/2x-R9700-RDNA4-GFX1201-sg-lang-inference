@@ -10,7 +10,7 @@ Clone lives at `components/llmcompressor/` (gitignored, same as `components/sgla
 
 | # | Title | Why |
 |---|-------|-----|
-| 001 | qwen3-moe-tuple-router-logits | `self.gate(hidden_states)` returns `(logits, aux)` in transformers ≥5; `softmax(tuple)` raises `AttributeError`. Affected Qwen3-Coder-30B-A3B calibration. |
+| 001 | qwen3-moe-unfuse-fused-experts | transformers ≥5 restructured Qwen3MoE: the gate/router returns `(logits, scores, indices)` tuple, and experts are fused 3D `nn.Parameter` tensors instead of a `ModuleList`. Rewrite `CalibrationQwen3MoeSparseMoeBlock` to handle the new router, and add a `SequentialQwen3MoeExperts` (registered for `Qwen3MoeExperts`) that unfuses into per-expert `nn.Linear` modules so GPTQ's `targets="Linear"` can calibrate each expert — same pattern as `SequentialGemma4TextExperts`. Unblocks Qwen3-Coder-30B-A3B calibration. |
 
 ## Apply
 

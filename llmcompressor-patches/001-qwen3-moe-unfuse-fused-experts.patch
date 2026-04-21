@@ -1,0 +1,261 @@
+diff --git a/src/llmcompressor/modeling/__init__.py b/src/llmcompressor/modeling/__init__.py
+index 0dc2ed43..ad86ac12 100644
+--- a/src/llmcompressor/modeling/__init__.py
++++ b/src/llmcompressor/modeling/__init__.py
+@@ -15,7 +15,10 @@ from .deepseek_v3 import CalibrationDeepseekV3MoE  # noqa: F401
+ from .glm4_moe import CalibrationGlm4MoeMoE  # noqa: F401
+ from .glm_moe_dsa import CalibrationGlmMoeDsaMoE  # noqa: F401
+ from .llama4 import SequentialLlama4TextMoe  # noqa: F401
+-from .qwen3_moe import CalibrationQwen3MoeSparseMoeBlock  # noqa: F401
++from .qwen3_moe import (  # noqa: F401
++    CalibrationQwen3MoeSparseMoeBlock,
++    SequentialQwen3MoeExperts,
++)
+ from .qwen3_5_moe import CalibrationQwen3_5MoeSparseMoeBlock
+ from .qwen3_vl_moe import CalibrateQwen3VLMoeTextSparseMoeBlock  # noqa: F401
+ from .qwen3_next_moe import CalibrationQwen3NextSparseMoeBlock  # noqa: F401
+diff --git a/src/llmcompressor/modeling/qwen3_moe.py b/src/llmcompressor/modeling/qwen3_moe.py
+index 890ac32c..e20f7a47 100644
+--- a/src/llmcompressor/modeling/qwen3_moe.py
++++ b/src/llmcompressor/modeling/qwen3_moe.py
+@@ -14,6 +14,10 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
++from __future__ import annotations
++
++from typing import TYPE_CHECKING
++
+ import torch
+ from transformers.models import Qwen3MoeConfig
+ from transformers.models.qwen3_moe.modeling_qwen3_moe import (
+@@ -21,12 +25,31 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import (
+ )
+ 
+ from llmcompressor.modeling.moe_context import MoECalibrationModule
++from llmcompressor.utils.dev import skip_weights_initialize
++
++if TYPE_CHECKING:
++    from transformers.models.qwen3_moe.modeling_qwen3_moe import (
++        Qwen3MoeConfig as _Qwen3MoeConfig,
++        Qwen3MoeExperts,
++    )
+ 
+ 
+ @MoECalibrationModule.register("Qwen3MoeSparseMoeBlock")
+ class CalibrationQwen3MoeSparseMoeBlock(MoECalibrationModule):
+-    """
+-    Calibration version of Qwen3MoeSparseMoeBlock that sends all tokens to all experts.
++    """Calibration version of Qwen3MoeSparseMoeBlock — routes all tokens to all experts.
++
++    transformers ≥5 restructured this block: ``self.gate`` is a
++    ``Qwen3MoeTopKRouter`` that returns ``(router_logits, scores, indices)`` (a
++    tuple, not just logits), and ``self.experts`` is a ``Qwen3MoeExperts``
++    object with fused 3D parameter tensors — not a ``nn.ModuleList``.  The old
++    calibration forward iterated over ``self.experts`` as if it were a list;
++    that now raises ``TypeError``.
++
++    We delegate the routing + expert execution to the existing (un-replaced)
++    ``self.gate`` and ``self.experts`` modules, just forcing all tokens through
++    all experts so GPTQ sees representative activations for each.  The per-expert
++    weight unfusing that GPTQ actually needs happens in
++    :class:`SequentialQwen3MoeExperts` below (registered for ``Qwen3MoeExperts``).
+     """
+ 
+     is_permanent = False
+@@ -40,60 +63,156 @@ class CalibrationQwen3MoeSparseMoeBlock(MoECalibrationModule):
+         super().__init__()
+         self.num_experts = config.num_experts
+         self.top_k = config.num_experts_per_tok
+-        self.norm_topk_prob = config.norm_topk_prob
+-
+         self.calibrate_all_experts = calibrate_all_experts
+         self.gate = original.gate
+         self.experts = original.experts
+ 
+     def forward(self, hidden_states: torch.Tensor):
+         batch_size, sequence_length, hidden_dim = hidden_states.shape
+-        hidden_states = hidden_states.view(-1, hidden_dim)
+-        # router_logits: (batch * sequence_length, n_experts)
+-        router_logits = self.gate(hidden_states)
++        flat = hidden_states.view(-1, hidden_dim)
++
++        # New router returns (router_logits, scores, indices).  Older (pre-5.x)
++        # router returned just a tensor — keep backward compat by treating a
++        # plain tensor as logits and reconstructing top-k here.
++        gate_out = self.gate(flat)
++        if isinstance(gate_out, tuple):
++            _, routing_weights, selected_experts = gate_out
++        else:
++            probs = torch.nn.functional.softmax(gate_out, dim=-1, dtype=torch.float)
++            routing_weights, selected_experts = torch.topk(probs, self.top_k, dim=-1)
++            routing_weights = routing_weights / routing_weights.sum(
++                dim=-1, keepdim=True
++            )
++            routing_weights = routing_weights.to(flat.dtype)
++
++        if self.calibrate_all_experts:
++            # Force every expert to see every token: pick each expert top_k
++            # times for every token, equal weights.  The experts module will
++            # still index by selected_experts, so expanding selected_experts
++            # so each token is assigned to experts [0..top_k-1] (a stable
++            # permutation) is simpler than re-rolling the fused forward.
++            seq_len = flat.shape[0]
++            arange_topk = (
++                torch.arange(self.top_k, device=flat.device).unsqueeze(0).expand(seq_len, -1)
++            )
++            selected_experts_calib = arange_topk
++            routing_weights_calib = torch.full_like(
++                routing_weights, 1.0 / self.top_k
++            )
++            final_hidden_states = self.experts(
++                flat, selected_experts_calib, routing_weights_calib
++            )
++        else:
++            final_hidden_states = self.experts(flat, selected_experts, routing_weights)
+ 
+-        routing_weights = torch.nn.functional.softmax(
+-            router_logits, dim=1, dtype=torch.float
+-        )
+-        routing_weights, selected_experts = torch.topk(
+-            routing_weights, self.top_k, dim=-1
+-        )
+-        if self.norm_topk_prob:  # only diff with mixtral sparse moe block!
+-            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+-        # we cast back to the input dtype
+-        routing_weights = routing_weights.to(hidden_states.dtype)
+-
+-        final_hidden_states = torch.zeros(
+-            (batch_size * sequence_length, hidden_dim),
+-            dtype=hidden_states.dtype,
+-            device=hidden_states.device,
++        final_hidden_states = final_hidden_states.reshape(
++            batch_size, sequence_length, hidden_dim
+         )
++        # The block's own forward returns a single tensor in transformers ≥5;
++        # return the same shape so parent modules keep working.
++        return final_hidden_states
++
++    def restore(self, original: torch.nn.Module) -> torch.nn.Module:
++        return original
++
++
++class Qwen3MoeExpertsList(torch.nn.ModuleList):
++    """Unpack 3D expert parameters into individual Qwen3MoeMLP nn.Linear modules.
++
++    ``Qwen3MoeExperts`` stores weights as ``gate_up_proj`` [E, 2*I, H] and
++    ``down_proj`` [E, H, I] parameter tensors.  GPTQ with ``targets="Linear"``
++    cannot target 3D parameters, so for calibration we split them into
++    per-expert ``Qwen3MoeMLP`` modules whose ``gate_proj``, ``up_proj`` and
++    ``down_proj`` are real ``nn.Linear`` layers.
++    """
++
++    def __init__(self, config, original: Qwen3MoeExperts):
++        from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeMLP
++
++        self.num_experts = config.num_experts
++        moe_intermediate = config.moe_intermediate_size
++
++        with skip_weights_initialize():
++            super().__init__(
++                [
++                    Qwen3MoeMLP(config, intermediate_size=moe_intermediate)
++                    for _ in range(self.num_experts)
++                ]
++            )
++
++        gate_up = original.gate_up_proj.data  # [E, 2*I, H]
++        down = original.down_proj.data  # [E, H, I]
++
++        for i in range(self.num_experts):
++            # gate_up_proj stores [gate; up] stacked along dim 0
++            self[i].gate_proj.weight.data = (
++                gate_up[i, :moe_intermediate, :].clone().contiguous()
++            )
++            self[i].up_proj.weight.data = (
++                gate_up[i, moe_intermediate:, :].clone().contiguous()
++            )
++            self[i].down_proj.weight.data = down[i].clone().contiguous()
++
++
++@MoECalibrationModule.register("Qwen3MoeExperts")
++class SequentialQwen3MoeExperts(MoECalibrationModule):
++    """Unfuse Qwen3MoeExperts into per-expert nn.Linear modules at calibration.
++
++    ``is_permanent = True`` so the unfused layout is preserved in the saved
++    model — downstream loaders (vLLM, SGLang's qwen3_moe loader) must handle
++    the per-expert key layout.  This matches what
++    :class:`SequentialGemma4TextExperts` does for Gemma 4 and what the SGLang
++    side of our stack already expects for Qwen3.5/3.6 MoE.
++    """
+ 
+-        # One hot encode the selected experts to create an expert mask
+-        # this will be used to easily index which expert is going to be sollicitated
++    is_permanent = True
++
++    def __init__(
++        self,
++        original: Qwen3MoeExperts,
++        config: Qwen3MoeConfig,
++        calibrate_all_experts: bool = True,
++    ):
++        super().__init__()
++        self.num_experts = original.num_experts
++        self.hidden_dim = original.hidden_dim
++        self.intermediate_dim = original.intermediate_dim
++        self.calibrate_all_experts = calibrate_all_experts
++
++        expert_list = Qwen3MoeExpertsList(config, original)
++        for i, expert in enumerate(expert_list):
++            self.add_module(str(i), expert)
++
++    def forward(
++        self,
++        hidden_states: torch.Tensor,
++        top_k_index: torch.Tensor,
++        top_k_weights: torch.Tensor,
++    ) -> torch.Tensor:
++        final_hidden_states = torch.zeros_like(hidden_states)
+         expert_mask = torch.nn.functional.one_hot(
+-            selected_experts, num_classes=self.num_experts
+-        ).permute(2, 1, 0)
++            top_k_index, num_classes=self.num_experts
++        )
++        expert_mask = expert_mask.permute(2, 1, 0)
+ 
+-        for expert_idx, expert_layer in enumerate(self.experts):
+-            idx, top_x = torch.where(expert_mask[expert_idx].squeeze(0))
++        for expert_idx in range(self.num_experts):
++            top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
++            expert_layer = getattr(self, str(expert_idx))
+ 
+             if self.calibrate_all_experts:
+-                expert_out = expert_layer(hidden_states)[top_x]
++                # Pass all tokens through this expert so GPTQ accumulates
++                # Hessian stats from every sample; only gather the routed
++                # outputs for the actual forward result.
++                expert_out = expert_layer(hidden_states)[token_idx]
+             else:
+-                expert_out = expert_layer(hidden_states[top_x])
++                expert_out = expert_layer(hidden_states[token_idx])
+ 
+-            # TODO: double check
+-            if len(top_x) > 0:
+-                current_hidden_states = expert_out * routing_weights[top_x, idx, None]
++            if len(token_idx) > 0:
++                current_hidden_states = (
++                    expert_out * top_k_weights[token_idx, top_k_pos, None]
++                )
+                 final_hidden_states.index_add_(
+-                    0, top_x, current_hidden_states.to(hidden_states.dtype)
++                    0, token_idx, current_hidden_states.to(final_hidden_states.dtype)
+                 )
+ 
+-        final_hidden_states = final_hidden_states.reshape(
+-            batch_size, sequence_length, hidden_dim
+-        )
+-        return final_hidden_states, router_logits
+-
+-    def restore(self, original: torch.nn.Module) -> torch.nn.Module:
+-        return original
++        return final_hidden_states
