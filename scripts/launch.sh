@@ -28,7 +28,7 @@ source "$SCRIPT_DIR/common.sh"
 # --- Defaults (overridden by model preset, then by CLI flags) ---
 MODEL="${MODEL:-}"
 TOKENIZER=""
-QUANT="awq"
+QUANT="${QUANT:-awq}"
 DTYPE="float16"
 CTX=32768
 KV_DTYPE="fp8_e4m3"
