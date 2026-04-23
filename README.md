@@ -105,6 +105,7 @@ All numbers measured with `sglang.bench_serving`.  TPOT = Time Per Output Token 
 | Gemma 4 31B AWQ | [mattbucci/gemma-4-31B-it-AutoRound-AWQ](https://huggingface.co/mattbucci/gemma-4-31B-it-AutoRound-AWQ) | [google/gemma-4-31b-it](https://huggingface.co/google/gemma-4-31b-it) |
 | Qwen3-Coder-30B AWQ | [mattbucci/Qwen3-Coder-30B-A3B-AWQ](https://huggingface.co/mattbucci/Qwen3-Coder-30B-A3B-AWQ) | [Qwen/Qwen3-Coder-30B-A3B](https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B) |
 | Qwen3.6-35B-A3B AWQ (thinking+vision) | [mattbucci/Qwen3.6-35B-A3B-AWQ-thinking-vision](https://huggingface.co/mattbucci/Qwen3.6-35B-A3B-AWQ-thinking-vision) | [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) |
+| Qwen3.6-27B AWQ (thinking+vision) | [mattbucci/Qwen3.6-27B-AWQ-thinking-vision](https://huggingface.co/mattbucci/Qwen3.6-27B-AWQ-thinking-vision) | [Qwen/Qwen3.6-27B](https://huggingface.co/Qwen/Qwen3.6-27B) |
 
 Community checkpoints fail for several architectures (BOS issues, MoE under-calibration, DeltaNet destruction), which is why we self-calibrate.  Pipeline in `scripts/quantize/`.
 

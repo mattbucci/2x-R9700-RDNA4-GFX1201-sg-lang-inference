@@ -51,6 +51,7 @@ OUTPUT_DIR = os.environ.get(
 
 NUM_CALIBRATION_SAMPLES = int(os.environ.get("NUM_SAMPLES", "512"))
 MAX_SEQUENCE_LENGTH = int(os.environ.get("MAX_SEQ_LEN", "2048"))
+RECIPE = os.environ.get("RECIPE", "thinking_text")
 
 ram_gb = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / (1024**3)
 print(f"Model:  {BASE_MODEL}")
@@ -66,7 +67,7 @@ if ram_gb < 55:
 
 print("\n[1/4] Building calibration dataset...")
 rows = build_calibration_dataset(
-    recipe="thinking_text",
+    recipe=RECIPE,
     num_samples=NUM_CALIBRATION_SAMPLES,
     seed=42,
 )
