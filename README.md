@@ -20,7 +20,7 @@ High-throughput LLM inference on 2x AMD Radeon AI PRO R9700 (gfx1201, RDNA4) wit
 
 ## Known Issues
 
-- **Qwen3.5 thinking regression** — Current AWQ enters infinite `<think>` loop even for "capital of France" (validator confirmed empty content, 2048-token reasoning).  Root cause: Open-Platypus calibration had no thinking traces.  Fix in progress: `scripts/quantize/quantize_qwen35_thinking_aware.py` uses AM-Thinking + NuminaMath with `enable_thinking=True` in chat template.
+- **Qwen3.5 thinking regression** — FIXED (2026-04-19).  v1 AWQ entered infinite `<think>` loops because Open-Platypus calibration had no thinking traces.  v2 (`mattbucci/Qwen3.5-27B-AWQ-4bit-calibrated`, recalibrated with `quantize_qwen35_thinking_aware.py` on AM-Thinking + NuminaMath traces) terminates cleanly with `finish=stop` and answer in reasoning_content.
 - **Gemma4 31B Dense** — 15 tok/s with `--attention-backend torch_native` + Triton GEMV (FP32 dequant).  Triton attention degrades at ~400 tokens on Gemma4's 60-layer SWA (kernels pass in isolation; interaction bug).  Use torch_native for quality; low priority vs calibration work.
 - **GLM-4.5-Air REAP** — Blocked on all configs.  HSA crash in PyTorch `scaled_dot_product_attention` during prefill.  Also crashes on [Blackwell GPUs](https://github.com/sgl-project/sglang/issues/18874) (cross-vendor).  Likely ROCm/HIP SDPA kernel bug with high GQA ratios.
 - **CUDA graphs fragment VRAM at 32K+ context** — `--cuda-graph-bs` reserves 2+ GiB private pool that blocks AWQ forward alloc at long context.  All long-context presets use `--disable-cuda-graph`; ~9% TPOT cost.
@@ -87,8 +87,8 @@ makepkg -si
 | Coder-30B AWQ | MoE (128 experts) | 32K | 30 | — | `launch.sh coder-30b` | Working |
 | Gemma 4 26B AWQ | MoE (128 experts) | 4K | 30 | — | `launch.sh gemma4` | Working |
 | Gemma 4 31B AWQ | Dense | 8K | 15 | — | `launch.sh gemma4-31b` | Working (torch_native) |
-| Qwen3.5-27B AWQ | DeltaNet hybrid | 262K | 26 | 14 @65K | `launch.sh qwen35` | Working (thinking broken) |
-| Coder-Next 80B AWQ | MoE+DeltaNet (512 experts) | 131K | 24 | — | `launch.sh coder-next` | Working |
+| Qwen3.5-27B AWQ | DeltaNet hybrid | 262K | 26 | 14 @65K | `launch.sh qwen35` | Working (v2 thinking-aware shipped 2026-04-19) |
+| Coder-Next 80B AWQ | MoE+DeltaNet (512 experts) | 131K | 24 | — | `launch.sh coder-next` | Loads, crashes on first generate (causal_conv1d TP=2 shape mismatch — see Known Issues) |
 | Coder-Next REAM 60B | MoE+DeltaNet (384 experts) | 131K | 25 | — | `launch.sh coder-next-ream` | Working |
 | Qwen3.5-35B MoE GPTQ | MoE+DeltaNet (256 experts) | 262K | 14-16 | **12.4 @256K** | `launch.sh qwen35-moe` | Working |
 | Qwen3.6-35B MoE AWQ | MoE+DeltaNet (256 experts) | 262K | TBD | TBD | `launch.sh qwen36-moe` | Working (thinking+vision calibrated) |
