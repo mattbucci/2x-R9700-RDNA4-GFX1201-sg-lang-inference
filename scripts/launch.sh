@@ -20,6 +20,7 @@
 #   qwen35         Qwen3.5-27B DeltaNet AWQ (262K)
 #   qwen35-moe     Qwen3.5-35B-A3B MoE+DeltaNet AWQ (REAM/REAP compressed)
 #   qwen36-moe     Qwen3.6-35B-A3B MoE+DeltaNet AWQ (thinking+vision, 262K)
+#   qwen36-27b     Qwen3.6-27B dense AWQ (thinking+vision, 262K)
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -173,6 +174,23 @@ apply_preset() {
             CUDA_GRAPH="--disable-cuda-graph"
             MAMBA_CACHE="--max-mamba-cache-size 8"
             CHAT_TEMPLATE="--chat-template \$MODEL/chat_template.jinja"
+            REASONING="--reasoning-parser qwen3"
+            OVERLAP=""
+            ;;
+        qwen36-27b)
+            # Qwen3.6-27B (2026-04-21 release): dense VL, Qwen3_5 arch family.
+            # Native AWQ converted from CT (6x faster than CT path, same recipe
+            # as qwen36-moe).  Thinking + vision default; no audio.
+            MODEL="${MODEL:-$MODELS_DIR/Qwen3.6-27B-AWQ-native-thinking-vision}"
+            if [[ -f "$MODEL/config.json" ]] && \
+               grep -q '"quant_method": *"compressed-tensors"' "$MODEL/config.json" 2>/dev/null; then
+                QUANT="compressed-tensors"
+            else
+                QUANT="awq"
+            fi
+            CTX=262144; MEM=0.80; MAX_RUNNING=8; CHUNKED=8192; DECODE_STEPS=32
+            CUDA_GRAPH="--disable-cuda-graph"
+            MAMBA_CACHE="--max-mamba-cache-size 8"
             REASONING="--reasoning-parser qwen3"
             OVERLAP=""
             ;;
