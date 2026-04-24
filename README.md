@@ -11,12 +11,18 @@ High-throughput LLM inference on 2x AMD Radeon AI PRO R9700 (gfx1201, RDNA4) wit
 - Qwen3.5 / Qwen3.6: image + video (no audio)
 - Devstral 24B: image only
 
-### Active work (in priority order)
+### Active work (in priority order, 2026-04-24)
 
-1. **Qwen3.6-35B-A3B (2026-04-18 release) — WORKING** — Same MoE+DeltaNet architecture as Qwen3.5-35B (patch 009 covers it), thinking-by-default and native multimodal.  Community GPTQ `palmfuture/Qwen3.6-35B-A3B-GPTQ-Int4` loads on our stack via `qwen36-moe` preset.  Validator passes `basic` (`answer=paris, finish=stop`) AND `thinking` (`reasoning_seen, terminated, 396 tokens, finish=stop`) on the first try — Qwen3.6 preserves thinking through community GPTQ, unlike Qwen3.5.  Setup: `python scripts/quantize/flatten_qwen36_config.py $MODEL` (promotes text_config.*, sets architecture to `Qwen3_5MoeForConditionalGeneration` for patch 009 compat) then `scripts/launch.sh qwen36-moe`.  256K bench in progress.
-2. **Thinking+vision aware recalibration pipeline (operational)** — `scripts/quantize/calibration_datasets.py` builds mixed recipes (`thinking_text`, `thinking_vision`, `code_vision`, `code_thinking`).  `scripts/quantize/run_full_pipeline.sh <model>` does calibrate → CT→AWQ → vision merge → launch → validate.  *In flight:* Qwen3.5-27B smoke calibration completed (32 samples × 512 tokens, 1.3h).  Production run (512 × 2048) queued.
-3. **256K single-user context sweeps** — Ongoing (see Performance below).
-4. **Gemma4 reasoning parser (patch 014)** — Landed.  Shipped to 3090 team.  Next: verify streaming behavior with `--reasoning-parser gemma4` in agent workload.
+1. **Coder-Next 80B long decode HSAIL 0x1016.** conv1d TP=2 bug is FIXED (patch 016, commit 343e6c3); model now boots and short-generates.  Longer decodes abort inside a Triton kernel (reproduces with `--attention-backend torch_native` too, so it's DeltaNet `causal_conv1d_update`/FLA or NCCL, not attention).  Next bisect: instrument `gdn_backend.py` decode path, try `SGLANG_ATTN_BACKEND=torch_native` + disabling piecewise CUDA graph capture, confirm whether the crash is seq-length-threshold or token-count-threshold triggered.  Priority because Coder-Next-REAM (60B pruned) works → bug is in the full-weights path, may also gate Qwen3-Next-class models in future.
+2. **Qwen3.6-35B recipe bug carry-over for our 35B native AWQ.** Our shared_expert got INT4-quantized because the calibration recipe used `re:.*shared_experts.*` (plural) instead of `re:.*shared_expert\..*` (singular + dot).  On ROCm the native-AWQ conversion still runs fast (6× CT), but shared_expert is a per-token residual path so this is a subtle quality risk.  Plan: requantize 35B with corrected ignore list (10-14h CPU) after HF upload of current weights completes; re-bench; publish as v2.
+3. **HSAIL 0x1016 shared investigation.** Same exception class hits Gemma4-31B long decode (600+ tokens) and Coder-Next long decode.  Likely shared RDNA4-Triton kernel issue.  Hypothesis: a per-block reduction uses a shape that trips a wavefront-32 miscompile on gfx1201.  Plan: minimal repro script → Triton IR dump → either kernel patch or upstream bug report.
+4. **Qwen3.6-27B HF upload.** Bench done (24.1 short / 9.8 @131K, commit 8ec49e9), launch preset shipped, but HuggingFace upload not started.  Queue after 35B upload finishes.
+5. **Calibration-quality audit across all self-calibrated models.** The shared_expert bug suggests other recipes may have similar ignore-pattern typos.  Audit: print the effective `ignore=[...]` vs saved `model.safetensors` for Devstral, Gemma4-26B/31B, Coder-30B, Qwen3.5-27B/35B — flag anything that should have stayed BF16 but got INT4.
+6. **Thinking+vision recalibration pipeline — operational.** `scripts/quantize/calibration_datasets.py` builds mixed recipes (`thinking_text`, `thinking_vision`, `code_vision`, `code_thinking`, `thinking_vision_video`, `thinking_vision_video_audio`).  `scripts/quantize/run_full_pipeline.sh <model>` does calibrate → CT→AWQ → vision merge → launch → validate.
+7. **256K single-user context sweeps** — ongoing (see Performance below).
+8. **Gemma4 reasoning parser (patch 014)** — landed.  Next: verify streaming with `--reasoning-parser gemma4` in agent workload.
+
+Multi-hour calibrations are authorized and run in the background via `setsid` + PID file; see `CLAUDE.md`.
 
 ## Known Issues
 
