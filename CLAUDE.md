@@ -24,7 +24,11 @@ scripts/launch.sh glm45-air            # GLM-4.5-Air REAP 82B MoE AWQ
 scripts/launch.sh gemma4               # Gemma 4 26B MoE AWQ
 scripts/launch.sh gemma4-31b           # Gemma 4 31B Dense AWQ
 scripts/launch.sh qwen35               # Qwen3.5-27B DeltaNet AWQ (262K)
-scripts/launch.sh qwen35-moe           # Qwen3.5-35B MoE GPTQ (262K) — supersedes → Qwen3.6 once calibrated
+scripts/launch.sh qwen35-moe           # Qwen3.5-35B MoE GPTQ (262K)
+scripts/launch.sh qwen36-moe           # Qwen3.6-35B-A3B MoE AWQ thinking+vision (262K, native AWQ)
+scripts/launch.sh qwen36-27b           # Qwen3.6-27B dense AWQ thinking+vision (262K, native AWQ)
+# CT→native AWQ conversion (6x decode speedup on ROCm vs compressed-tensors)
+python scripts/quantize/convert_moe_ct_to_awq.py <ct_src> <awq_dst> --group-size 128
 # Calibration + validation pipeline
 scripts/quantize/run_full_pipeline.sh qwen35       # calib → CT→AWQ → merge vision → launch → validate
 scripts/quantize/run_full_pipeline.sh gemma4-26b   # same, for Gemma4 26B MoE
