@@ -27,6 +27,8 @@ for p in ../../patches/0*.patch; do git apply "$p"; done
 | 012 | rdna4-sliding-window-decode-fix | 168 | `torch_native` SWA support for decode/extend; translate full pool → SWA pool; without it, Gemma 4 crashes on any seq > window |
 | 013 | gemma4-multimodal | 2,887 | Vision + audio encoders, multimodal processor, BF16 vision (FP16 overflows after 27 layers), per-expert AWQ loading, SDPA vision backend |
 | 014 | gemma4-reasoning-parser | 40 | Cherry-picked upstream PR #21952: `Gemma4Detector` for `<|channel>` / `<channel|>` — enables `--reasoning-parser gemma4` |
+| 015 | qwen36-vision-config-dict-wrap | — | Wrap dict `vision_config` in `SimpleNamespace` so Qwen3.6 VL loads through our rebuilt config |
+| 016 | qwen3next-conv1d-tp | — | Split Qwen3-Next vs Qwen3.5 mamba2_cache_params: Coder-Next 80B uses TP-sharded conv/SSM state; Qwen3.5 overrides to `tp_world_size=1` to match its replicated DeltaNet |
 
 ## Build stack
 
