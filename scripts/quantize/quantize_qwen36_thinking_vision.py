@@ -107,10 +107,11 @@ recipe = GPTQModifier(
     scheme="W4A16",
     ignore=[
         "lm_head",
-        "re:.*in_proj_b$",        # DeltaNet beta gate
-        "re:.*in_proj_a$",        # DeltaNet alpha gate
-        "re:.*mlp.gate$",         # MoE router (dense FP16 per rules)
-        "re:.*shared_experts.*",  # keep shared experts BF16 too? (optional — try both)
+        "re:.*in_proj_b$",             # DeltaNet beta gate
+        "re:.*in_proj_a$",             # DeltaNet alpha gate
+        r"re:.*mlp\.gate$",            # MoE router (dense FP16 per rules)
+        r"re:.*shared_expert\..*",     # Qwen3.6 shared expert {gate,up,down}_proj — SINGULAR (2026-04-24: plural was a silent bug)
+        r"re:.*shared_expert_gate$",   # scalar gate [1, H] — out_dim=1 breaks AWQ packing
         r"re:.*vision_tower.*",
         r"re:.*visual\..*",
         r"re:.*multi_modal_projector.*",
