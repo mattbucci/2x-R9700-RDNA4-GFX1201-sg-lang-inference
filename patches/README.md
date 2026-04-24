@@ -40,6 +40,15 @@ for p in ../../patches/0*.patch; do git apply "$p"; done
 | PyTorch | 2.12.0+rocm7.2 | nightly |
 | ROCm | 7.2.1 | Arch Linux packages |
 
+## Recent resolved items
+
+Chronological log of fixes that have shipped.  Anything here has landed in `main` — open issues live in the top-level [README.md](../README.md).
+
+- **2026-04-24 — Qwen3.6-35B-A3B CT→native AWQ, 6× decode speedup.** CompressedTensorsWNA16TritonMoE on ROCm ran 3.6 tok/s short / 3.4 @131K; repacking the same weights into native AWQ via `scripts/quantize/convert_moe_ct_to_awq.py` (unpack → AWQ interleave → repack for SGLang's fused Triton AWQ GEMM, with RTN re-quantization of non-CT BF16 expert weights and BF16 dequant fallback for `shared_expert_gate [1, H]` whose out dim isn't divisible by 8) gets **21.6 tok/s short / 20.6 @131K**.  `launch.sh qwen36-moe` default now points at `Qwen3.6-35B-A3B-AWQ-native-thinking-vision`.  Commit `b6777e1`.  3090 team picked up the same converter and measured **33 tok/s** on NVIDIA (awq_marlin kernel is faster at this size), validator 4/4 PASS.
+- **2026-04-24 — Coder-Next 80B conv1d TP=2 shape mismatch (patch 016).** `x=[4096,6] weight=[4096,4] conv_states=[9,8192,3]` — conv_state was allocated full-dim 8192 while Qwen3-Next DeltaNet projections are TP-sharded to 4096.  Root cause: RDNA4 DeltaNet-replication fix leaked into `Qwen3NextConfig.mamba2_cache_params` as a hard-coded `tp_world_size=1`.  Fix: restore upstream `tp_world_size=get_attention_tp_size()` on Qwen3-Next; override in `Qwen3_5TextConfig.mamba2_cache_params` to keep `tp_world_size=1` for the Qwen3.5 replicated-DeltaNet path.  Coder-Next 80B now boots + short-generates.  (HSAIL 0x1016 on long decode is a separate open issue.)  Commit `343e6c3`.
+- **2026-04-19 — Qwen3.5 thinking regression.** v1 AWQ (`mattbucci/Qwen3.5-27B-AWQ-4bit-calibrated`) entered infinite `<think>` loops because Open-Platypus calibration had zero thinking traces — the model never saw a terminated `</think>`.  v2 recalibrated via `quantize_qwen35_thinking_aware.py` on AM-Thinking-v1-Distilled + NuminaMath-CoT terminates cleanly with `finish=stop` and answer in `reasoning_content`.  Shipped in-place to the same HF repo so existing pulls auto-upgrade.
+- **2026-04-19 — Cross-team multimodal calibration upgrade.** Replaced VATEX with `lmms-lab/LLaVA-Video-178K` (178K caps + 960K open-ended QA + 196K MC, FPS=1 untrimmed, already chat-template formatted) and added `google/covost2` for instruction-style audio.  Available as `thinking_vision_video` and `thinking_vision_video_audio` recipes in `scripts/quantize/calibration_datasets.py`.  3090 team pulled the same recipes.
+
 ## Key findings
 
 1. **System RCCL 7.2 has P2P/IPC for gfx1201** — no custom RCCL build needed.
