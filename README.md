@@ -113,7 +113,7 @@ All numbers measured with `sglang.bench_serving`.  TPOT = Time Per Output Token 
 |-------|-------------|------|
 | Devstral-24B AWQ | [mattbucci/Devstral-24B-AWQ-4bit-calibrated](https://huggingface.co/mattbucci/Devstral-24B-AWQ-4bit-calibrated) | [mistralai/Devstral-Small-2507](https://huggingface.co/mistralai/Devstral-Small-2507) |
 | Qwen3.5-27B AWQ | [mattbucci/Qwen3.5-27B-AWQ-4bit-calibrated](https://huggingface.co/mattbucci/Qwen3.5-27B-AWQ-4bit-calibrated) | [Qwen/Qwen3.5-27B](https://huggingface.co/Qwen/Qwen3.5-27B) |
-| Gemma 4 26B MoE AWQ | [mattbucci/gemma-4-26B-A4B-it-AWQ-GPTQ-v2-fixed](https://huggingface.co/mattbucci/gemma-4-26B-A4B-it-AWQ-GPTQ-v2-fixed) | [google/gemma-4-26b-a4b-it](https://huggingface.co/google/gemma-4-26b-a4b-it) |
+| Gemma 4 26B MoE AWQ | [mattbucci/gemma-4-26B-AWQ](https://huggingface.co/mattbucci/gemma-4-26B-AWQ) | [google/gemma-4-26b-a4b-it](https://huggingface.co/google/gemma-4-26b-a4b-it) |
 | Gemma 4 31B AWQ | [mattbucci/gemma-4-31B-it-AutoRound-AWQ](https://huggingface.co/mattbucci/gemma-4-31B-it-AutoRound-AWQ) | [google/gemma-4-31b-it](https://huggingface.co/google/gemma-4-31b-it) |
 | Qwen3-Coder-30B AWQ | [mattbucci/Qwen3-Coder-30B-A3B-AWQ](https://huggingface.co/mattbucci/Qwen3-Coder-30B-A3B-AWQ) | [Qwen/Qwen3-Coder-30B-A3B](https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B) |
 | Qwen3.6-35B-A3B AWQ (thinking+vision) | [mattbucci/Qwen3.6-35B-A3B-AWQ-thinking-vision](https://huggingface.co/mattbucci/Qwen3.6-35B-A3B-AWQ-thinking-vision) (CT) · [mattbucci/Qwen3.6-35B-A3B-AWQ-native-thinking-vision](https://huggingface.co/mattbucci/Qwen3.6-35B-A3B-AWQ-native-thinking-vision) (native AWQ, 6× faster decode) | [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) |
