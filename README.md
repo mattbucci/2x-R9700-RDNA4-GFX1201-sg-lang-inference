@@ -118,7 +118,7 @@ All numbers measured with `sglang.bench_serving`.  TPOT = Time Per Output Token 
 | Qwen3-Coder-30B AWQ | [mattbucci/Qwen3-Coder-30B-A3B-AWQ](https://huggingface.co/mattbucci/Qwen3-Coder-30B-A3B-AWQ) | [Qwen/Qwen3-Coder-30B-A3B](https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B) |
 | Qwen3.6-35B-A3B AWQ (thinking+vision) | [mattbucci/Qwen3.6-35B-A3B-AWQ-thinking-vision](https://huggingface.co/mattbucci/Qwen3.6-35B-A3B-AWQ-thinking-vision) (CT) · [mattbucci/Qwen3.6-35B-A3B-AWQ-native-thinking-vision](https://huggingface.co/mattbucci/Qwen3.6-35B-A3B-AWQ-native-thinking-vision) (native AWQ, 6× faster decode) | [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) |
 | Qwen3.6-27B AWQ (thinking+vision) | [mattbucci/Qwen3.6-27B-AWQ-thinking-vision](https://huggingface.co/mattbucci/Qwen3.6-27B-AWQ-thinking-vision) (CT) · [mattbucci/Qwen3.6-27B-AWQ-native-thinking-vision](https://huggingface.co/mattbucci/Qwen3.6-27B-AWQ-native-thinking-vision) (native AWQ) | [Qwen/Qwen3.6-27B](https://huggingface.co/Qwen/Qwen3.6-27B) |
-| Qwen3-Coder-REAP-25B AWQ (code+thinking) | [mattbucci/Qwen3-Coder-REAP-25B-A3B-AWQ-native](https://huggingface.co/mattbucci/Qwen3-Coder-REAP-25B-A3B-AWQ-native) (uploading 2026-04-24) | [cerebras/Qwen3-Coder-REAP-25B-A3B](https://huggingface.co/cerebras/Qwen3-Coder-REAP-25B-A3B) |
+| Qwen3-Coder-REAP-25B AWQ (code+thinking) | [mattbucci/Qwen3-Coder-REAP-25B-A3B-AWQ-native](https://huggingface.co/mattbucci/Qwen3-Coder-REAP-25B-A3B-AWQ-native) | [cerebras/Qwen3-Coder-REAP-25B-A3B](https://huggingface.co/cerebras/Qwen3-Coder-REAP-25B-A3B) |
 
 Community checkpoints fail for several architectures (BOS issues, MoE under-calibration, DeltaNet destruction), which is why we self-calibrate.  Pipeline in `scripts/quantize/`.
 
