@@ -195,7 +195,9 @@ apply_preset() {
             OVERLAP=""
             ;;
         qwen36-27b)
-            # Qwen3.6-27B (2026-04-21 release): dense VL, Qwen3_5 arch family.
+            # Qwen3.6-27B (2026-04-21 release): DeltaNet+attn hybrid VL (3:1
+            # linear/full pattern across 64 layers — same family as Qwen3.5-27B
+            # and Qwen3.6-35B-A3B, NOT pure Dense), Qwen3_5 arch class.
             # Native AWQ converted from CT (6x faster than CT path, same recipe
             # as qwen36-moe).  Thinking + vision default; no audio.
             MODEL="${MODEL:-$MODELS_DIR/Qwen3.6-27B-AWQ-native-thinking-vision}"
