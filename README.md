@@ -41,6 +41,23 @@ Open issues only.  Fixed/shipped items live in [patches/README.md](patches/READM
   4. **gemma-4-31B-it-AutoRound-AWQ** — registers as `Gemma4ForCausalLM` so vision tower never engages; image tokens silently fall through to text-only path → hallucinated captions. Quick metadata fix to `Gemma4ForConditionalGeneration` would unblock vision evaluation.
   5. **Other models work cleanly on 3090:** Qwen3.6-35B-A3B-AWQ (4/4), Qwen3.6-27B-AWQ (4/4), Qwen3-Coder-30B-A3B-AWQ (193 tok/s peak), Devstral-24B-AWQ-4bit-calibrated (56 tok/s @ 217K), Qwen3.5-27B-AWQ-4bit-calibrated (basic+thinking PASS).
 - **Cross-team request — Qwen3-Coder-30B-A3B REAM (2026-04-26).** 3090 team is running a SWE-bench Lite eval (opencode harness against local SGLang) to recommend the best-on-this-system coding model. Current queue: Coder-30B baseline / Coder-REAP-25B (Cerebras, your HF upload) / Devstral-24B / Qwen3.6-35B-A3B / Qwen3-30B-REAM. **Ask: would you also produce a `Qwen3-Coder-30B-A3B-REAM` from the BF16 base (Samsung SAIL `merge.py`)?** That gives us a clean three-way coder comparison — vanilla / REAP / REAM — on the model class that matters most for the recommendation. Same `c4 + the-stack + AM-Thinking` calibration mix as your in-flight Qwen3.6-35B-A3B-REAM should be appropriate. Not blocking — happy to publish the eval with whichever 3 of 4 land first; this would unlock the algorithm A/B for our top recommendation.
+
+- **Cross-team bug — Qwen3-Coder chat template breaks on OpenAI-spec `tool_calls.arguments` strings (2026-04-27).** The `chat_template.jinja` shipped in `mattbucci/Qwen3-Coder-{30B-A3B,REAP-25B-A3B}-AWQ` does `{%- for args_name, args_value in tool_call.arguments|items %}` — assumes `tool_call.arguments` is a dict. The OpenAI spec (and any client following it: opencode, the OpenAI Python SDK, Vercel AI SDK, sgl-router with passthrough) sends `arguments` as a **JSON-encoded string**, not a dict. Result: every multi-turn request that contains an assistant `tool_calls` history HTTP-500s in SGLang with `TypeError: Can only get item pairs from a mapping.` (jinja `do_items`). Hit this hard on 3090 SWE-bench rollouts — burned hours producing empty diffs because every retry collapsed at the second turn. **Fix is a 6-line jinja patch:** parse the string with the `from_json` filter when it's a string before calling `|items`. Diff:
+  ```jinja
+              {%- if tool_call.arguments is defined %}
+  +               {%- if tool_call.arguments is string %}
+  +                   {%- set _args = tool_call.arguments | from_json %}
+  +               {%- else %}
+  +                   {%- set _args = tool_call.arguments %}
+  +               {%- endif %}
+  -               {%- for args_name, args_value in tool_call.arguments|items %}
+  +               {%- for args_name, args_value in _args|items %}
+                      {{- '<parameter=' + args_name + '>\n' }}
+                      ...
+                  {%- endfor %}
+              {%- endif %}
+  ```
+  Both Coder-30B and Coder-REAP-25B uploads need this patch (REAP-25B was patched locally on 3090 and verified — opencode rollouts work after). Suggest re-uploading the patched template via `huggingface_hub.upload_file('chat_template.jinja')` to fix it server-side for any future puller. Not 3090-specific; this affects anyone using these checkpoints with OpenAI-style tool_call history regardless of stack.
 - **auto-round pre-quantized MoE weights need repacking** (2026-04-24).  `sasa2000/Qwen3-30B-A3B-Instruct-2507-REAM-W4A16` (auto-round GPTQ, sym=True, `packing_format=auto_round:auto_gptq`) boots cleanly on our stack after rewriting `quant_method=gptq` in config.json but fires HSAIL 0x1016 on first decode — likely the sequential GPTQ pack order trips SGLang's AWQ-interleaved `moe_wna16` kernel expectation.  Workaround: write a GPTQ→AWQ repacker (sym=True → zero_point=8, sequential → AWQ_PACK_ORDER) or self-calibrate from the SamsungSAILMontreal BF16 base.
 ### Evergreen cross-team lessons
 
