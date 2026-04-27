@@ -71,6 +71,26 @@ Any job expected to run > 30 minutes (calibrations, long benches, 50 GB+ downloa
   - **3090 team (NVIDIA Ampere, AWQ_Marlin):** `~/AI/2x-3090-GA102-300-A1-sglang-inference` — long-context benchmarks reference, `validate_chat_template.py` owner.
   - **M4 team (Apple Silicon, MLX):** `~/AI/m4-sglang-inference` — patch 013 owner (DeltaNet cache-wiring fix), identified video+audio modality gaps in community checkpoints.
 
+## HuggingFace Naming Convention
+
+Repos under `mattbucci/` follow a single canonical pattern. **No descriptive suffixes** — drop `-thinking-vision`, `-4bit`, `-4bit-calibrated`, `-native`, `-v2-fixed` and any other internal labels. The HF model card carries that detail; the repo name should not.
+
+Format: `mattbucci/<ModelName>-<format>` where `<format>` is one of:
+- `AWQ` — native AWQ (4-bit), the recommended runtime path on RDNA4 (`moe_wna16` MoE / `awq` Linear)
+- `AWQ-CT` — compressed-tensors AWQ, only for stacks where the CT loader is required (e.g. SGLang's NVIDIA path for some MoE classes)
+- `GPTQ` / `GPTQ-CT` — same idea for GPTQ-quantized variants
+
+Examples:
+- `mattbucci/Qwen3.6-35B-A3B-AWQ` ✓
+- `mattbucci/Qwen3.6-35B-A3B-AWQ-CT` ✓
+- `mattbucci/Devstral-24B-AWQ` ✓
+- `mattbucci/Qwen3-Coder-REAP-25B-A3B-AWQ` ✓ (REAP/REAM are part of the model name, not a format suffix)
+- `mattbucci/Qwen3.5-27B-AWQ-4bit-calibrated` ✗ — should be `Qwen3.5-27B-AWQ`
+- `mattbucci/Devstral-24B-AWQ-4bit-calibrated` ✗ — should be `Devstral-24B-AWQ`
+- `mattbucci/Qwen3.6-35B-A3B-AWQ-native-thinking-vision` ✗ — should be `Qwen3.6-35B-A3B-AWQ`
+
+If you discover a non-conforming name, rename via `huggingface_hub.HfApi.move_repo()` (preserves a 307 redirect from the old path so existing pulls don't break). Update the README HF link table after renaming.
+
 ## Chat Template Rule
 
 Chat templates matter. We've been burned by:
