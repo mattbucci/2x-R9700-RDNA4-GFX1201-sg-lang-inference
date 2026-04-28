@@ -1,0 +1,31 @@
+--- a/transformers/conversion_mapping.py
++++ b/transformers/conversion_mapping.py
+@@ -49,7 +49,7 @@
+     "longcat_flash": "qwen2_moe",
+     "solar_open": "qwen2_moe",
+-    "qwen3_moe": "qwen2_moe",
++    # DISABLED FOR REAM: "qwen3_moe": "qwen2_moe",
+     "qwen3_omni_moe": "qwen2_moe",
+     "qwen3_omni_moe_thinker": "qwen2_moe",
+     "qwen3_next": "qwen2_moe",
+
+# Apply with:
+#   patch -p1 -d $CONDA_PREFIX/lib/python3.12/site-packages/ < transformers_disable_qwen3moe_fusion.patch
+#
+# Why: transformers 5.x auto-fuses Qwen3MoeForCausalLM per-expert ModuleList
+# into a 3D `gate_up_proj` tensor at load time via MergeModulelist. REAM's
+# merger expects per-expert format and chokes with `MergeModulelist on
+# tensors destined for ...mlp.experts.gate_up_proj. Ckpt contains: 2`.
+#
+# This one-line patch removes the qwen3_moe → qwen2_moe alias so the
+# conversion is skipped, and the model loads in its on-disk per-expert
+# format that REAM works with.
+#
+# Side effects on serving stack: SGLang/llmcompressor have their own
+# loaders for Qwen3MoeForCausalLM (don't go through transformers
+# from_pretrained for the MoE path), so this patch only affects HF-side
+# AutoModelForCausalLM loads — exactly where we want REAM's merge.py to
+# pick up the per-expert layout. Verified harmless to runtime serving.
+#
+# Use case: building Qwen3-Coder-30B-A3B-REAM, or any Qwen3MoeForCausalLM
+# REAM/REAP self-pruning project on this env.
