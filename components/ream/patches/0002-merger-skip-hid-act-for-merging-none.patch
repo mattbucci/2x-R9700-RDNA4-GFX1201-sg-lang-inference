@@ -1,0 +1,219 @@
+diff --git a/merge.py b/merge.py
+index 560acda..b688ce1 100644
+--- a/merge.py
++++ b/merge.py
+@@ -100,6 +100,26 @@ if __name__ == '__main__':
+         default=None,
+         type=str,
+         help='path to the safe tensors file where MTP weights are stored')
++    parser.add_argument(
++        '--calibration_data_size',
++        default=3072,
++        type=int,
++        help='number of samples per dataset (matching pre-cached .pt files)')
++    parser.add_argument(
++        '--checkpoint_dir',
++        default=None,
++        type=str,
++        help='directory for per-layer checkpoints during merging (crash-recovery)')
++    parser.add_argument(
++        '--checkpoint_every',
++        default=1,
++        type=int,
++        help='write checkpoint every N completed layers (default: 1)')
++    parser.add_argument(
++        '--resume_from',
++        default=None,
++        type=str,
++        help='path to a checkpoint dir (e.g. <checkpoint_dir>/layer_005) to resume from; loads its weights as the starting model and skips layers 0..N already merged')
+ 
+     args = init_config(mode='merge', parser=parser, verbose=True)
+ 
+@@ -108,14 +128,59 @@ if __name__ == '__main__':
+     if tokenizer.pad_token_id is None:
+         print('Setting pad_token_id to eos_token_id', flush=True)
+         tokenizer.pad_token_id = tokenizer.eos_token_id
++
++    # Resume support: if --resume_from given, load weights from that checkpoint
++    # instead of the original base model. The architecture must match (same
++    # config + reduced expert count for already-merged layers).
++    _resume_layer = -1
++    model_load_path = args.model
++    if args.resume_from:
++        import json
++        progress_path = os.path.join(args.resume_from, 'merge_progress.json')
++        if os.path.exists(progress_path):
++            with open(progress_path) as f:
++                _resume_layer = json.load(f).get('last_completed_layer', -1)
++        model_load_path = args.resume_from
++        print(f'RESUME: loading model from {model_load_path}, will skip layers 0..{_resume_layer}', flush=True)
++
++    _device_map = os.environ.get('REAM_DEVICE_MAP', 'cpu')
++    _low_cpu_mem = os.environ.get('REAM_LOW_CPU_MEM', '0') == '1'
+     model = AutoModelForCausalLM.from_pretrained(
+-        args.model,
++        model_load_path,
+         torch_dtype='auto',
+-        device_map='cpu' ,
+-        cache_dir=None if os.path.exists(args.model) else args.cache_dir,
++        device_map=_device_map,
++        cache_dir=None if os.path.exists(model_load_path) else args.cache_dir,
+         local_files_only=not args.download,  # download the model manually first (see README for examples)
+-        low_cpu_mem_usage=False,  # to avoid loading on meta device during merging
++        low_cpu_mem_usage=_low_cpu_mem,  # to avoid loading on meta device during merging
++        ignore_mismatched_sizes=bool(args.resume_from),  # checkpoints have merged-shape layers
+     ).eval()
++    # When resuming from a checkpoint, merged layers were saved at 192 experts but
++    # transformers re-init them at 256 (config global). Resize them in place.
++    if args.resume_from and _resume_layer >= 0:
++        from safetensors import safe_open
++        import glob
++        # Find which layers actually have merged shapes in the checkpoint
++        ckpt_files = glob.glob(os.path.join(args.resume_from, '*.safetensors'))
++        merged_shapes = {}
++        for f in ckpt_files:
++            with safe_open(f, framework='pt') as sf:
++                for k in sf.keys():
++                    if 'mlp.experts.gate_proj' in k:
++                        # extract layer index and expert count from shape
++                        import re
++                        m = re.match(r'.*layers\.(\d+)\.mlp\.experts\.(\d+)\.gate_proj', k)
++                        if m:
++                            layer_idx = int(m.group(1))
++                            exp_idx = int(m.group(2))
++                            merged_shapes[layer_idx] = max(merged_shapes.get(layer_idx, 0), exp_idx + 1)
++        # Reload merged-layer experts with correct counts
++        for layer_idx, n_experts in merged_shapes.items():
++            if n_experts < 256:  # actually merged
++                old_experts = model.model.layers[layer_idx].mlp.experts
++                # Slice the ModuleList down to n_experts (drop the placeholder ones)
++                model.model.layers[layer_idx].mlp.experts = type(old_experts)([old_experts[i] for i in range(n_experts)])
++                model.model.layers[layer_idx].mlp.num_experts = n_experts
++        print(f'RESUME: resized {len([n for n in merged_shapes.values() if n<256])} merged layers', flush=True)
+ 
+     print(f'Number of parameters before merging: {model.num_parameters()}')
+     for name, p in model.named_parameters():
+@@ -154,7 +219,11 @@ if __name__ == '__main__':
+                     group_size=args.group_size,
+                     sequential=not args.no_sequential,
+                     use_gate_output=not args.no_gate_output,
+-                    gated_sim=not args.no_gated_sim)
++                    gated_sim=not args.no_gated_sim,
++                    calibration_data_size=args.calibration_data_size,
++                    checkpoint_dir=args.checkpoint_dir,
++                    checkpoint_every=args.checkpoint_every)
++    merger._resume_from_layer = _resume_layer
+     model = merger.fit()
+     print(f'Number of parameters after merging: {model.num_parameters()}')
+ 
+diff --git a/ream/merger.py b/ream/merger.py
+index a557034..aa7de4c 100644
+--- a/ream/merger.py
++++ b/ream/merger.py
+@@ -44,7 +44,9 @@ class Merger:
+                  calibration_data_size: int = 3072,
+                  calibration_data_seq_len: int = 512,
+                  seed: int = 42,
+-                 verbose: bool = True
++                 verbose: bool = True,
++                 checkpoint_dir: str = None,
++                 checkpoint_every: int = 1,
+                  ):
+         """
+         Default parameters are good for merging Qwen3 models like Qwen3-Coder-Next.
+@@ -70,6 +72,9 @@ class Merger:
+         self.model = model
+         self.mtp_state_dict = mtp_state_dict
+         self.merge_size = merge_size
++        self.checkpoint_dir = checkpoint_dir
++        self.checkpoint_every = checkpoint_every
++        self._resume_from_layer = -1  # set by load_checkpoint() if resuming
+         self.first_moe_layer = getattr(model.config, 'first_k_dense_replace', 0)  # e.g. for GLM models
+         first_moe = model.model.layers[self.first_moe_layer].mlp
+         if not hasattr(first_moe, 'top_k'):
+@@ -205,7 +210,9 @@ class Merger:
+ 
+                 if self.use_gate_output:
+                     expert_outs['gate'].append(gate.data.cpu())
+-                expert_outs['hid_act'].append(act.data.cpu())
++                # Skip activation collection for REAP (--merging none) — saves 12GB+ CPU
++                if self.merging != 'none':
++                    expert_outs['hid_act'].append(act.data.cpu())
+ 
+                 if self.saliency == 'reap':
+                     expert_outs['final'] += (final.data.mean(1, keepdim=True) / n_batches).cpu()  # (E,1,H)
+@@ -297,6 +304,20 @@ class Merger:
+         # main loop over layers
+         for layer_ind in range(self.num_layers):
+             verbose = self.verbose and layer_ind == 0
++            # === Skip layers already done in a prior run (resume support) ===
++            if layer_ind <= self._resume_from_layer:
++                if layer_ind >= self.first_moe_layer:
++                    moe_layer = self.model.model.layers[layer_ind].mlp
++                    if get_num_experts(moe_layer) == self.merge_size:
++                        print(f'RESUME: skipping layer {layer_ind} (already merged to {self.merge_size} experts)', flush=True)
++                        # still need to propagate hidden states forward through this already-merged layer
++                        if self.sequential:
++                            _, states = self._forward_pass(states, layer_ind,
++                                                           collect_outputs=False,
++                                                           upd_hid=True,
++                                                           inputs_embeds=inputs_embeds,
++                                                           verbose=False)
++                        continue
+ 
+             if layer_ind < self.first_moe_layer:
+                 # first layer(s) can be dense (like in GLM), so just propagate hidden states
+@@ -329,12 +350,14 @@ class Merger:
+                     gate_logits = None
+ 
+                 expert_logits = expert_outs['final']  # shape: (E, 1, H)
+-                expert_act = torch.cat(expert_outs['hid_act'], dim=1)  # shape: (E, len(ind)*n_chunks, D)
++                # expert_act is only populated when self.merging != 'none' (REAP skips it)
++                expert_act = (torch.cat(expert_outs['hid_act'], dim=1)
++                              if expert_outs['hid_act'] else None)
+                 saliency = expert_outs['saliency']
+ 
+                 if verbose:
+                     print(f'layer {layer_ind}: expert_logits', expert_logits.shape, expert_logits.dtype,
+-                          'expert_act', expert_act.shape, expert_act.dtype,
++                          'expert_act', (expert_act.shape, expert_act.dtype) if expert_act is not None else 'None (REAP)',
+                           'gate_logits', (gate_logits.shape, gate_logits.dtype) if self.use_gate_output else 'None',
+                           f'{self.saliency} saliency scores', saliency.shape,
+                           [str('%.8f' % f) for f in saliency], flush=True)
+@@ -492,6 +515,36 @@ class Merger:
+                   flush=True)
+             torch.cuda.empty_cache()  # some annoying gpu/cpu memory leaks happen
+ 
++            # === Force GC after each layer to release accumulated activations ===
++            import gc
++            gc.collect()
++            try:
++                torch.cuda.empty_cache()
++            except Exception:
++                pass
++            # === Checkpoint after layer (added for crash-recovery) ===
++            if self.checkpoint_dir is not None and (layer_ind + 1) % self.checkpoint_every == 0:
++                import os, json, shutil
++                ckpt_path = os.path.join(self.checkpoint_dir, f'layer_{layer_ind:03d}')
++                tmp_path = ckpt_path + '.tmp'
++                os.makedirs(tmp_path, exist_ok=True)
++                try:
++                    self.model.save_pretrained(tmp_path, safe_serialization=True, max_shard_size='5GB')
++                    with open(os.path.join(tmp_path, 'merge_progress.json'), 'w') as f:
++                        json.dump({'last_completed_layer': layer_ind, 'merge_size': self.merge_size}, f)
++                    if os.path.exists(ckpt_path):
++                        shutil.rmtree(ckpt_path)
++                    os.rename(tmp_path, ckpt_path)
++                    print(f'CKPT saved layer {layer_ind} → {ckpt_path}', flush=True)
++                    # Drop older checkpoints (keep only most recent two)
++                    older = sorted([d for d in os.listdir(self.checkpoint_dir) if d.startswith('layer_')])
++                    for d in older[:-2]:
++                        shutil.rmtree(os.path.join(self.checkpoint_dir, d))
++                except Exception as e:
++                    print(f'CKPT save failed for layer {layer_ind}: {e}', flush=True)
++                    if os.path.exists(tmp_path):
++                        shutil.rmtree(tmp_path)
++
+         if self.verbose:
+             print(self.model.model.layers[self.first_moe_layer].mlp, flush=True)
+             print(self.model.model.layers[self.first_moe_layer + 1].mlp, flush=True)
