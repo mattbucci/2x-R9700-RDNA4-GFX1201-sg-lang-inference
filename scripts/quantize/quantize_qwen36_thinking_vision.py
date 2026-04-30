@@ -58,9 +58,10 @@ if ram_gb < 70:
 
 
 # --- 1. Build thinking + vision calibration set ---
-print("\n[1/4] Building thinking + vision calibration dataset...")
+RECIPE = os.environ.get("RECIPE", "thinking_vision")
+print(f"\n[1/4] Building calibration dataset (recipe={RECIPE})...")
 rows = build_calibration_dataset(
-    recipe="thinking_vision",
+    recipe=RECIPE,
     num_samples=NUM_CALIBRATION_SAMPLES,
     seed=42,
 )
