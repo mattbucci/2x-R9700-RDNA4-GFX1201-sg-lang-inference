@@ -291,6 +291,20 @@ RECIPE_BALANCED_THINKING_VISION = {
     #            non-thinking ≈ 60% (llava_instruct + ultrachat + thestack_code).
 }
 
+RECIPE_BALANCED_THINKING_TEXT = {
+    # Text-only counterpart to balanced_thinking_vision — for models without
+    # a vision tower (Qwen3.5-27B dense+DeltaNet, Qwen3.5-35B MoE).  Existing
+    # `thinking_text` recipe is 50/25/25 across am_thinking/numina/ultrachat
+    # ≈ 75% thinking-tagged, same starvation problem.  This one rebalances
+    # to ~40/60 thinking/non-thinking with all-text data.
+    "am_thinking": 0.30,        # explicit thinking traces (terminated </think>)
+    "ultrachat": 0.35,          # plain chat (no thinking tags) — dominant non-thinking
+    "numina_math": 0.15,        # math reasoning (mixed thinking)
+    "thestack_code": 0.20,      # code (no thinking)
+    # Effective: thinking ≈ 45% (am_thinking + numina_math),
+    #            non-thinking ≈ 55% (ultrachat + thestack_code).
+}
+
 RECIPES = {
     "thinking_text": RECIPE_THINKING_TEXT,
     "thinking_vision": RECIPE_THINKING_VISION,
@@ -299,6 +313,7 @@ RECIPES = {
     "code_vision": RECIPE_CODE_VISION,
     "code_thinking": RECIPE_CODE_THINKING,
     "balanced_thinking_vision": RECIPE_BALANCED_THINKING_VISION,
+    "balanced_thinking_text": RECIPE_BALANCED_THINKING_TEXT,
 }
 
 
