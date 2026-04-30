@@ -273,6 +273,24 @@ RECIPE_CODE_THINKING = {
     "ultrachat": 0.15,
 }
 
+RECIPE_BALANCED_THINKING_VISION = {
+    # Balanced thinking + non-thinking + vision (Qwen3.5/3.6 family with
+    # `enable_thinking` runtime toggle).  Existing `thinking_vision` recipe
+    # is 70% thinking-tagged / 30% non-thinking — fine for thinking-default
+    # workloads but starves the model of non-thinking traces, contributing to
+    # the `</think>\nX\n</think>…` repetition loop M4 + 3090 audited on
+    # Qwen3.5-27B / Qwen3-30B-MoE / Qwen3-32B (validator confirms with
+    # `enable_thinking=True` on the AWQ uploads).  This recipe rebalances
+    # to ~40/60 thinking/non-thinking so both modes see real activations.
+    "am_thinking": 0.30,        # explicit thinking traces (terminated </think>)
+    "llava_instruct": 0.25,     # vision Q&A (no thinking tags)
+    "ultrachat": 0.25,          # plain chat (no thinking tags)
+    "numina_math": 0.10,        # math reasoning (mixed thinking)
+    "thestack_code": 0.10,      # code (no thinking)
+    # Effective: thinking ≈ 40% (am_thinking + numina_math),
+    #            non-thinking ≈ 60% (llava_instruct + ultrachat + thestack_code).
+}
+
 RECIPES = {
     "thinking_text": RECIPE_THINKING_TEXT,
     "thinking_vision": RECIPE_THINKING_VISION,
@@ -280,6 +298,7 @@ RECIPES = {
     "thinking_vision_video_audio": RECIPE_THINKING_VISION_VIDEO_AUDIO,
     "code_vision": RECIPE_CODE_VISION,
     "code_thinking": RECIPE_CODE_THINKING,
+    "balanced_thinking_vision": RECIPE_BALANCED_THINKING_VISION,
 }
 
 
