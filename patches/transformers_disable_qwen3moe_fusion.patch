@@ -29,3 +29,24 @@
 #
 # Use case: building Qwen3-Coder-30B-A3B-REAM, or any Qwen3MoeForCausalLM
 # REAM/REAP self-pruning project on this env.
+#
+# CAVEAT (2026-04-30): if you're running ANY transformers-based inference
+# (debug scripts, validators that load via `AutoModelForCausalLM`,
+# llmcompressor calibration on the BF16 base, etc.) on a Qwen3MoE
+# checkpoint AFTER applying this patch, the loader will report
+# `model.layers.{N}.mlp.experts.{E}.gate_proj.weight | UNEXPECTED` and
+# `model.layers.{N}.mlp.experts.gate_up_proj | MISSING` — meaning the
+# fused tensors get random-init while the on-disk per-expert weights are
+# silently dropped. Result: the loaded model produces gibberish (looks
+# like a calibration regression but is actually random weights). Same
+# applies to AWQ output of any GPTQ run that loaded the BF16 through this
+# patched transformers — the calibration ran on random weights.
+#
+# REVERT before any inference / calibration with:
+#   sed -i 's|# DISABLED FOR REAM: "qwen3_moe": "qwen2_moe",|"qwen3_moe": "qwen2_moe",|' \
+#     $CONDA_PREFIX/lib/python3.12/site-packages/transformers/conversion_mapping.py
+#
+# Net: this patch is mutually exclusive with serving / calibration. Apply
+# JUST around the REAM merger run, revert immediately after the BF16
+# output saves. A future fix is to fork the REAM merger to handle fused
+# format natively (then this patch isn't needed at all).
