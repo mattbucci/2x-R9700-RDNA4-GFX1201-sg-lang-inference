@@ -203,7 +203,7 @@ Re-ran `scripts/eval/validate_capabilities.py` against every shipped `mattbucci/
 | Model | basic | thinking | vision | Notes |
 |-------|:-----:|:--------:|:------:|-------|
 | Qwen3.5-27B-AWQ | ✅ | ✅ | n/a | both paths clean |
-| Qwen3.6-27B-AWQ | ✅ | ⚠️ | ✅ | thinking loops on hard math (`$1.10 - $0.10 is $1.00? No,…` × N) — easier prompts (count vowels) terminate cleanly. Recal candidate. |
+| Qwen3.6-27B-AWQ | ✅ | ✅ | ✅ | **Recalibrated 2026-05-01** with `balanced_thinking_text` (512 samples × 2K, 19h GPTQ on CPU). Thinking now PASS (449 tok, finish=stop). Vision PASS (red/circle/round). Video FAIL — text-only recipe; expected. Shipped to `mattbucci/Qwen3.6-27B-AWQ`. |
 | Qwen3.6-35B-A3B-AWQ | ✅ | ✅ | ✅ | 3/3 PASS |
 | Qwen3.6-REAM-A3B-AWQ | ✅ | ✅ | n/a | text-only (REAM dropped vision tower) — both paths clean |
 | Qwen3.6-VL-REAP-26B-A3B-AWQ | ✅ | ❌ | ❌ | thinking TRUNCATED 4096 tok, vision HSAIL 0x1016. Recal target #1. |
@@ -211,7 +211,7 @@ Re-ran `scripts/eval/validate_capabilities.py` against every shipped `mattbucci/
 | Qwen3-Coder-REAP-25B-A3B-AWQ | ✅ | n/a | n/a | (3090 SWE-bench Lite 88/300 = 29.3%) |
 | Qwen3-Coder-Next-REAM-AWQ | ✅ | n/a | n/a | clean code, 24 tok/s flat 128→16K |
 
-**Headline:** the M4-audited "AWQ reasoning is broken" was largely a validator artifact (basic test ran with chat-template default `enable_thinking=True`, which loops on Qwen3.5/3.6 unless calibration covers it). Two real regressions remain: VL-REAP-26B (thinking + vision both broken) and Qwen3.6-27B-AWQ (thinking loops on hard math). Both should be recalibrated with `balanced_thinking_vision` / `balanced_thinking_text`. Other shipped models are clean and don't need recal.
+**Headline (updated 2026-05-01):** the M4-audited "AWQ reasoning is broken" was largely a validator artifact (basic test ran with chat-template default `enable_thinking=True`, which loops on Qwen3.5/3.6 unless calibration covers it). Qwen3.6-27B-AWQ recalibration with `balanced_thinking_text` complete and shipped — thinking + vision both PASS. **Discovered gotcha:** text-only recipe on a multimodal model strips `model-vision.safetensors` AND saves text-only architecture; both must be restored from a v1 reference (architectures rewrite + vision shard copy + index merge) before SGLang will load. See `feedback_text_only_recipe_strips_vision.md` memory for the rescue recipe. VL-REAP-26B recal in flight with `balanced_thinking_vision`.
 | **Coder-Next-REAM 60B AWQ (native, 2026-04-30)** | 23.5 | 24.5 | 23.3 | †FAIL | — | — | — |
 
 † Coder-Next-REAM at 32K+ trips the known HSAIL `invalid configuration argument` in `silu` (same RDNA4 long-decode kernel issue as full-weights Coder-Next, see Active work #1). Rebenched 2026-04-30 with current SGLang stack: short→16K is healthy at ~24 tok/s flat (modest improvement over Apr-12's 21 tok/s baseline, presumably from the post-04-24 Triton 3.6 + patch-set landings). Long-context benching is gated on the same gdn_backend / FLA bisect that gates the full-weights variant.

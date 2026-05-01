@@ -1,0 +1,24 @@
+diff --git a/python/sglang/srt/models/gemma4_causal.py b/python/sglang/srt/models/gemma4_causal.py
+index c1776cf62..424108feb 100644
+--- a/python/sglang/srt/models/gemma4_causal.py
++++ b/python/sglang/srt/models/gemma4_causal.py
+@@ -1060,10 +1060,12 @@ class Gemma4ForCausalLM(PreTrainedModel):
+         return loaded_params
+ 
+ 
+-# Text-only alias for multimodal architecture name
+-# Allows loading Gemma4ForConditionalGeneration models without vision
+-class Gemma4ForConditionalGeneration(Gemma4ForCausalLM):
+-    pass
+-
+-
+-EntryClass = [Gemma4ForCausalLM, Gemma4ForConditionalGeneration]
++# NOTE: the Gemma4ForConditionalGeneration architecture is registered by
++# gemma4_mm.py (the proper multimodal path). When that module couldn't import
++# cleanly (alias-shim ClippableLinear era, before patch 020 v2), the registry's
++# non-strict try/except swallowed its load and we shipped a text-only alias
++# here to keep `Gemma4ForConditionalGeneration` resolvable. Now that gemma4_mm
++# imports cleanly the alias produces a duplicate-registration AssertionError —
++# so EntryClass exports only `Gemma4ForCausalLM`. The mm path owns the
++# Gemma4ForConditionalGeneration arch.
++EntryClass = [Gemma4ForCausalLM]

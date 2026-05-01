@@ -1,0 +1,62 @@
+diff --git a/python/sglang/srt/layers/clippable_linear.py b/python/sglang/srt/layers/clippable_linear.py
+new file mode 100644
+--- /dev/null
++++ b/python/sglang/srt/layers/clippable_linear.py
+@@ -0,0 +1,33 @@
++"""Clippable parallel linear shims for Gemma 4 multimodal modules.
++
++The upstream `gemma4_audio.py` / `gemma4_vision.py` / `gemma4_mm.py` loaders
++import `Clippable*ParallelLinear` classes that haven't landed in SGLang
++v0.5.10 yet. Without these imports those loaders fail and SGLang silently
++falls back to `Gemma4ForCausalLM` (text-only), which makes Gemma 4 26B emit
++`<pad>` (no expert routing) and 21B-REAP discard image tokens
++("i cannot see the image").
++
++These shims alias the existing Parallel Linear classes 1:1. The constructor
++signatures match in `models/gemma4_*.py` (no clip-bound kwargs are passed at
++construction) so a drop-in subclass without an actual output-clip op
++restores the multimodal load path. The clip bounds are a fine-tune-time
++training stability mechanism in the Gemma 4 paper; their absence at
++inference may slightly drift activations near the dynamic range edges but
++beats the current "vision tower never runs" failure mode.
++
++If the multimodal output looks degraded after this lands, follow up by
++porting the actual `ClippableLinear` op from upstream SGLang main.
++"""
++
++from sglang.srt.layers.linear import (
++    ColumnParallelLinear,
++    MergedColumnParallelLinear,
++    QKVParallelLinear,
++    RowParallelLinear,
++)
++
++ClippableColumnParallelLinear = ColumnParallelLinear
++ClippableRowParallelLinear = RowParallelLinear
++ClippableQKVParallelLinear = QKVParallelLinear
++ClippableGateUpParallelLinear = MergedColumnParallelLinear
++ClippableGLUParallelLinear = MergedColumnParallelLinear
+diff --git a/python/sglang/srt/models/gemma4_causal.py b/python/sglang/srt/models/gemma4_causal.py
+index c1776cf62..4f836224d 100644
+--- a/python/sglang/srt/models/gemma4_causal.py
++++ b/python/sglang/srt/models/gemma4_causal.py
+@@ -1060,10 +1060,12 @@ class Gemma4ForCausalLM(PreTrainedModel):
+         return loaded_params
+ 
+ 
+-# Text-only alias for multimodal architecture name
+-# Allows loading Gemma4ForConditionalGeneration models without vision
+-class Gemma4ForConditionalGeneration(Gemma4ForCausalLM):
+-    pass
+-
+-
+-EntryClass = [Gemma4ForCausalLM, Gemma4ForConditionalGeneration]
++# Previously aliased Gemma4ForConditionalGeneration → Gemma4ForCausalLM here as
++# a text-only fallback when gemma4_mm/_vision/_audio failed to import (missing
++# `clippable_linear`).  Now that the clippable_linear shim is in place
++# (`layers/clippable_linear.py`), the real Gemma4ForConditionalGeneration in
++# `gemma4_mm.py` registers and the alias would collide ("Duplicated model
++# implementation").  Removed the alias; serve text-only via Gemma4ForCausalLM
++# explicitly if the multimodal path needs to be bypassed.
++
++EntryClass = [Gemma4ForCausalLM]
