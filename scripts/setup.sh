@@ -47,7 +47,7 @@ PILLOW_VERSION="${PILLOW_VERSION:-12.3.0}"
 LIBROSA_VERSION="${LIBROSA_VERSION:-0.11.0}"
 
 SGLANG_REPO="https://github.com/sgl-project/sglang.git"
-SGLANG_TAG="${SGLANG_TAG:-v0.5.15}"  # live baseline promoted 2026-07-11; overridable for version rebases
+SGLANG_TAG="${SGLANG_TAG:-v0.5.16}"  # live baseline promoted 2026-07-27; overridable for version rebases
 SGLANG_COMMIT="${SGLANG_COMMIT:-}"
 STRICT_PATCHES="${STRICT_PATCHES:-0}"
 TRITON_PYPI_FALLBACK="${TRITON_PYPI_FALLBACK:-1}"
@@ -177,7 +177,7 @@ if [ "$STRICT_PATCHES" = "1" ]; then
         "$SGLANG_DIR/python/sglang/srt/multimodal/processors/transformers_auto.py" \
         || { echo "FATAL: delegated Transformers media guard is missing"; exit 1; }
     grep -qF '"127.0.0.1"' \
-        "$SGLANG_DIR/python/sglang/srt/model_executor/model_runner.py" \
+        "$SGLANG_DIR/python/sglang/srt/distributed/bootstrap.py" \
         || { echo "FATAL: loopback distributed-bootstrap guard is missing"; exit 1; }
 fi
 
@@ -319,7 +319,7 @@ echo "[4/5] Building sgl_kernel with native HIP ops for gfx1201..."
 echo "  CRITICAL: Without this, rotary_embedding uses a Python fallback"
 echo "  that produces wrong results on non-contiguous tensors, causing"
 echo "  garbage output for dense AWQ models."
-"$SCRIPT_DIR/setup_sgl_kernel.sh" --env "$ENV_NAME" || {
+SGL_KERNEL_DIR="$SGLANG_DIR/sgl-kernel" "$SCRIPT_DIR/setup_sgl_kernel.sh" --env "$ENV_NAME" || {
     echo "FATAL: [4/5] sgl_kernel build failed."
     echo "  On gfx1201 the usual cause is sgl-kernel/setup_rocm.py rejecting the arch;"
     echo "  patches/008-rdna4-sgl-kernel-build-arch.patch adds gfx12xx to the whitelist"
@@ -333,7 +333,7 @@ echo "  garbage output for dense AWQ models."
 echo ""
 echo "[5/6] Building AWQ GEMV HIP kernel for gfx1201..."
 echo "  30% faster M=1 decode, fused MoE expert dispatch"
-"$SCRIPT_DIR/build_awq_gemv.sh" --env "$ENV_NAME"
+SGL_KERNEL_DIR="$SGLANG_DIR/sgl-kernel" "$SCRIPT_DIR/build_awq_gemv.sh" --env "$ENV_NAME"
 
 # -------------------------------------------------------------------
 # Step 5b: Build wvSplitK INT4 MoE kernel (mgehre port, patches/032)
@@ -343,7 +343,7 @@ echo "[5b/6] Building wvSplitK INT4 MoE HIP kernel for gfx1201..."
 echo "  Hybrid W4A16 MoE kernel from mgehre-amd/vllm 0b992ff."
 echo "  See patches/032-rdna4-hybrid-w4a16-moe.patch."
 if [ -f "$SCRIPT_DIR/build_skinny_gemms_int4.sh" ]; then
-    "$SCRIPT_DIR/build_skinny_gemms_int4.sh" --env "$ENV_NAME" || \
+    SGL_KERNEL_DIR="$SGLANG_DIR/sgl-kernel" "$SCRIPT_DIR/build_skinny_gemms_int4.sh" --env "$ENV_NAME" || \
       echo "  WARNING: wvSplitK kernel build failed (non-fatal — Triton MoE fallback works)"
 fi
 

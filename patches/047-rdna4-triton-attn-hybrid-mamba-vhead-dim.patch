@@ -1,11 +1,11 @@
 diff --git a/python/sglang/srt/layers/attention/triton_backend.py b/python/sglang/srt/layers/attention/triton_backend.py
-index f5d1a3ab95..3127f6c75f 100644
+index e71f4f5..7a84ea5 100644
 --- a/python/sglang/srt/layers/attention/triton_backend.py
 +++ b/python/sglang/srt/layers/attention/triton_backend.py
-@@ -186,8 +186,17 @@ class TritonAttnBackend(AttentionBackend):
-             model_runner.hybrid_gdn_config is not None
-             or model_runner.kimi_linear_config is not None
-             or model_runner.linear_attn_model_spec is not None
+@@ -190,8 +190,17 @@ class TritonAttnBackend(AttentionBackend):
+             hybrid_gdn_config(model_runner.model_config) is not None
+             or kimi_linear_config(model_runner.model_config) is not None
+             or linear_attn_model_spec(model_runner.model_config) is not None
 +            or hasattr(model_runner.token_to_kv_pool, "get_v_head_dim")
          ):
 -            # For hybrid linear models, layer_id = 0 may not be full attention

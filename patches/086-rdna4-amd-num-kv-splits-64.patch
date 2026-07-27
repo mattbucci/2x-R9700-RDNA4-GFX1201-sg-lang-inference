@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
-index ac774b82a3..fe482e531c 100644
+index 838b925..506ba98 100644
 --- a/python/sglang/srt/server_args.py
 +++ b/python/sglang/srt/server_args.py
-@@ -4570,7 +4570,18 @@ class ServerArgs:
+@@ -5157,7 +5157,18 @@ class ServerArgs:
  
      def _handle_amd_specifics(self):
          if is_hip():
@@ -21,4 +21,4 @@ index ac774b82a3..fe482e531c 100644
 +            self.triton_attention_num_kv_splits = int(_kv) if _kv else 64
  
      def _handle_nccl_pre_warm(self):
-         # pre_warm_nccl is only used with CUDA or HIP hardware
+         # pre_warm_nccl is only used with CUDA or HIP hardware or NPU hardware

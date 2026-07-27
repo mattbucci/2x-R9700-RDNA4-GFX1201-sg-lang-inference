@@ -28,12 +28,13 @@ if [ -z "${CONDA_BASE:-}" ]; then
 fi
 export CONDA_BASE
 
-# LIVE = v0.5.15 (promoted 2026-07-11; rebased from v0.5.14 — see patches/v0515-rebase-2026-07-11.md).
-# ROLLBACK to v0.5.14: set ENV_NAME=sglang-triton36-v0514 SGLANG_DIR=/data/sgl-v0514 (retained, untouched).
-# Older rollbacks: v0.5.13.post1 = ENV_NAME=sglang-triton36-v0513 SGLANG_DIR=/data/sgl-rebase; v0.5.12 = sglang-triton36 /data/vG.
-ENV_NAME="${ENV_NAME:-sglang-triton36-v0515}"
+# LIVE = v0.5.16 (promoted 2026-07-27; rebased from v0.5.15 — see patches/v0516-rebase-2026-07-27.md).
+# ROLLBACK to v0.5.15: set ENV_NAME=sglang-triton36-v0515 SGLANG_DIR=/data/sgl-v0515 (retained, untouched).
+# Older rollback v0.5.14: ENV_NAME=sglang-triton36-v0514 SGLANG_DIR=/data/sgl-v0514 (retained).
+# The v0.5.12/v0.5.13 rollback envs were removed 2026-07-27 to reclaim disk; re-create via scripts/setup.sh if needed.
+ENV_NAME="${ENV_NAME:-sglang-triton36-v0516}"
 ROCM_PATH="${ROCM_PATH:-/opt/rocm}"
-SGLANG_DIR="${SGLANG_DIR:-/data/sgl-v0515}"
+SGLANG_DIR="${SGLANG_DIR:-/data/sgl-v0516}"
 MODELS_DIR="${MODELS_DIR:-$HOME/AI/models}"
 TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$HOME/.cache/triton_rdna4_t36}"
 PORT="${PORT:-23334}"

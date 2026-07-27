@@ -1,7 +1,8 @@
 diff --git a/python/sglang/srt/utils/hf_transformers/tokenizer.py b/python/sglang/srt/utils/hf_transformers/tokenizer.py
+index ad4eb4e..9e7f1dc 100644
 --- a/python/sglang/srt/utils/hf_transformers/tokenizer.py
 +++ b/python/sglang/srt/utils/hf_transformers/tokenizer.py
-@@ -159,6 +159,33 @@
+@@ -160,6 +160,33 @@ def _resolve_tokenizer_name(tokenizer_name, kwargs):
      return tokenizer_name
  
  
@@ -35,7 +36,7 @@ diff --git a/python/sglang/srt/utils/hf_transformers/tokenizer.py b/python/sglan
  def _auto_tokenizer_from_pretrained(tokenizer_name, *args, **common_kwargs):
      """Call ``AutoTokenizer.from_pretrained`` with error handling."""
      try:
-@@ -487,6 +514,9 @@
+@@ -488,6 +515,9 @@ def get_tokenizer(
              kwargs["use_fast"] = True
  
      tokenizer_name = _resolve_tokenizer_name(tokenizer_name, kwargs)
@@ -46,21 +47,22 @@ diff --git a/python/sglang/srt/utils/hf_transformers/tokenizer.py b/python/sglan
      common_kwargs = dict(
          trust_remote_code=trust_remote_code,
 diff --git a/test/registered/unit/utils/test_hf_transformers.py b/test/registered/unit/utils/test_hf_transformers.py
+index 547a912..34e815d 100644
 --- a/test/registered/unit/utils/test_hf_transformers.py
 +++ b/test/registered/unit/utils/test_hf_transformers.py
-@@ -4,9 +4,11 @@
- context length, GGUF detection, etc.) that don't require actual model files.
+@@ -5,9 +5,11 @@ context length, GGUF detection, etc.) that don't require actual model files.
  """
  
+ import inspect
 +import json
  import tempfile
  import unittest
  from types import SimpleNamespace
 +from unittest import mock
+ from unittest.mock import MagicMock, patch
  
  from transformers import PretrainedConfig
- 
-@@ -20,6 +22,7 @@
+@@ -26,6 +28,7 @@ from sglang.srt.utils.hf_transformers.common import (
      get_hf_text_config,
      get_rope_config,
  )
@@ -68,10 +70,11 @@ diff --git a/test/registered/unit/utils/test_hf_transformers.py b/test/registere
  from sglang.srt.utils.hf_transformers.tokenizer import _fix_special_tokens_pattern
  from sglang.srt.utils.hf_transformers_patches import normalize_rope_scaling_compat
  from sglang.test.ci.ci_register import register_cpu_ci
-@@ -28,6 +31,63 @@
+@@ -99,6 +102,63 @@ class TestImageProcessorKwargsPatch(unittest.TestCase):
+         self.assertEqual(signature.call_count, 1)
  
  
- # ---------------------------------------------------------------------------
++# ---------------------------------------------------------------------------
 +# Laguna tokenizer regex preservation
 +# ---------------------------------------------------------------------------
 +
@@ -128,8 +131,6 @@ diff --git a/test/registered/unit/utils/test_hf_transformers.py b/test/registere
 +        self.assertNotIn("fix_mistral_regex", backend_kwargs)
 +
 +
-+# ---------------------------------------------------------------------------
+ # ---------------------------------------------------------------------------
  # normalize_rope_scaling_compat
  # ---------------------------------------------------------------------------
- 
-

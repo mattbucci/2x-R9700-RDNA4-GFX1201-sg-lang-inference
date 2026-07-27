@@ -1,16 +1,17 @@
-# SGLang v0.5.15 RDNA4 patches
+# SGLang v0.5.16 RDNA4 patches
 
-This directory contains the **69 active numeric patches** applied to pristine SGLang v0.5.15 for the
-2× Radeon AI PRO R9700 serving stack. The default tree is `/data/sgl-v0515`; the default conda environment
-is `sglang-triton36-v0515`.
+This directory contains the **69 active numeric patches** applied to pristine SGLang v0.5.16 for the
+2× Radeon AI PRO R9700 serving stack. The default tree is `/data/sgl-v0516`; the default conda environment
+is `sglang-triton36-v0516`.
 
 Patch 072 is not part of the series because transformers 5.12.1 supplies the Gemma 4 unified configuration
 and processor. Patch 083 adds the tokenizer-backend correction required for Mistral checkpoints that ship
 `tekken.json`. Patch 003 includes safe fallbacks for both the base CUDA-only `sgl_kernel` imports and the
-optional `infllm_v2` extension reported in [issue #3](https://github.com/mattbucci/2x-R9700-RDNA4-GFX1201-sglang-inference/issues/3).
+optional `infllm_v2` extension reported in [issue #3](https://github.com/mattbucci/2x-R9700-RDNA4-GFX1201-sglang-inference/issues/3). On the v0.5.16 rebase, patch 059 was dropped because its FuseEP dispatcher target was removed upstream, and patch 097 was added as the JIT fused-gate None-bias guard.
 
 Validation receipts:
 
+- [v0.5.16 rebase](v0516-rebase-2026-07-27.md)
 - [v0.5.15 base](v0515-rebase-2026-07-11.md)
 - [North Mini Code and Laguna extension](v0515-north-laguna-2026-07-12.md)
 - [North/Laguna performance](../benchmarks/north-laguna-v0515-r9700-2026-07-12.md)
@@ -23,11 +24,11 @@ The supported setup path applies the numeric series in filename order:
 scripts/setup.sh
 ```
 
-For an isolated replay, start with a pristine v0.5.15 worktree and fail immediately on any bad patch:
+For an isolated replay, start with a pristine v0.5.16 worktree and fail immediately on any bad patch:
 
 ```bash
-target=/tmp/sglang-v0515-replay
-git clone --branch v0.5.15 --depth 1 https://github.com/sgl-project/sglang.git "$target"
+target=/tmp/sglang-v0516-replay
+git clone --branch v0.5.16 --depth 1 https://github.com/sgl-project/sglang.git "$target"
 for patch in "$PWD"/patches/0*.patch; do
     git -C "$target" apply --check "$patch"
     git -C "$target" apply "$patch"
@@ -37,7 +38,7 @@ done
 Every series change must pass:
 
 1. **Pristine replay:** every numeric patch applies, with no skips or fallback mode.
-2. **Tree equivalence:** the replayed delta matches the intended `/data/sgl-v0515` delta byte-for-byte.
+2. **Tree equivalence:** the replayed delta matches the intended `/data/sgl-v0516` delta byte-for-byte.
 3. **No double apply:** each patch is rejected on the fully patched tree. Patch 026 is the documented
    non-unique-anchor exception and must be checked explicitly.
 
@@ -47,7 +48,7 @@ Also run `git diff --check`, focused unit/GPU tests, and the affected model capa
 
 | Path | Role |
 |---|---|
-| `/data/sgl-v0515` | Serving and development tree for v0.5.15 plus this series |
+| `/data/sgl-v0516` | Serving and development tree for v0.5.16 plus this series |
 | `patches/` | Reviewable source of truth for the serving-tree delta |
 | temporary pristine worktree | Replay and equivalence validation only |
 
@@ -64,7 +65,6 @@ can be proposed upstream. `Partial` requires a fresh comparison with upstream be
 | 002 | `rdna4-torch-compile-disable` | Carry | Disables compile paths that stall on HIP for rotary, sampling, and embedding operations. |
 | 003 | `rdna4-sgl-kernel-fallbacks` | Carry | Guards CUDA-only `sgl_kernel` and `infllm_v2` imports and provides safe native fallbacks or sentinels. |
 | 008 | `rdna4-sgl-kernel-build-arch` | Carry | Adds gfx12xx to the native `sgl_kernel` ROCm architecture list. |
-| 059 | `token-dispatcher-fuseep-drop` | Carry | Removes an import of the deleted FuseEP dispatcher from the HIP scheduler path. |
 | 060 | `aiter-mxfp4-moe-guard` | Candidate | Guards the optional AITER MXFP4 MoE import when AITER is unavailable. |
 | 063 | `rdna4-relu2-hip-fallback` | Candidate | Provides the squared-ReLU implementation used by Nemotron on HIP. |
 | 094 | `rdna4-batch-invariant-matmul-lds` | Carry | Uses two Triton pipeline stages for HIP batch-invariant MM/BMM so deterministic inference fits gfx1201's 64 KiB LDS limit; non-HIP platforms retain three stages. |
@@ -83,6 +83,7 @@ can be proposed upstream. `Partial` requires a fresh comparison with upstream be
 | 076 | `rdna4-sigmoid-topk-hip-fallback` | Carry | Implements correct grouped sigmoid top-k routing when the fused router is disabled. |
 | 078 | `r9700-north-laguna-fp8-moe-configs` | Carry | Installs measured gfx1201 FP8 MoE configurations for North and Laguna. |
 | 079 | `rdna4-fused-sigmoid-router-laguna-bf16-gate` | Candidate | Enables the unified Triton sigmoid router on HIP and keeps Laguna's gate GEMV in checkpoint BF16 before FP32 logits. |
+| 097 | `moe-jit-fused-gate-none-bias-guard` | Candidate | Substitutes a zero bias for a None correction_bias before the JIT fused-gate kernel so bias-free sigmoid routers (Cohere2/North) do not fault under v0.5.16's default-on `SGLANG_OPT_USE_JIT_KERNEL_FUSED_TOPK`. |
 
 ### Attention and numerics
 
@@ -169,19 +170,19 @@ can be proposed upstream. `Partial` requires a fresh comparison with upstream be
 
 | Component | Version |
 |---|---|
-| SGLang | v0.5.15 plus this 69-patch series |
+| SGLang | v0.5.16 plus this 69-patch series |
 | transformers | 5.12.1 |
 | Triton | 3.6.0 |
 | PyTorch | 2.11.0+rocm7.2 |
-| ROCm | 7.2 |
+| ROCm | 7.2.3 |
 | RCCL | 2.27.7 from the system ROCm installation |
 
 Build the optional native components with:
 
 ```bash
-scripts/setup_sgl_kernel.sh --env sglang-triton36-v0515
-scripts/build_awq_gemv.sh --env sglang-triton36-v0515
-scripts/build_skinny_gemms_int4.sh --env sglang-triton36-v0515
+scripts/setup_sgl_kernel.sh --env sglang-triton36-v0516
+scripts/build_awq_gemv.sh --env sglang-triton36-v0516
+scripts/build_skinny_gemms_int4.sh --env sglang-triton36-v0516
 ```
 
 ## Related documentation

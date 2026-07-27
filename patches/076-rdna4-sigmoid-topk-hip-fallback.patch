@@ -1,10 +1,10 @@
 diff --git a/python/sglang/srt/layers/moe/topk.py b/python/sglang/srt/layers/moe/topk.py
-index 0977088741..970d1d306b 100644
+index b255fd8..43a7d03 100644
 --- a/python/sglang/srt/layers/moe/topk.py
 +++ b/python/sglang/srt/layers/moe/topk.py
-@@ -857,6 +857,22 @@ def fused_topk(
-                 scoring_func="sigmoid",
-                 renormalize=renormalize,
+@@ -904,6 +904,22 @@ def fused_topk(
+                 routed_scaling_factor=routed_scaling_factor,
+                 apply_routed_scaling_factor_on_output=apply_routed_scaling_factor_on_output,
              )
 +        elif _is_hip:
 +            # sgl_kernel.topk_sigmoid aborts in its HIP AOT kernel on gfx1201.
@@ -23,11 +23,11 @@ index 0977088741..970d1d306b 100644
 +            topk_weights = topk_weights.to(torch.float32)
 +            topk_ids = topk_ids.to(torch.int32)
          else:
-             topk_sigmoid(
-                 topk_weights,
+             if num_fused_shared_experts > 1:
+                 raise ValueError(
 diff --git a/test/registered/unit/layers/moe/test_rdna4_sigmoid_topk.py b/test/registered/unit/layers/moe/test_rdna4_sigmoid_topk.py
 new file mode 100644
-index 0000000000..b735084634
+index 0000000..b735084
 --- /dev/null
 +++ b/test/registered/unit/layers/moe/test_rdna4_sigmoid_topk.py
 @@ -0,0 +1,89 @@
@@ -120,4 +120,3 @@ index 0000000000..b735084634
 +
 +if __name__ == "__main__":
 +    unittest.main()
-

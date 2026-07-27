@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/layers/attention/triton_backend.py b/python/sglang/srt/layers/attention/triton_backend.py
-index 9b72943846..ddf70e168c 100644
+index 7a84ea5..ad008ef 100644
 --- a/python/sglang/srt/layers/attention/triton_backend.py
 +++ b/python/sglang/srt/layers/attention/triton_backend.py
-@@ -66,6 +66,11 @@ if TYPE_CHECKING:
+@@ -62,6 +62,11 @@ if TYPE_CHECKING:
  
  
  _MLA_DECODE_MIN_BLOCK_KV = 32
@@ -14,7 +14,7 @@ index 9b72943846..ddf70e168c 100644
  
  
  def _mla_decode_kv_splits_cap(
-@@ -78,6 +83,45 @@ def _mla_decode_kv_splits_cap(
+@@ -74,6 +79,45 @@ def _mla_decode_kv_splits_cap(
      return max(base_max_kv_splits, min(sm_cap, ctx_cap))
  
  
@@ -60,9 +60,9 @@ index 9b72943846..ddf70e168c 100644
  def logit_capping_mod(logit_capping_method, logit_cap):
      # positive logit_cap -> tanh cap
      if logit_capping_method == "tanh":
-@@ -177,7 +221,8 @@ class TritonAttnBackend(AttentionBackend):
-         self.dcp_size = getattr(model_runner, "dcp_size", 1)
-         self.dcp_rank = getattr(model_runner, "dcp_rank", 0)
+@@ -173,7 +217,8 @@ class TritonAttnBackend(AttentionBackend):
+         self.dcp_size = get_parallel().attn_dcp_size
+         self.dcp_rank = get_parallel().attn_dcp_rank
          self.num_head = (
 -            model_runner.model_config.num_attention_heads // get_parallel().attn_tp_size
 +            _max_num_attention_heads(model_runner.model_config)
@@ -70,7 +70,7 @@ index 9b72943846..ddf70e168c 100644
          ) * self.dcp_size
          self.num_kv_head = model_runner.model_config.get_num_kv_heads(
              get_parallel().attn_tp_size
-@@ -1272,7 +1317,9 @@ class TritonAttnBackend(AttentionBackend):
+@@ -1258,7 +1303,9 @@ class TritonAttnBackend(AttentionBackend):
                      # For MLA, scale K manually before storing since MLATokenToKVPool
                      # doesn't accept scale parameters. Clone to protect k from mutation
                      # since it's used later in the attention kernel.
@@ -81,7 +81,7 @@ index 9b72943846..ddf70e168c 100644
                      self.token_to_kv_pool.set_kv_buffer(
                          layer,
                          loc_info,
-@@ -1328,12 +1375,9 @@ class TritonAttnBackend(AttentionBackend):
+@@ -1326,12 +1373,9 @@ class TritonAttnBackend(AttentionBackend):
              kv_indices = self.forward_metadata.kv_indices
              window_kv_offsets = None
  
@@ -97,7 +97,7 @@ index 9b72943846..ddf70e168c 100644
  
          # Split-KV EAGLE-verify fast path (ROCm/Triton). On target-verify
          # (topk=1 causal chain), run the bandwidth-efficient split-KV kernel
-@@ -1464,12 +1508,9 @@ class TritonAttnBackend(AttentionBackend):
+@@ -1427,12 +1471,9 @@ class TritonAttnBackend(AttentionBackend):
          kv_indices = self.forward_metadata.kv_indices
          max_extend_len = self.forward_metadata.max_extend_len
  
@@ -113,7 +113,7 @@ index 9b72943846..ddf70e168c 100644
  
          k_buffer = self.token_to_kv_pool.get_key_buffer(layer.layer_id)
          v_buffer = self.token_to_kv_pool.get_value_buffer(layer.layer_id)
-@@ -1673,12 +1714,9 @@ class TritonAttnBackend(AttentionBackend):
+@@ -1638,12 +1679,9 @@ class TritonAttnBackend(AttentionBackend):
          # Convert prefix_lens to int32 for the kernel
          prefix_lens = prefix_lens.to(torch.int32)
  
@@ -129,7 +129,7 @@ index 9b72943846..ddf70e168c 100644
  
          # Call unified kernel
          self.extend_attention_fwd_unified(
-@@ -1743,7 +1781,9 @@ class TritonAttnBackend(AttentionBackend):
+@@ -1713,7 +1751,9 @@ class TritonAttnBackend(AttentionBackend):
  
          if save_kv_cache:
              if self.use_mla:
@@ -140,7 +140,7 @@ index 9b72943846..ddf70e168c 100644
                      # MLATokenToKVPool doesn't accept scale parameters; k is unused
                      # after this point in decode, so scale in place.
                      k.div_(layer.k_scale)
-@@ -1775,12 +1815,9 @@ class TritonAttnBackend(AttentionBackend):
+@@ -1745,12 +1785,9 @@ class TritonAttnBackend(AttentionBackend):
              kv_indptr = self.forward_metadata.kv_indptr
              kv_indices = self.forward_metadata.kv_indices
  
@@ -156,7 +156,7 @@ index 9b72943846..ddf70e168c 100644
  
          # Select the correctly-sized attn_logits buffer for this layer.
          attn_logits = self.forward_metadata.attn_logits
-@@ -1891,7 +1928,8 @@ class TritonMultiStepDraftBackend:
+@@ -1867,7 +1904,8 @@ class TritonMultiStepDraftBackend:
              )
          self.max_context_len = self.attn_backends[0].max_context_len
          self.num_head = (
@@ -167,10 +167,10 @@ index 9b72943846..ddf70e168c 100644
          self.device = model_runner.device
          # Cached variables for generate_draft_decode_kv_indices
 diff --git a/python/sglang/srt/mem_cache/memory_pool.py b/python/sglang/srt/mem_cache/memory_pool.py
-index 87e2638c1b..111793e863 100644
+index 5c951f8..fdb87ae 100644
 --- a/python/sglang/srt/mem_cache/memory_pool.py
 +++ b/python/sglang/srt/mem_cache/memory_pool.py
-@@ -96,6 +96,11 @@ _is_cpu = is_cpu()
+@@ -100,6 +100,11 @@ _is_cpu = is_cpu()
  _cpu_has_amx_support = cpu_has_amx_support()
  _is_hip = is_hip()
  _is_fp8_fnuz = is_fp8_fnuz()
@@ -182,9 +182,9 @@ index 87e2638c1b..111793e863 100644
  # `SGLANG_AITER_KV_CACHE_LAYOUT` is only meaningful on the ROCm AITER backend
  # (HIP + --enable-aiter / SGLANG_USE_AITER=1). On any other platform / backend
  # the SHUFFLE 5D pool layout has no consumer kernels, so the env var is
-@@ -1690,10 +1695,18 @@ class MHATokenToKVPool(KVCache):
-         else:
-             layer_id = layer.layer_id
+@@ -2276,10 +2281,18 @@ class MHATokenToKVPool(KVCache):
+             return
+ 
          if cache_k.dtype != self.dtype:
 -            if k_scale is not None:
 -                cache_k.div_(k_scale)
@@ -207,7 +207,7 @@ index 87e2638c1b..111793e863 100644
  
 diff --git a/test/registered/unit/layers/attention/test_triton_backend_head_count.py b/test/registered/unit/layers/attention/test_triton_backend_head_count.py
 new file mode 100644
-index 0000000000..0cb69b60c3
+index 0000000..0cb69b6
 --- /dev/null
 +++ b/test/registered/unit/layers/attention/test_triton_backend_head_count.py
 @@ -0,0 +1,61 @@
@@ -274,7 +274,7 @@ index 0000000000..0cb69b60c3
 +    unittest.main()
 diff --git a/test/registered/unit/test_kv_cache_dtype_handling.py b/test/registered/unit/test_kv_cache_dtype_handling.py
 new file mode 100644
-index 0000000000..a9cca8f36d
+index 0000000..a9cca8f
 --- /dev/null
 +++ b/test/registered/unit/test_kv_cache_dtype_handling.py
 @@ -0,0 +1,83 @@
@@ -361,4 +361,3 @@ index 0000000000..a9cca8f36d
 +
 +if __name__ == "__main__":
 +    unittest.main()
-

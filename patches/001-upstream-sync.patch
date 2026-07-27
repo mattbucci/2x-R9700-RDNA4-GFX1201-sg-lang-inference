@@ -1,16 +1,8 @@
 diff --git a/python/sglang/srt/configs/model_config.py b/python/sglang/srt/configs/model_config.py
-index debcc7f535..7c6b0836a5 100644
+index 0209950..9f5967d 100644
 --- a/python/sglang/srt/configs/model_config.py
 +++ b/python/sglang/srt/configs/model_config.py
-@@ -292,6 +292,7 @@ class ModelConfig:
-         if enable_multimodal is None:
-             mm_disabled_models = [
-                 "Gemma3ForConditionalGeneration",
-+                "Gemma4ForConditionalGeneration",
-                 "Llama4ForConditionalGeneration",
-                 "Step3VLForConditionalGeneration",
-             ]
-@@ -394,7 +395,13 @@ class ModelConfig:
+@@ -411,7 +411,13 @@ class ModelConfig:
                  or hasattr(self.hf_config, "audio_config")
              )
          )
@@ -25,94 +17,20 @@ index debcc7f535..7c6b0836a5 100644
              is_multimodal_model(self.hf_config.architectures)
              or has_multimodal_subconfig
          )
-@@ -1836,6 +1843,8 @@ def is_hybrid_swa_model(
- ):
- 
-     hybrid_swa_archs = {
-+        "Gemma4ForCausalLM",
-+        "Gemma4ForConditionalGeneration",
-         "Llama4ForConditionalGeneration",
-         "DeepseekV4ForCausalLM",
-         "DeepseekV4ForCausalLMNextN",
-@@ -1913,6 +1922,17 @@ def get_hybrid_layer_ids(
-             for i, x in enumerate(layer_types)
-             if x == "full_attention" and i < num_hidden_layers
-         ]
-+    elif (
-+        "Gemma4ForCausalLM" in model_architectures
-+        or "Gemma4ForConditionalGeneration" in model_architectures
-+    ):
-+        layer_types = getattr(hf_text_config, "layer_types", [])
-+        swa_attention_layer_ids = [
-+            i for i, x in enumerate(layer_types) if x == "sliding_attention"
-+        ]
-+        full_attention_layer_ids = [
-+            i for i, x in enumerate(layer_types) if x == "full_attention"
-+        ]
-     elif "Step3p5MTP" in model_architectures:
-         swa_attention_layer_ids = [0]
-         full_attention_layer_ids = []
 diff --git a/python/sglang/srt/layers/attention/triton_backend.py b/python/sglang/srt/layers/attention/triton_backend.py
-index 0be715ac1d..f5d1a3ab95 100644
+index 3ec9c78..e71f4f5 100644
 --- a/python/sglang/srt/layers/attention/triton_backend.py
 +++ b/python/sglang/srt/layers/attention/triton_backend.py
-@@ -194,7 +194,14 @@ class TritonAttnBackend(AttentionBackend):
-             self.v_head_dim = model_runner.token_to_kv_pool.get_value_buffer(0).shape[
-                 -1
-             ]
-+        # Track whether SWA layers need different v_head_dim
-+        full_v_head_dim = model_runner.model_config.v_head_dim
-+        swa_v_head_dim = model_runner.model_config.swa_v_head_dim
-+        if self.sliding_window_size is not None and swa_v_head_dim != full_v_head_dim:
-+            self.swa_v_head_dim = swa_v_head_dim
-+        else:
-             self.swa_v_head_dim = None
-+
-         self.max_context_len = model_runner.model_config.context_len
-         self.device = model_runner.device
-         self.device_core_count = get_device_core_count(model_runner.gpu_id)
-@@ -933,12 +940,7 @@ class TritonAttnBackend(AttentionBackend):
-         )
-         if self.swa_v_head_dim is not None:
-             self.cuda_graph_swa_attn_logits = torch.zeros(
--                (
--                    max_num_tokens,
--                    self.num_head,
--                    self.max_kv_splits,
--                    self.swa_v_head_dim,
--                ),
-+                (max_num_tokens, self.num_head, self.max_kv_splits, self.swa_v_head_dim),
-                 dtype=torch.float32,
-                 device=self.device,
-             )
-@@ -1208,6 +1210,18 @@ class TritonAttnBackend(AttentionBackend):
-         save_kv_cache=True,
-         sinks=None,
+@@ -1677,6 +1677,19 @@ class TritonAttnBackend(AttentionBackend):
+         score_mod=None,
+         aux_tensors=None,
      ):
-+        # Handle KV-shared layers (Gemma4): k=None, v=None means retrieve from cache
++        # Handle KV-shared layers (Gemma4): k is None and v is None means
++        # retrieve K/V from the cache written by the paired attention layer.
 +        if k is None and v is None:
-+            pool = forward_batch.token_to_kv_pool
++            pool = self.token_to_kv_pool
 +            cache_loc = forward_batch.out_cache_loc
-+            if hasattr(pool, 'layers_mapping') and pool.layers_mapping[layer.layer_id][1]:
-+                cache_loc = pool.translate_loc_from_full_to_swa(cache_loc)
-+            k_buffer, v_buffer = pool.get_kv_buffer(layer.layer_id)
-+            k = k_buffer[cache_loc]
-+            v = v_buffer[cache_loc]
-+        elif k is None or v is None:
-+            raise ValueError("Both k and v should be None or not None")
-+
-         # TODO: reuse the buffer across layers
-         attn_out = getattr(forward_batch, "_attn_output", None)
-         if attn_out is not None:
-@@ -1648,6 +1662,18 @@ class TritonAttnBackend(AttentionBackend):
-         save_kv_cache=True,
-         sinks=None,
-     ):
-+        # Handle KV-shared layers (Gemma4): k=None, v=None means retrieve from cache
-+        if k is None and v is None:
-+            pool = forward_batch.token_to_kv_pool
-+            cache_loc = forward_batch.out_cache_loc
-+            if hasattr(pool, 'layers_mapping') and pool.layers_mapping[layer.layer_id][1]:
++            if isinstance(pool, SWAKVPool) and pool.layers_mapping[layer.layer_id][1]:
 +                cache_loc = pool.translate_loc_from_full_to_swa(cache_loc)
 +            k_buffer, v_buffer = pool.get_kv_buffer(layer.layer_id)
 +            k = k_buffer[cache_loc]
@@ -123,7 +41,7 @@ index 0be715ac1d..f5d1a3ab95 100644
          # During torch.compile, there is a bug in rotary_emb that causes the
          # output value to have a 3D tensor shape. This reshapes the output correctly.
          q = q.reshape(-1, layer.tp_q_head_num * layer.qk_head_dim)
-@@ -1702,12 +1728,11 @@ class TritonAttnBackend(AttentionBackend):
+@@ -1731,12 +1744,11 @@ class TritonAttnBackend(AttentionBackend):
              v_descale = 1.0
  
          # Select the correctly-sized attn_logits buffer for this layer.
@@ -139,10 +57,10 @@ index 0be715ac1d..f5d1a3ab95 100644
              attn_logits = self.forward_metadata.swa_attn_logits
  
 diff --git a/python/sglang/srt/layers/communicator.py b/python/sglang/srt/layers/communicator.py
-index 65e5441ebc..22b1b44081 100644
+index a23e6e4..2cbaca2 100644
 --- a/python/sglang/srt/layers/communicator.py
 +++ b/python/sglang/srt/layers/communicator.py
-@@ -91,7 +91,8 @@ _is_cuda = is_cuda()
+@@ -89,7 +89,8 @@ _is_cuda = is_cuda()
  _is_flashinfer_available = is_flashinfer_available()
  _is_sm90_supported = _is_cuda and is_sm90_supported()
  _is_sm100_supported = _is_cuda and is_sm100_supported()
@@ -152,13 +70,13 @@ index 65e5441ebc..22b1b44081 100644
  _is_gfx95_supported = is_gfx95_supported()
  _is_npu = is_npu()
  _use_ag_after_qlora = envs.SGLANG_USE_AG_AFTER_QLORA.get()
-@@ -1112,18 +1113,16 @@ class CommunicateWithAllReduceAndLayerNormFn:
+@@ -1116,18 +1117,16 @@ class CommunicateWithAllReduceAndLayerNormFn:
                  handled = True
  
              if not handled:
 -                quantize_communications = (
 -                    not forward_batch.forward_mode.is_decode_or_idle()
--                    and get_global_server_args().enable_quant_communications
+-                    and get_server_args().enable_quant_communications
 +                # Float32 all-reduce for TP precision on HIP (prevents
 +                # FP16 rounding accumulation through DeltaNet recurrence).
 +                orig_dtype = hidden_states.dtype
@@ -181,10 +99,10 @@ index 65e5441ebc..22b1b44081 100644
                      _ = prepare_weight_cache(hidden_states, context.cache)
                  hidden_states, residual = layernorm(hidden_states, residual)
 diff --git a/python/sglang/srt/layers/layernorm.py b/python/sglang/srt/layers/layernorm.py
-index 23c46113a1..42574fbae8 100644
+index 8b0ca51..2260e49 100644
 --- a/python/sglang/srt/layers/layernorm.py
 +++ b/python/sglang/srt/layers/layernorm.py
-@@ -895,6 +895,7 @@ class Gemma4RMSNorm(MultiPlatformOp):
+@@ -912,6 +912,7 @@ class Gemma4RMSNorm(MultiPlatformOp):
      ):
          super().__init__()
          self.with_scale = with_scale
@@ -192,126 +110,8 @@ index 23c46113a1..42574fbae8 100644
  
          if self.with_scale:
              self.weight = nn.Parameter(torch.ones(dim))
-@@ -921,13 +922,6 @@ class Gemma4RMSNorm(MultiPlatformOp):
-             normed_output = normed_output * (self.weight.float() + self.scale_shift)
-         return normed_output.type_as(x)
- 
--    def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
--        if _is_cpu_amx_available:
--            return torch.ops.sgl_kernel.gemma4_rmsnorm_cpu(
--                x, self.weight.data, self.eps, self.scale_shift, self.with_scale
--            )
--        return self.forward_native(x)
--
-     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-         if x.numel() == 0:
-             return x
-@@ -936,12 +930,8 @@ class Gemma4RMSNorm(MultiPlatformOp):
-             original_shape = x.shape
-             x = x.contiguous().reshape(-1, original_shape[-1])
-         if self.with_scale and self.scale_shift == 1.0:
--            # gemma_rmsnorm: norm(x) * (1 + weight)
-             out = gemma_rmsnorm(x, self.weight.data, self.eps)
-         else:
--            # rmsnorm: norm(x) * weight
--            # with_scale=False → weight is ones → norm(x) * 1 = norm(x)
--            # scale_shift=0.0 → standard RMSNorm without +1 shift
-             out = rmsnorm(x, self.weight.data, self.eps)
- 
-         if needs_reshape:
-@@ -958,29 +948,4 @@ class Gemma4RMSNorm(MultiPlatformOp):
-         return out
- 
-     def forward_hip(self, x: torch.Tensor) -> torch.Tensor:
--        # sgl_kernel's gemma_rmsnorm is not available on ROCm;
--        # delegate to the pure-PyTorch implementation.
-         return self.forward_native(x)
--
--
--class RMSNormWithoutScale(MultiPlatformOp):
--    def __init__(self, hidden_size: int, eps=1e-6):
--        super().__init__()
--        self.hidden_size = hidden_size
--        self.eps = eps
--
--    def _norm(self, x):
--        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
--
--    def forward_native(self, x):
--        orig_dtype = x.dtype
--        x = x.float()
--        variance = x.pow(2).mean(dim=-1, keepdim=True)
--        x = x * torch.rsqrt(variance + self.eps)
--        return x.to(orig_dtype)
--
--    def forward_cuda(self, x):
--        return self.forward_native(x)
--
--    def extra_repr(self):
--        return f"{self.hidden_size}, eps={self.eps}"
-diff --git a/python/sglang/srt/layers/rotary_embedding/rope_variant.py b/python/sglang/srt/layers/rotary_embedding/rope_variant.py
-index 7b0cb87e3e..d351cb24a3 100644
---- a/python/sglang/srt/layers/rotary_embedding/rope_variant.py
-+++ b/python/sglang/srt/layers/rotary_embedding/rope_variant.py
-@@ -889,11 +889,8 @@ class Gemma4RotaryEmbedding(RotaryEmbedding):
-         is_neox_style: bool,
-         dtype: torch.dtype,
-     ) -> None:
--        # Store angles before calling super().__init__
--        # rotary_dim is already scaled by partial_rotary_factor in get_rope
--        # For Gemma4: head_size=512, partial_rotary_factor=0.25 -> rotary_dim=128
--        self.rope_angles = rotary_dim // 2  # Number of rotation angles per half
--        self.nope_angles = (head_size // 2) - self.rope_angles  # Non-rotated per half
-+        self.rope_angles = rotary_dim // 2
-+        self.nope_angles = (head_size // 2) - self.rope_angles
- 
-         super().__init__(
-             head_size,
-@@ -905,16 +902,11 @@ class Gemma4RotaryEmbedding(RotaryEmbedding):
-         )
- 
-     def _compute_inv_freq(self, base: float) -> torch.Tensor:
--        """Compute frequencies only for the rotated dimensions.
--
--        Non-rotated dims are padded with 0.0 to produce identity rotation.
--        """
-         freq_exponents = (
-             torch.arange(0, 2 * self.rope_angles, 2, dtype=torch.float) / self.head_size
-         )
-         inv_freq = 1.0 / (base**freq_exponents)
- 
--        # Zero-pad for non-rotated dims (identity rotation: cos=1, sin=0)
-         if self.nope_angles > 0:
-             inv_freq = torch.cat(
-                 [
-diff --git a/python/sglang/srt/model_executor/model_runner_kv_cache_mixin.py b/python/sglang/srt/model_executor/model_runner_kv_cache_mixin.py
-index ef8ea85589..195e37a73f 100644
---- a/python/sglang/srt/model_executor/model_runner_kv_cache_mixin.py
-+++ b/python/sglang/srt/model_executor/model_runner_kv_cache_mixin.py
-@@ -898,11 +898,19 @@ class ModelRunnerKVCacheMixin:
-         else:
-             if self.is_hybrid_swa:
-                 kwargs = {}
--                if self.is_hybrid_swa_compress:
-+                # Pass SWA-specific head dimensions when they differ from full attention
-+                swa_head_dim = getattr(self.model_config.hf_text_config, "swa_head_dim", self.model_config.head_dim)
-+                swa_v_head_dim = getattr(self.model_config.hf_text_config, "swa_v_head_dim", self.model_config.v_head_dim)
-+                swa_num_kv_heads = getattr(self.model_config.hf_text_config, "swa_num_key_value_heads", None)
-+                if (
-+                    self.is_hybrid_swa_compress
-+                    or swa_head_dim != self.model_config.head_dim
-+                    or (swa_num_kv_heads is not None and swa_num_kv_heads != self.model_config.hf_text_config.num_key_value_heads)
-+                ):
-                     kwargs = {
-                         "swa_head_num": max(
-                             1,
--                            self.model_config.hf_text_config.swa_num_key_value_heads
-+                            (swa_num_kv_heads or self.model_config.hf_text_config.num_key_value_heads)
-                             // get_attention_tp_size(),
-                         ),
-                         "swa_head_dim": self.model_config.swa_head_dim,
 diff --git a/python/sglang/srt/model_loader/weight_utils.py b/python/sglang/srt/model_loader/weight_utils.py
-index 11b8a1c983..8f566699ba 100644
+index 11b8a1c..8f56669 100644
 --- a/python/sglang/srt/model_loader/weight_utils.py
 +++ b/python/sglang/srt/model_loader/weight_utils.py
 @@ -1382,11 +1382,15 @@ def row_parallel_weight_loader(
@@ -333,10 +133,10 @@ index 11b8a1c983..8f566699ba 100644
          shard_size = param.data.shape[shard_axis]
          start_idx = tp_rank * shard_size
 diff --git a/python/sglang/srt/models/gemma4_causal.py b/python/sglang/srt/models/gemma4_causal.py
-index 339257ca1e..5d42de0d42 100644
+index f2d9a64..6dc035c 100644
 --- a/python/sglang/srt/models/gemma4_causal.py
 +++ b/python/sglang/srt/models/gemma4_causal.py
-@@ -308,7 +308,9 @@ class Gemma4Attention(nn.Module):
+@@ -306,7 +306,9 @@ class Gemma4Attention(nn.Module):
                  config, "swa_num_key_value_heads", config.num_key_value_heads
              )
          else:
@@ -347,53 +147,7 @@ index 339257ca1e..5d42de0d42 100644
  
          self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
  
-@@ -494,7 +496,6 @@ class Gemma4Attention(nn.Module):
-             q, k = self.rotary_emb(positions, q, k, fused_set_kv_buffer_arg=fused_arg)
-             k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
-         else:
--            # Rotary embedding requires a key input; use zeros since KV is shared from another layer
-             dummy_k = torch.zeros_like(q[:, : self.kv_size])
-             q, _ = self.rotary_emb(positions, q, dummy_k)
- 
-@@ -506,6 +507,7 @@ class Gemma4Attention(nn.Module):
-             forward_batch=forward_batch,
-             save_kv_cache=not self.is_kv_shared_layer and not use_fused_kv,
-         )
-+
-         if attn_output.dim() == 3:
-             attn_output = attn_output.flatten(-2, -1)
-         output, _ = self.o_proj(attn_output)
-@@ -530,10 +532,12 @@ class Gemma4DecoderLayer(nn.Module):
-         self.layer_id = layer_id
- 
-         # Gemma 4 uses different head dimensions for sliding vs full attention
-+        # hf_transformers_utils remaps: config.head_dim = global_head_dim (512),
-+        # config.swa_head_dim = original head_dim (256)
-         layer_type = config.layer_types[layer_id]
-         self.is_full_attention = layer_type == "full_attention"
-         if self.is_full_attention:
--            head_dim = config.head_dim  # following sglang naming
-+            head_dim = config.head_dim
-         else:
-             head_dim = getattr(config, "swa_head_dim", config.head_dim)
- 
-@@ -659,13 +663,14 @@ class Gemma4DecoderLayer(nn.Module):
-         #   h = gemma_norm(residual)
-         residual = hidden_states
- 
--        # Apply input layernorm
-         hidden_states = self.input_layernorm(hidden_states)
-+
-         hidden_states = self.self_attn(
-             positions=positions,
-             hidden_states=hidden_states,
-             forward_batch=forward_batch,
-         )
-+
-         hidden_states = self.post_attention_layernorm(hidden_states)
- 
-         if self.enable_moe_block:
-@@ -721,12 +726,7 @@ class Gemma4DecoderLayer(nn.Module):
+@@ -719,12 +721,7 @@ class Gemma4DecoderLayer(nn.Module):
              )
              hidden_states = self.mlp(hidden_states)
  
@@ -407,7 +161,7 @@ index 339257ca1e..5d42de0d42 100644
              # Fused: (post_ff_norm(h) + residual) * layer_scalar in one kernel
              norm = self.post_feedforward_layernorm
              hidden_states = gemma_rmsnorm_residual_scalar(
-@@ -1069,10 +1069,13 @@ class Gemma4ForCausalLM(PreTrainedModel):
+@@ -1067,10 +1064,13 @@ class Gemma4ForCausalLM(PreTrainedModel):
  
      def __init__(
          self,
@@ -422,20 +176,11 @@ index 339257ca1e..5d42de0d42 100644
          super().__init__(config=config)
          self.pp_group = get_pp_group()
          self.config = config
-@@ -1266,8 +1269,6 @@ class Gemma4ForCausalLM(PreTrainedModel):
-                 and int(m.group(1)) in k_eq_v_layers
-             )
- 
--            # MoE expert weights checked first (gate_up_proj contains "up_proj"
--            # which would false-match the stacked dense MLP mapping).
-             orig_name = name
- 
-             # 1) Per-expert checkpoint layout (compressed-tensors FP8 like
 diff --git a/python/sglang/srt/models/qwen3_5.py b/python/sglang/srt/models/qwen3_5.py
-index fed78cf888..d7803ed25d 100644
+index fe26e90..d794e0e 100644
 --- a/python/sglang/srt/models/qwen3_5.py
 +++ b/python/sglang/srt/models/qwen3_5.py
-@@ -154,6 +154,21 @@ if _is_npu:
+@@ -163,6 +163,21 @@ if _is_npu:
      )
  
  
@@ -457,7 +202,7 @@ index fed78cf888..d7803ed25d 100644
  class Qwen3_5GatedDeltaNet(nn.Module):
      def __init__(
          self,
-@@ -165,8 +180,12 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+@@ -174,8 +189,12 @@ class Qwen3_5GatedDeltaNet(nn.Module):
      ) -> None:
          super().__init__()
          self.config = config
@@ -472,7 +217,7 @@ index fed78cf888..d7803ed25d 100644
          self.hidden_size = config.hidden_size
          self.num_v_heads = (
              config.linear_num_value_heads
-@@ -214,10 +233,13 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+@@ -223,10 +242,13 @@ class Qwen3_5GatedDeltaNet(nn.Module):
              tp_size=self.attn_tp_size,
          )
  
@@ -487,7 +232,7 @@ index fed78cf888..d7803ed25d 100644
              prefix=add_prefix("in_proj_ba", prefix),
              tp_rank=self.attn_tp_rank,
              tp_size=self.attn_tp_size,
-@@ -254,8 +276,9 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+@@ -274,8 +296,9 @@ class Qwen3_5GatedDeltaNet(nn.Module):
              torch.empty(self.num_v_heads // self.attn_tp_size, dtype=torch.float32),
          )
  
@@ -499,7 +244,7 @@ index fed78cf888..d7803ed25d 100644
  
          conv_weights = self.conv1d.weight.view(
              self.conv1d.weight.size(0), self.conv1d.weight.size(2)
-@@ -571,6 +594,8 @@ class Qwen3_5GatedDeltaNet(nn.Module):
+@@ -591,6 +614,8 @@ class Qwen3_5GatedDeltaNet(nn.Module):
          core_attn_out = core_attn_out.reshape(*core_attn_out.shape[:-2], -1)
  
          output, _ = self.out_proj(core_attn_out)
@@ -508,7 +253,7 @@ index fed78cf888..d7803ed25d 100644
          return output
  
  
-@@ -601,6 +626,8 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
+@@ -621,6 +646,8 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
  
          # NOTE: Determine the MLP type based on the model type
          # Qwen3.5 use all layers for MLP / Qwen3.5-MoE use sparse MoE blocks
@@ -517,7 +262,7 @@ index fed78cf888..d7803ed25d 100644
          if config.model_type == "qwen3_5_moe_text":
              self.mlp = Qwen2MoeSparseMoeBlock(
                  layer_id=layer_id,
-@@ -619,12 +646,16 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
+@@ -639,12 +666,16 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
              is_previous_layer_sparse = True
              is_next_layer_sparse = True
          elif config.model_type == "qwen3_5_text":
@@ -534,16 +279,16 @@ index fed78cf888..d7803ed25d 100644
              )
              is_layer_sparse = False
              is_previous_layer_sparse = False
-@@ -702,6 +733,8 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
-             hidden_states = self.mlp(
-                 hidden_states, should_allreduce_fusion, use_reduce_scatter
-             )
+@@ -722,6 +753,8 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
+                 )
+             else:
+                 hidden_states = self.mlp(hidden_states)
 +        if self.replicate_mlp and self.real_tp_size > 1:
 +            hidden_states = hidden_states / self.real_tp_size
-         if should_allreduce_fusion:
+         if fuse_mlp_allreduce:
              hidden_states._sglang_needs_allreduce_fusion = True
          else:
-@@ -806,13 +839,19 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
+@@ -826,13 +859,19 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
          )
  
          # Dense MLP for non-MoE variant
@@ -563,20 +308,20 @@ index fed78cf888..d7803ed25d 100644
              )
              is_layer_sparse = False
              is_previous_layer_sparse = False
-@@ -1087,6 +1126,8 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
-             hidden_states = self.mlp(
-                 hidden_states, should_allreduce_fusion, use_reduce_scatter
-             )
+@@ -1107,6 +1146,8 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
+                 )
+             else:
+                 hidden_states = self.mlp(hidden_states)
 +        if self.replicate_mlp and self.real_tp_size > 1:
 +            hidden_states = hidden_states / self.real_tp_size
-         if should_allreduce_fusion:
+         if fuse_mlp_allreduce:
              hidden_states._sglang_needs_allreduce_fusion = True
          else:
 diff --git a/python/sglang/srt/models/qwen3_next.py b/python/sglang/srt/models/qwen3_next.py
-index e86855cce1..2b5bcffd01 100644
+index 42e38db..6572119 100644
 --- a/python/sglang/srt/models/qwen3_next.py
 +++ b/python/sglang/srt/models/qwen3_next.py
-@@ -151,12 +151,13 @@ class Qwen3GatedDeltaNet(nn.Module):
+@@ -156,12 +156,13 @@ class Qwen3GatedDeltaNet(nn.Module):
  
          # Override weight_loader for packed checkpoint format.
          # Must capture original_loader BEFORE overwriting.
@@ -596,7 +341,7 @@ index e86855cce1..2b5bcffd01 100644
  
          # Conv1d weight loader setup
          query_key_settings = (self.key_dim, 0, False)
-@@ -247,21 +248,15 @@ class Qwen3GatedDeltaNet(nn.Module):
+@@ -252,21 +253,15 @@ class Qwen3GatedDeltaNet(nn.Module):
  
          ModelWeightParameter exposes weight_loader as a read-only property
          backed by _weight_loader, while plain parameters store it as a
@@ -627,7 +372,7 @@ index e86855cce1..2b5bcffd01 100644
  
      @staticmethod
      def _make_packed_weight_loader(module):
-@@ -269,6 +264,8 @@ class Qwen3GatedDeltaNet(nn.Module):
+@@ -274,6 +269,8 @@ class Qwen3GatedDeltaNet(nn.Module):
          (packed-format) checkpoint weights (shard_id=None), and delegates
          to the standard MergedColumnParallelLinear loader for split checkpoint
          weights (shard_id=int/tuple)."""

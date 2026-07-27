@@ -1,13 +1,13 @@
-diff --git a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/srt/model_executor/model_runner.py
-index e916d56719..28f6a9b602 100644
---- a/python/sglang/srt/model_executor/model_runner.py
-+++ b/python/sglang/srt/model_executor/model_runner.py
-@@ -303,7 +303,7 @@ def add_chunked_prefix_cache_attention_backend(backend_name):
+diff --git a/python/sglang/srt/model_executor/model_runner_components/load_model_utils.py b/python/sglang/srt/model_executor/model_runner_components/load_model_utils.py
+index c55ba80..6ffa0fa 100644
+--- a/python/sglang/srt/model_executor/model_runner_components/load_model_utils.py
++++ b/python/sglang/srt/model_executor/model_runner_components/load_model_utils.py
+@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
+ _is_npu = is_npu()
  
  
- # Detect stragger ranks in model loading
 -UNBALANCED_MODEL_LOADING_TIMEOUT_S = 480  # leave more time for post data processing
 +UNBALANCED_MODEL_LOADING_TIMEOUT_S = 1800  # leave more time for post data processing (R9700: big TP2 models on cold page cache skew >480s between ranks)
  
  
- logger = logging.getLogger(__name__)
+ class LoadedModel(msgspec.Struct, frozen=True, kw_only=True):

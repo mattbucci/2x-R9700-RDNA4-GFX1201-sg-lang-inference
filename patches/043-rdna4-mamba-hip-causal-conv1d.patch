@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/layers/attention/mamba/mamba.py b/python/sglang/srt/layers/attention/mamba/mamba.py
-index 7e6c072a5a..280ebcae9b 100644
+index 6327665..1830ff3 100644
 --- a/python/sglang/srt/layers/attention/mamba/mamba.py
 +++ b/python/sglang/srt/layers/attention/mamba/mamba.py
 @@ -36,6 +36,7 @@ from sglang.srt.runtime_context import get_parallel
@@ -11,8 +11,8 @@ index 7e6c072a5a..280ebcae9b 100644
      is_xpu,
      set_weight_attrs,
 @@ -52,6 +53,18 @@ if is_cuda():
-     from sglang.srt.layers.attention.mamba.causal_conv1d_triton import (
-         causal_conv1d_update as causal_conv1d_update_triton,
+         causal_conv1d_fn,
+         causal_conv1d_update,
      )
 +elif is_hip():
 +    # RDNA4/ROCm (R9700 patch): the external/CUDA causal_conv1d is unavailable on
@@ -20,7 +20,7 @@ index 7e6c072a5a..280ebcae9b 100644
 +    # names AND the default names (aliased), so MambaMixer2 works regardless of
 +    # use_triton_causal_conv. Unblocks NemotronH (Mamba2 SSD) on RDNA4 — the SSD
 +    # scan ops (sglang...mamba.ops) are already backend-agnostic Triton.
-+    from sglang.srt.layers.attention.mamba.causal_conv1d_triton import (
++    from sglang.kernels.ops.mamba.causal_conv1d_triton import (
 +        causal_conv1d_fn as causal_conv1d_fn_triton,
 +        causal_conv1d_update as causal_conv1d_update_triton,
 +    )

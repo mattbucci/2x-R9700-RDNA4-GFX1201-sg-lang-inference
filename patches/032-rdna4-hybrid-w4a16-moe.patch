@@ -1,10 +1,10 @@
 diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
-index 790acce902..2dc3ec88f2 100644
+index 943d945..32de9e3 100644
 --- a/python/sglang/srt/environ.py
 +++ b/python/sglang/srt/environ.py
-@@ -188,6 +188,21 @@ class ToolStrictLevel(IntEnum):
- 
- class Envs:
+@@ -216,6 +216,21 @@ class Envs:
+     # must go through ServerArgs.override() (enabled by the test harness).
+     SGLANG_STRICT_CONFIG_MUTATION = EnvBool(False)
  
 +    # MoE hybrid W4A16 kernel (HIP wvSplitK INT4 GEMM for decode + Triton for
 +    # prefill). Ported from mgehre-amd/vllm 0b992ff (2026-04-27). Enabled by
@@ -26,7 +26,7 @@ index 790acce902..2dc3ec88f2 100644
      # Controls weight-file ordering for load-time I/O optimization.
 diff --git a/python/sglang/srt/layers/moe/hybrid_w4a16_moe.py b/python/sglang/srt/layers/moe/hybrid_w4a16_moe.py
 new file mode 100644
-index 0000000000..f669d8232d
+index 0000000..f669d82
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/hybrid_w4a16_moe.py
 @@ -0,0 +1,297 @@
@@ -329,7 +329,7 @@ index 0000000000..f669d8232d
 +    )
 diff --git a/sgl-kernel/csrc/quantization/awq/skinny_gemms_int4.cu b/sgl-kernel/csrc/quantization/awq/skinny_gemms_int4.cu
 new file mode 100644
-index 0000000000..a9ba68b1c4
+index 0000000..a9ba68b
 --- /dev/null
 +++ b/sgl-kernel/csrc/quantization/awq/skinny_gemms_int4.cu
 @@ -0,0 +1,1484 @@

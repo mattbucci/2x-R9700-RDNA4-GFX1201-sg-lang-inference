@@ -1,4 +1,5 @@
 diff --git a/python/sglang/jit_kernel/triton_store_cache.py b/python/sglang/jit_kernel/triton_store_cache.py
+index 9824989..8c82b94 100644
 --- a/python/sglang/jit_kernel/triton_store_cache.py
 +++ b/python/sglang/jit_kernel/triton_store_cache.py
 @@ -235,3 +235,123 @@ def triton_fused_store_cache(
@@ -126,17 +127,18 @@ diff --git a/python/sglang/jit_kernel/triton_store_cache.py b/python/sglang/jit_
 +        num_warps=8 if block >= 512 else 4,
 +    )
 diff --git a/python/sglang/srt/mem_cache/memory_pool.py b/python/sglang/srt/mem_cache/memory_pool.py
+index fdb87ae..060080e 100644
 --- a/python/sglang/srt/mem_cache/memory_pool.py
 +++ b/python/sglang/srt/mem_cache/memory_pool.py
-@@ -73,6 +73,7 @@ from sglang.srt.platforms import current_platform
- from sglang.srt.platforms import current_platform
+@@ -76,6 +76,7 @@ from sglang.srt.platforms import current_platform
+ from sglang.srt.runtime_context import get_parallel
  from sglang.srt.utils import (
      cpu_has_amx_support,
 +    get_bool_env_var,
      is_cpu,
      is_cuda,
-     is_hip,
-@@ -106,6 +107,9 @@ _use_aiter = bool(envs.SGLANG_USE_AITER.get()) and _is_hip
+     is_float4_e2m1fn_x2,
+@@ -110,6 +111,9 @@ _FP8_KV_CACHE_DTYPES = (
  # the SHUFFLE 5D pool layout has no consumer kernels, so the env var is
  # silently ignored and the legacy NHD layout is used.
  _use_aiter = bool(envs.SGLANG_USE_AITER.get()) and _is_hip
@@ -146,10 +148,10 @@ diff --git a/python/sglang/srt/mem_cache/memory_pool.py b/python/sglang/srt/mem_
  
  
  def conv_window_dedup_enabled(
-@@ -1694,6 +1698,39 @@ class MHATokenToKVPool(KVCache):
-             layer_id = layer_id_override
-         else:
-             layer_id = layer.layer_id
+@@ -2280,6 +2284,40 @@ class MHATokenToKVPool(KVCache):
+             )
+             return
+ 
 +        if (
 +            _use_fused_fp8_kv_store
 +            and cache_k.is_cuda
@@ -183,11 +185,13 @@ diff --git a/python/sglang/srt/mem_cache/memory_pool.py b/python/sglang/srt/mem_
 +                size_limit=self.size + self.page_size,
 +            )
 +            return
++
          if cache_k.dtype != self.dtype:
              if self.dtype in _FP8_KV_CACHE_DTYPES:
                  if k_scale is not None:
 diff --git a/test/registered/jit/test_rdna4_fp8_kv_store.py b/test/registered/jit/test_rdna4_fp8_kv_store.py
 new file mode 100644
+index 0000000..51061ee
 --- /dev/null
 +++ b/test/registered/jit/test_rdna4_fp8_kv_store.py
 @@ -0,0 +1,135 @@

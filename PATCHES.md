@@ -4,7 +4,7 @@ The repository carries **71 active patches across three environments**:
 
 | Collection | Target | Count | Purpose |
 |---|---|---:|---|
-| [`patches/`](patches/README.md) | SGLang v0.5.15 (`/data/sgl-v0515`, `sglang-triton36-v0515`) | **69** | RDNA4 serving, model compatibility, correctness, and performance |
+| [`patches/`](patches/README.md) | SGLang v0.5.16 (`/data/sgl-v0516`, `sglang-triton36-v0516`) | **69** | RDNA4 serving, model compatibility, correctness, and performance |
 | [`llmcompressor-patches/`](llmcompressor-patches/README.md) | llmcompressor calibration environment | **1** | Unfused Qwen3 MoE experts for GPTQ calibration |
 | [`ream-patches/`](ream-patches/README.md) | Samsung SAIL REAM clone | **1** | Memory-safe, resumable expert merging |
 
@@ -13,14 +13,16 @@ Tooling files that support REAM/REAP are not counted as patches. Upstream contri
 
 ## SGLang series
 
-Apply the 69 numeric patches in filename order to pristine SGLang v0.5.15. Patch 072 was removed because
+Apply the 69 numeric patches in filename order to pristine SGLang v0.5.16. Patch 072 was removed because
 transformers 5.12.1 provides the Gemma 4 unified configuration and processor natively. Patch 083 replaces
-that count with the Mistral tokenizer-backend correction required by Devstral and Devstral 2.
+that count with the Mistral tokenizer-backend correction required by Devstral and Devstral 2. On the
+v0.5.16 rebase, patch 059 was dropped because its FuseEP dispatcher target was removed upstream, and patch
+097 (JIT fused-gate None-bias guard) was added.
 
 | Lane | Patches | Count |
 |---|---|---:|
-| Core RDNA4 enablement | 001 002 003 008 059 060 063 094 | 8 |
-| MoE serving and routing | 004 028 031 033 037 066 075 076 078 079 | 10 |
+| Core RDNA4 enablement | 001 002 003 008 060 063 094 | 7 |
+| MoE serving and routing | 004 028 031 033 037 066 075 076 078 079 097 | 11 |
 | Attention and numerics | 011 027 065 077 080 081 084 085 086 087 088 | 11 |
 | AWQ int4 | 006 030 032 041 | 4 |
 | FP8 | 005 039 042 044 045 074 082 | 7 |
@@ -29,8 +31,9 @@ that count with the Mistral tokenizer-backend correction required by Devstral an
 | Model, parser, and speculative-decode plumbing | 007 015 016 036 040 048 055 056 057 058 062 083 089 090 091 092 093 095 | 18 |
 | API and network hardening | 096 | 1 |
 
-The detailed active index and replay procedure are in [`patches/README.md`](patches/README.md). Base and
-North/Laguna validation evidence is recorded in
+The detailed active index and replay procedure are in [`patches/README.md`](patches/README.md). The
+v0.5.16 rebase is validated in [`patches/v0516-rebase-2026-07-27.md`](patches/v0516-rebase-2026-07-27.md);
+base and North/Laguna validation evidence is recorded in
 [`patches/v0515-rebase-2026-07-11.md`](patches/v0515-rebase-2026-07-11.md) and
 [`patches/v0515-north-laguna-2026-07-12.md`](patches/v0515-north-laguna-2026-07-12.md).
 
@@ -38,7 +41,7 @@ North/Laguna validation evidence is recorded in
 
 Every patch-series change must pass all three checks:
 
-1. Apply every numeric patch to a pristine v0.5.15 tree with no skipped or failed patches.
+1. Apply every numeric patch to a pristine v0.5.16 tree with no skipped or failed patches.
 2. Compare the result byte-for-byte with the intended serving-tree delta.
 3. Confirm that patches cannot be applied a second time; patch 026 is the documented non-unique-anchor
    exception and must be reviewed explicitly.

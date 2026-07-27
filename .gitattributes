@@ -1,0 +1,11 @@
+# Vendored unified-diff patch files legitimately contain single-space blank
+# context lines (the unified-diff format requires a leading space on every
+# context line, so a blank context line is exactly one space). git's whitespace
+# checker (`git diff --check` / `git show --check`, run by the build-image CI
+# gate) misreads those as trailing-whitespace defects because the tracked file
+# is itself a diff. Disable whitespace checking for the patch collections so the
+# gate passes. This does NOT weaken setup.sh's `git diff --check`, which runs
+# against the *applied* SGLang source tree, not against these patch blobs.
+patches/**       -whitespace
+llmcompressor-patches/**  -whitespace
+ream-patches/**  -whitespace

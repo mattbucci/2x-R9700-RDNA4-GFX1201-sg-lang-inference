@@ -1,7 +1,7 @@
-diff --git a/python/sglang/srt/layers/attention/mamba/causal_conv1d_triton.py b/python/sglang/srt/layers/attention/mamba/causal_conv1d_triton.py
-index d70f176e86..5936731eab 100644
---- a/python/sglang/srt/layers/attention/mamba/causal_conv1d_triton.py
-+++ b/python/sglang/srt/layers/attention/mamba/causal_conv1d_triton.py
+diff --git a/python/sglang/kernels/ops/mamba/causal_conv1d_triton.py b/python/sglang/kernels/ops/mamba/causal_conv1d_triton.py
+index d70f176..5936731 100644
+--- a/python/sglang/kernels/ops/mamba/causal_conv1d_triton.py
++++ b/python/sglang/kernels/ops/mamba/causal_conv1d_triton.py
 @@ -126,28 +126,28 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
              mask_w = idx_feats < dim
              if KERNEL_WIDTH == 2:

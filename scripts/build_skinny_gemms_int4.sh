@@ -20,7 +20,8 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
-SRC_FILE="$REPO_DIR/components/sglang/sgl-kernel/csrc/quantization/awq/skinny_gemms_int4.cu"
+SGL_KERNEL_DIR="${SGL_KERNEL_DIR:-$REPO_DIR/components/sglang/sgl-kernel}"  # overridable for version rebases
+SRC_FILE="$SGL_KERNEL_DIR/csrc/quantization/awq/skinny_gemms_int4.cu"
 
 TARGET_ENV=""
 while [[ $# -gt 0 ]]; do

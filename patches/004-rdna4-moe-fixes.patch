@@ -1,890 +1,7 @@
-diff --git a/python/sglang/srt/layers/moe/fused_moe_triton/layer.py b/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
-index 3d4cbfc445..0128e892e7 100644
---- a/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
-+++ b/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
-@@ -34,7 +34,10 @@ from sglang.srt.layers.moe.kt_ep_wrapper import (
- )
- from sglang.srt.layers.moe.token_dispatcher import CombineInput, DispatchOutput
- from sglang.srt.layers.moe.token_dispatcher.base import BaseDispatcher
--from sglang.srt.layers.moe.token_dispatcher.flashinfer import FlashinferDispatcher
-+try:
-+    from sglang.srt.layers.moe.token_dispatcher.flashinfer import FlashinferDispatcher
-+except (ImportError, AssertionError):
-+    FlashinferDispatcher = None
- from sglang.srt.layers.moe.token_dispatcher.standard import (
-     StandardDispatcher,
- )
-diff --git a/python/sglang/srt/layers/moe/moe_runner/triton.py b/python/sglang/srt/layers/moe/moe_runner/triton.py
-index 84a9a79102..fb8d7a10af 100644
---- a/python/sglang/srt/layers/moe/moe_runner/triton.py
-+++ b/python/sglang/srt/layers/moe/moe_runner/triton.py
-@@ -25,6 +25,61 @@ if TYPE_CHECKING:
-     )
- 
- 
-+_is_hip = is_hip()
-+_is_cuda = is_cuda()
-+_is_cpu_amx_available = cpu_has_amx_support()
-+_is_cpu = is_cpu()
-+_use_aiter = bool(int(os.getenv("SGLANG_USE_AITER", "0")))
-+_is_xpu = is_xpu()
-+_MOE_PADDING_SIZE = 128 if bool(int(os.getenv("SGLANG_MOE_PADDING", "0"))) else 0
-+
-+
-+if _is_cuda or _is_hip:
-+    try:
-+        from sgl_kernel import gelu_and_mul, silu_and_mul
-+    except ImportError:
-+        # sgl_kernel not available on this platform (e.g. RDNA4/gfx12xx)
-+        # Provide torch-based fallbacks
-+        def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-+            d = x.shape[-1] // 2
-+            out[:] = torch.nn.functional.silu(x[..., :d]) * x[..., d:]
-+
-+        def gelu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-+            d = x.shape[-1] // 2
-+            out[:] = torch.nn.functional.gelu(x[..., :d]) * x[..., d:]
-+
-+    if _is_hip:
-+        _has_vllm = False
-+        if _use_aiter:
-+            try:
-+                from aiter import moe_sum
-+            except ImportError:
-+                raise ImportError(
-+                    "aiter is required when SGLANG_USE_AITER is set to True"
-+                )
-+        else:
-+            try:
-+                from vllm import _custom_ops as vllm_ops  # moe_sum
-+
-+                _has_vllm = True
-+            except ImportError:
-+                # Fallback: vllm not available, will use triton moe_sum
-+                _has_vllm = False
-+elif _is_cpu and _is_cpu_amx_available:
-+    pass
-+elif _is_xpu:
-+    from sgl_kernel import moe_sum_reduce, silu_and_mul
-+
-+
-+if _is_cuda or _is_hip or _is_xpu:
-+    try:
-+        from sgl_kernel import (  # noqa: F401
-+            moe_align_block_size as sgl_moe_align_block_size,
-+        )
-+    except ImportError:
-+        sgl_moe_align_block_size = None
-+
-+
- @dataclass
- class TritonRunnerInput(RunnerInput):
- 
-diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=1536,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=1536,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json
-new file mode 100644
-index 0000000000..d7888148cb
---- /dev/null
-+++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=1536,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json	
-@@ -0,0 +1,74 @@
-+{
-+    "1": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "2": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "4": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "8": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 4,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "16": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 4,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "32": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "64": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 16,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "128": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "256": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    }
-+}
-diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=1536,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=1536,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json
-new file mode 100644
-index 0000000000..d7888148cb
---- /dev/null
-+++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=1536,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json	
-@@ -0,0 +1,74 @@
-+{
-+    "1": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "2": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "4": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "8": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 4,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "16": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 4,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "32": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "64": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 16,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "128": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "256": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    }
-+}
-diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=2048,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=2048,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json
-new file mode 100644
-index 0000000000..d7888148cb
---- /dev/null
-+++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=2048,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json	
-@@ -0,0 +1,74 @@
-+{
-+    "1": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "2": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "4": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "8": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 4,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "16": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 4,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "32": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "64": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 16,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "128": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "256": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    }
-+}
-diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=2048,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=2048,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json
-new file mode 100644
-index 0000000000..d7888148cb
---- /dev/null
-+++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=2048,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json	
-@@ -0,0 +1,74 @@
-+{
-+    "1": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "2": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "4": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "8": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 4,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "16": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 4,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "32": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "64": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 16,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "128": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "256": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    }
-+}
-diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=384,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=384,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json
-new file mode 100644
-index 0000000000..ac815ea8fa
---- /dev/null
-+++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=384,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json	
-@@ -0,0 +1,106 @@
-+{
-+    "1": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 256,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "2": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 256,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "4": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 256,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "8": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 4,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "16": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 4,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "32": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "64": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 16,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "128": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "256": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "512": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "1024": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 256,
-+        "GROUP_SIZE_M": 4,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "2048": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 4,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "4096": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    }
-+}
-diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=384,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=384,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json
-new file mode 100644
-index 0000000000..ac815ea8fa
---- /dev/null
-+++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=384,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json	
-@@ -0,0 +1,106 @@
-+{
-+    "1": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 256,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "2": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 256,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "4": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 256,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "8": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 4,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "16": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 4,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "32": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "64": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 16,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "128": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "256": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "512": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "1024": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 256,
-+        "GROUP_SIZE_M": 4,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "2048": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 4,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "4096": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    }
-+}
-diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=768,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=768,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json
-new file mode 100644
-index 0000000000..d7888148cb
---- /dev/null
-+++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=768,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json	
-@@ -0,0 +1,74 @@
-+{
-+    "1": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "2": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "4": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "8": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 4,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "16": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 4,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "32": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "64": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 16,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "128": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "256": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    }
-+}
-diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=768,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=768,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json
-new file mode 100644
-index 0000000000..d7888148cb
---- /dev/null
-+++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=768,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json	
-@@ -0,0 +1,74 @@
-+{
-+    "1": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "2": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "4": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 1,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "8": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 4,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "16": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 4,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "32": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "64": {
-+        "BLOCK_SIZE_M": 16,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 16,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "128": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    },
-+    "256": {
-+        "BLOCK_SIZE_M": 32,
-+        "BLOCK_SIZE_N": 128,
-+        "BLOCK_SIZE_K": 128,
-+        "GROUP_SIZE_M": 8,
-+        "num_warps": 4,
-+        "num_stages": 0
-+    }
-+}
-diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_7_0 b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_7_0
-new file mode 120000
-index 0000000000..fd7c245f7f
---- /dev/null
-+++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_7_0
-@@ -0,0 +1 @@
-+triton_3_6_0
-\ No newline at end of file
-diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py b/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py
-index 95fc3ec647..3147ca31e8 100644
---- a/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py
-+++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py
-@@ -59,7 +59,17 @@ if _is_cuda:
- elif _is_cpu and _is_cpu_amx_available:
-     pass
- elif _is_hip:
--    from sgl_kernel import gelu_and_mul, silu_and_mul
-+    try:
-+        from sgl_kernel import gelu_and_mul, silu_and_mul
-+    except ImportError:
-+        # sgl_kernel not available on this platform (e.g. RDNA4/gfx12xx)
-+        def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-+            d = x.shape[-1] // 2
-+            out[:] = F.silu(x[..., :d]) * x[..., d:]
-+
-+        def gelu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-+            d = x.shape[-1] // 2
-+            out[:] = F.gelu(x[..., :d]) * x[..., d:]
- 
-     if _use_aiter:
-         try:
-@@ -317,13 +327,13 @@ def fused_experts(
-         )
- 
- 
--@torch.compile
-+# Disable @torch.compile on RDNA4 — inductor's SFDP pattern matching takes 30+ min
-+# and blocks the server from starting.  The eager path is fast enough.
- def moe_sum_reduce_torch_compile(x, out, routed_scaling_factor):
-     torch.sum(x, dim=1, out=out)
-     out.mul_(routed_scaling_factor)
- 
- 
--@torch.compile
- def _swiglu_silu_clamp_mul(x, gemm1_limit):
-     gate, up = x.chunk(2, dim=-1)
-     gate = F.silu(gate)
-@@ -332,8 +342,7 @@ def _swiglu_silu_clamp_mul(x, gemm1_limit):
-     return gate * up
- 
- 
--@torch.compile
--def swiglu_gpt_oss_sigmoid_alpha(x, gemm1_alpha, gemm1_limit):
-+def _swiglu_gpt_oss_sigmoid_alpha(x, gemm1_alpha, gemm1_limit):
-     # NOTE: This variant uses gemm1_alpha, unlike _swiglu_silu_clamp_mul.
-     # At present, only GPT-OSS uses this variant.
-     gate, up = x[..., ::2], x[..., 1::2]
-diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_config.py b/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_config.py
-index 5f402913e4..bfc998efde 100644
---- a/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_config.py
-+++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_config.py
-@@ -32,6 +32,19 @@ def _use_low_smem_fp8_default() -> bool:
-     smem_limit = _get_cuda_shared_memory_per_block_optin()
-     return smem_limit is not None and smem_limit < _LOW_SMEM_FP8_DEFAULT_CUTOFF_BYTES
- 
-+# RDNA4 (gfx1201) needs num_stages=0 — Triton's CanonicalizePointers crashes with num_stages>=1
-+def _is_rdna4():
-+    if not _is_hip:
-+        return False
-+    try:
-+        from sglang.srt.utils import get_device_capability
-+        cap = get_device_capability()
-+        return cap[0] >= 12
-+    except Exception:
-+        return False
-+
-+_rdna4 = _is_rdna4()
-+
- 
- def get_config_file_name(
-     E: int,
-@@ -219,12 +232,12 @@ def get_default_config(
-         else:
-             # Block-wise quant: BLOCK_SIZE_K must be divisible by block_shape[1]
-             config = {
--                "BLOCK_SIZE_M": 64,
-+                "BLOCK_SIZE_M": 16 if _rdna4 else 64,  # RDNA4: smaller BLOCK_SIZE_M
-                 "BLOCK_SIZE_N": block_shape[0],
-                 "BLOCK_SIZE_K": block_shape[1],
--                "GROUP_SIZE_M": 32,
-+                "GROUP_SIZE_M": 1 if _rdna4 else 32,
-                 "num_warps": 4,
--                "num_stages": 2 if _is_hip else 3,
-+                "num_stages": 0 if _rdna4 else (2 if _is_hip else 3),
-             }
-     else:
-         config = {
-diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_kernels.py b/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_kernels.py
-index e727e0f6d8..e9fbf102fe 100644
---- a/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_kernels.py
-+++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_kernels.py
+diff --git a/python/sglang/kernels/ops/moe/fused_moe_triton_kernels.py b/python/sglang/kernels/ops/moe/fused_moe_triton_kernels.py
+index 54b38f5..99ed97c 100644
+--- a/python/sglang/kernels/ops/moe/fused_moe_triton_kernels.py
++++ b/python/sglang/kernels/ops/moe/fused_moe_triton_kernels.py
 @@ -42,6 +42,26 @@ _is_cpu_amx_available = cpu_has_amx_support()
  _is_cpu = is_cpu()
  _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
@@ -1212,92 +329,826 @@ index e727e0f6d8..e9fbf102fe 100644
      if fuse_sum_all_reduce:
          assert not c_sorted, "fuse_sum_all_reduce only supports c_sorted=False"
      if fuse_add_to_output:
-diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py b/python/sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py
-index 5d6f456669..9fdb3c75dc 100644
---- a/python/sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py
-+++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py
-@@ -15,8 +15,11 @@ _is_hip = is_hip()
- _is_xpu = is_xpu()
- _is_musa = is_musa()
- 
--if _is_cuda or _is_hip or _is_xpu or _is_musa:
--    from sgl_kernel import moe_align_block_size as sgl_moe_align_block_size
-+if _is_cuda or _is_hip or _is_xpu:
+diff --git a/python/sglang/srt/layers/moe/fused_moe_triton/layer.py b/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
+index 87cd13a..05dab97 100644
+--- a/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
++++ b/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
+@@ -38,7 +38,10 @@ from sglang.srt.layers.moe.token_dispatcher.ascend_tp import (
+     AscendTPDispatcher,
+ )
+ from sglang.srt.layers.moe.token_dispatcher.base import BaseDispatcher
+-from sglang.srt.layers.moe.token_dispatcher.flashinfer import FlashinferDispatcher
++try:
++    from sglang.srt.layers.moe.token_dispatcher.flashinfer import FlashinferDispatcher
++except (ImportError, AssertionError):
++    FlashinferDispatcher = None
+ from sglang.srt.layers.moe.token_dispatcher.standard import (
+     StandardDispatcher,
+ )
+diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=1536,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=1536,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json
+new file mode 100644
+index 0000000..d788814
+--- /dev/null
++++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=1536,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json	
+@@ -0,0 +1,74 @@
++{
++    "1": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "2": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "4": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "8": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "16": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "32": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "64": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 16,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "128": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "256": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    }
++}
+diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=1536,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=1536,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json
+new file mode 100644
+index 0000000..d788814
+--- /dev/null
++++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=1536,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json	
+@@ -0,0 +1,74 @@
++{
++    "1": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "2": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "4": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "8": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "16": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "32": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "64": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 16,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "128": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "256": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    }
++}
+diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=2048,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=2048,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json
+new file mode 100644
+index 0000000..d788814
+--- /dev/null
++++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=2048,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json	
+@@ -0,0 +1,74 @@
++{
++    "1": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "2": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "4": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "8": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "16": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "32": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "64": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 16,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "128": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "256": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    }
++}
+diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=2048,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=2048,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json
+new file mode 100644
+index 0000000..d788814
+--- /dev/null
++++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=2048,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json	
+@@ -0,0 +1,74 @@
++{
++    "1": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "2": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "4": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "8": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "16": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "32": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "64": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 16,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "128": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "256": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    }
++}
+diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=384,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=384,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json
+new file mode 100644
+index 0000000..ac815ea
+--- /dev/null
++++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=384,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json	
+@@ -0,0 +1,106 @@
++{
++    "1": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 256,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "2": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 256,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "4": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 256,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "8": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "16": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "32": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "64": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 16,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "128": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "256": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "512": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "1024": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 256,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "2048": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "4096": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    }
++}
+diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=384,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=384,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json
+new file mode 100644
+index 0000000..ac815ea
+--- /dev/null
++++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=384,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json	
+@@ -0,0 +1,106 @@
++{
++    "1": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 256,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "2": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 256,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "4": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 256,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "8": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "16": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "32": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "64": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 16,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "128": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "256": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "512": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "1024": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 256,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "2048": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "4096": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    }
++}
+diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=768,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=768,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json
+new file mode 100644
+index 0000000..d788814
+--- /dev/null
++++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=768,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json	
+@@ -0,0 +1,74 @@
++{
++    "1": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "2": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "4": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "8": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "16": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "32": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "64": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 16,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "128": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "256": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    }
++}
+diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=768,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=768,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json
+new file mode 100644
+index 0000000..d788814
+--- /dev/null
++++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=768,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json	
+@@ -0,0 +1,74 @@
++{
++    "1": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "2": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "4": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 1,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "8": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "16": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 4,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "32": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "64": {
++        "BLOCK_SIZE_M": 16,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 16,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "128": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    },
++    "256": {
++        "BLOCK_SIZE_M": 32,
++        "BLOCK_SIZE_N": 128,
++        "BLOCK_SIZE_K": 128,
++        "GROUP_SIZE_M": 8,
++        "num_warps": 4,
++        "num_stages": 0
++    }
++}
+diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_7_0 b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_7_0
+new file mode 120000
+index 0000000..fd7c245
+--- /dev/null
++++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_7_0
+@@ -0,0 +1 @@
++triton_3_6_0
+\ No newline at end of file
+diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py b/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py
+index 6b1f011..b880aba 100644
+--- a/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py
++++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py
+@@ -64,7 +64,17 @@ if _is_cuda:
+ elif _is_cpu and _is_cpu_amx_available:
+     pass
+ elif _is_hip:
+-    from sgl_kernel import gelu_and_mul, silu_and_mul
 +    try:
-+        from sgl_kernel import moe_align_block_size as sgl_moe_align_block_size
++        from sgl_kernel import gelu_and_mul, silu_and_mul
 +    except ImportError:
-+        sgl_moe_align_block_size = None
++        # sgl_kernel not available on this platform (e.g. RDNA4/gfx12xx)
++        def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
++            d = x.shape[-1] // 2
++            out[:] = F.silu(x[..., :d]) * x[..., d:]
++
++        def gelu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
++            d = x.shape[-1] // 2
++            out[:] = F.gelu(x[..., :d]) * x[..., d:]
+ 
+     if _use_aiter:
+         try:
+@@ -322,13 +332,13 @@ def fused_experts(
+         )
  
  
- def moe_align_block_size(
-@@ -99,7 +102,7 @@ def moe_align_block_size(
-             True,
-         )
-     # ===== END TO BE REFACTORED ====
--    else:
-+    elif sgl_moe_align_block_size is not None:
-         sgl_moe_align_block_size(
-             topk_ids,
-             num_experts + 1,
-@@ -110,4 +113,53 @@ def moe_align_block_size(
-             cumsum_buffer,
-             True,
-         )
-+    else:
-+        # RDNA4 (patch 004): sgl_moe_align_block_size may be None on gfx1201 — torch fallback.
-+        # Sort token assignments by expert, pad to block boundaries
-+        flat_ids = topk_ids.flatten()  # [num_tokens * top_k]
-+        num_tokens_total = flat_ids.numel()
+-@torch.compile
++# Disable @torch.compile on RDNA4 — inductor's SFDP pattern matching takes 30+ min
++# and blocks the server from starting.  The eager path is fast enough.
+ def moe_sum_reduce_torch_compile(x, out, routed_scaling_factor):
+     torch.sum(x, dim=1, out=out)
+     out.mul_(routed_scaling_factor)
+ 
+ 
+-@torch.compile
+ def _swiglu_silu_clamp_mul(x, gemm1_limit):
+     gate, up = x.chunk(2, dim=-1)
+     gate = F.silu(gate)
+@@ -337,7 +347,6 @@ def _swiglu_silu_clamp_mul(x, gemm1_limit):
+     return gate * up
+ 
+ 
+-@torch.compile
+ def swiglu_gpt_oss_sigmoid_alpha(x, gemm1_alpha, gemm1_limit):
+     # NOTE: This variant uses gemm1_alpha, unlike _swiglu_silu_clamp_mul.
+     # At present, only GPT-OSS uses this variant.
+diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_config.py b/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_config.py
+index 210247f..915edc2 100644
+--- a/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_config.py
++++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_config.py
+@@ -32,6 +32,19 @@ def _use_low_smem_fp8_default() -> bool:
+     smem_limit = _get_cuda_shared_memory_per_block_optin()
+     return smem_limit is not None and smem_limit < _LOW_SMEM_FP8_DEFAULT_CUTOFF_BYTES
+ 
++# RDNA4 (gfx1201) needs num_stages=0 — Triton's CanonicalizePointers crashes with num_stages>=1
++def _is_rdna4():
++    if not _is_hip:
++        return False
++    try:
++        from sglang.srt.utils import get_device_capability
++        cap = get_device_capability()
++        return cap[0] >= 12
++    except Exception:
++        return False
 +
-+        # Count tokens per expert (including -1 for filtered experts)
-+        expert_counts = torch.zeros(num_experts + 2, dtype=torch.int32, device=topk_ids.device)
-+        for e in range(num_experts):
-+            expert_counts[e + 1] = (flat_ids == e).sum()
-+        # Count -1 (filtered) tokens
-+        expert_counts[0] = (flat_ids == -1).sum()
++_rdna4 = _is_rdna4()
 +
-+        # Pad each expert's count to be divisible by block_size
-+        padded_counts = ((expert_counts + block_size - 1) // block_size) * block_size
-+
-+        # Compute cumulative offsets
-+        cumsum = torch.zeros_like(padded_counts)
-+        torch.cumsum(padded_counts, dim=0, out=cumsum)
-+        total_padded = cumsum[-1].item()
-+
-+        # Fill sorted_ids: for each expert, place its token indices, then padding
-+        sorted_ids.fill_(num_tokens_total)  # padding value = num_tokens_total
-+        expert_offsets = torch.zeros(num_experts + 2, dtype=torch.int32, device=topk_ids.device)
-+        expert_offsets[1:] = cumsum[:-1]
-+
-+        for idx in range(num_tokens_total):
-+            expert = flat_ids[idx].item()
-+            if expert == -1:
-+                pos = expert_offsets[0].item()
-+                expert_offsets[0] += 1
-+            else:
-+                pos = expert_offsets[expert + 1].item()
-+                expert_offsets[expert + 1] += 1
-+            if pos < sorted_ids.shape[0]:
-+                sorted_ids[pos] = idx
-+
-+        # Fill expert_ids: each block gets the expert index
-+        block_idx = 0
-+        for e in range(num_experts + 1):
-+            n_blocks = padded_counts[e].item() // block_size
-+            expert_val = e - 1  # -1 for filtered, 0..num_experts-1 for real experts
-+            for _ in range(n_blocks):
-+                if block_idx < expert_ids.shape[0]:
-+                    expert_ids[block_idx] = expert_val
-+                block_idx += 1
-+
-+        num_tokens_post_pad[0] = min(total_padded, sorted_ids.shape[0])
-+
-     return sorted_ids, expert_ids, num_tokens_post_pad
+ 
+ def get_config_file_name(
+     E: int,
+@@ -236,12 +249,12 @@ def get_default_config(
+         else:
+             # Block-wise quant: BLOCK_SIZE_K must be divisible by block_shape[1]
+             config = {
+-                "BLOCK_SIZE_M": 64,
++                "BLOCK_SIZE_M": 16 if _rdna4 else 64,  # RDNA4: smaller BLOCK_SIZE_M
+                 "BLOCK_SIZE_N": block_shape[0],
+                 "BLOCK_SIZE_K": block_shape[1],
+-                "GROUP_SIZE_M": 32,
++                "GROUP_SIZE_M": 1 if _rdna4 else 32,
+                 "num_warps": 4,
+-                "num_stages": 2 if _is_hip else 3,
++                "num_stages": 0 if _rdna4 else (2 if _is_hip else 3),
+             }
+     else:
+         config = {
 diff --git a/python/sglang/srt/layers/moe/token_dispatcher/__init__.py b/python/sglang/srt/layers/moe/token_dispatcher/__init__.py
-index f1ebac9708..86b1f478f5 100644
+index b605f74..924fa94 100644
 --- a/python/sglang/srt/layers/moe/token_dispatcher/__init__.py
 +++ b/python/sglang/srt/layers/moe/token_dispatcher/__init__.py
-@@ -16,10 +16,15 @@ from sglang.srt.layers.moe.token_dispatcher.deepep import (
+@@ -21,10 +21,14 @@ from sglang.srt.layers.moe.token_dispatcher.deepep import (
      DeepEPNormalCombineInput,
      DeepEPNormalDispatchOutput,
  )
@@ -1313,42 +1164,14 @@ index f1ebac9708..86b1f478f5 100644
 +except (ImportError, AssertionError):
 +    FlashinferDispatcher = None
 +    FlashinferDispatchOutput = None
-+from sglang.srt.layers.moe.token_dispatcher.fuseep import NpuFuseEPDispatcher
  from sglang.srt.layers.moe.token_dispatcher.mooncake import (
      MooncakeCombineInput,
      MooncakeDispatchOutput,
 diff --git a/python/sglang/srt/layers/moe/topk.py b/python/sglang/srt/layers/moe/topk.py
-index 27933521b1..0977088741 100644
+index 9c47af7..b255fd8 100644
 --- a/python/sglang/srt/layers/moe/topk.py
 +++ b/python/sglang/srt/layers/moe/topk.py
-@@ -179,12 +179,15 @@ if _is_cuda:
-         fused_topk_deepseek = None
- 
- if _is_cuda or _is_hip or _is_xpu:
--    from sgl_kernel import topk_softmax
-+    try:
-+        from sgl_kernel import topk_softmax
-+    except ImportError:
-+        topk_softmax = None
- 
-     try:
-         from sgl_kernel import topk_sigmoid
-     except ImportError:
--        pass
-+        topk_sigmoid = None
- if _use_aiter:
-     try:
-         from aiter import biased_grouped_topk as aiter_biased_grouped_topk
-@@ -763,8 +766,6 @@ def fused_topk(
- 
-     if scoring_func == "softmax":
-         if _use_aiter:
--
--            # Use fused_topk instead of topk_softmax to auto dispatch to the correct kernel
-             topk_weights, topk_ids = aiter_fused_topk(
-                 hidden_states,
-                 gating_output,
-@@ -808,6 +809,14 @@ def fused_topk(
+@@ -850,6 +850,14 @@ def fused_topk(
                  scoring_func="softmax",
                  renormalize=renormalize,
              )
@@ -1363,7 +1186,7 @@ index 27933521b1..0977088741 100644
          else:
              topk_softmax(
                  topk_weights,
-@@ -863,7 +872,7 @@ def fused_topk(
+@@ -925,7 +933,7 @@ def fused_topk(
  
  
  # This is used by the Deepseek V2/V3/R1 series models
@@ -1372,7 +1195,7 @@ index 27933521b1..0977088741 100644
  def grouped_topk_gpu(
      hidden_states: torch.Tensor,
      gating_output: torch.Tensor,
-@@ -954,7 +963,7 @@ def grouped_topk_cpu(
+@@ -1080,7 +1088,7 @@ def grouped_topk_xpu(
      )
  
  
@@ -1381,7 +1204,7 @@ index 27933521b1..0977088741 100644
  def kimi_k2_biased_topk_impl(
      hidden_states: torch.Tensor,
      gating_output: torch.Tensor,
-@@ -1109,7 +1118,7 @@ def biased_topk_jit_kernel_impl(
+@@ -1235,7 +1243,7 @@ def biased_topk_jit_kernel_impl(
          return topk_weights, topk_ids
  
  

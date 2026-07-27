@@ -1,8 +1,8 @@
-diff --git a/python/sglang/srt/layers/attention/triton_ops/decode_attention.py b/python/sglang/srt/layers/attention/triton_ops/decode_attention.py
-index 98f9000064..ebb6966939 100644
---- a/python/sglang/srt/layers/attention/triton_ops/decode_attention.py
-+++ b/python/sglang/srt/layers/attention/triton_ops/decode_attention.py
-@@ -522,7 +522,11 @@ def _fwd_grouped_kernel_stage1(
+diff --git a/python/sglang/kernels/ops/attention/decode_attention.py b/python/sglang/kernels/ops/attention/decode_attention.py
+index 8a8b33a..9774d3a 100644
+--- a/python/sglang/kernels/ops/attention/decode_attention.py
++++ b/python/sglang/kernels/ops/attention/decode_attention.py
+@@ -576,7 +576,11 @@ def _fwd_grouped_kernel_stage1(
              re_scale = tl.exp(e_max - n_e_max)
              p = tl.exp(qk - n_e_max[:, None])
              acc *= re_scale[:, None]

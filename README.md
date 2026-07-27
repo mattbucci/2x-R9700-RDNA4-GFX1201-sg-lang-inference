@@ -1,6 +1,6 @@
 # RDNA4 inference on 2× R9700
 
-SGLang v0.5.15 with 69 local RDNA4 patches, optimized for single-user long-context inference on two AMD Radeon AI PRO R9700 GPUs. The default serving tree is `/data/sgl-v0515`; the default conda environment is `sglang-triton36-v0515`.
+SGLang v0.5.16 with 69 local RDNA4 patches, optimized for single-user long-context inference on two AMD Radeon AI PRO R9700 GPUs. The default serving tree is `/data/sgl-v0516`; the default conda environment is `sglang-triton36-v0516`.
 
 The current optimization focus is FP8 coding MoE inference, especially Cohere North Mini Code and Poolside Laguna XS.2. The current kernel/options investigation is in the [2026-07-18 FP8/256K receipt](benchmarks/fp8-256k-options-r9700-2026-07-18.md); the earlier [North/Laguna receipt](benchmarks/north-laguna-v0515-r9700-2026-07-12.md) remains the 074–082 correctness campaign.
 
@@ -146,7 +146,7 @@ The model checkpoint controls compressed-tensors FP8 detection. Presets supply t
 | Component | Version |
 |---|---|
 | GPUs | 2× AMD Radeon AI PRO R9700, gfx1201, 32 GiB each |
-| SGLang | v0.5.15 + 62 patches |
+| SGLang | v0.5.16 + 69 patches |
 | Python | 3.12 |
 | PyTorch | 2.11.0+rocm7.2 |
 | ROCm | 7.2 |
@@ -165,7 +165,7 @@ Required kernel settings are `CONFIG_HSA_AMD_P2P=y`, `CONFIG_PCI_P2PDMA=y`, and 
 
 ## OCI image
 
-`Dockerfile` builds the ROCm 7.2/v0.5.15 stack without a GPU. The base images, SGLang commit, Rust toolchain, and downloaded installer checksums are pinned. Python/Conda transitive artifacts and live apt repositories are not fully hash-locked, so this is version-constrained rather than bit-reproducible. GitHub Actions verifies PR builds with a read-only token and, on trusted main-branch pushes, promotes the exact inspected candidate digest to a full-commit `sha-*` tag at `ghcr.io/<owner>/sglang-rdna4`; pin deployments by digest because registry tags remain mutable. If a version alias is needed, create it in a trusted release workflow by promoting an already verified digest—do not rebuild from a tag.
+`Dockerfile` builds the ROCm 7.2/v0.5.16 stack without a GPU. The base images, SGLang commit, Rust toolchain, and downloaded installer checksums are pinned. Python/Conda transitive artifacts and live apt repositories are not fully hash-locked, so this is version-constrained rather than bit-reproducible. GitHub Actions verifies PR builds with a read-only token and, on trusted main-branch pushes, promotes the exact inspected candidate digest to a full-commit `sha-*` tag at `ghcr.io/<owner>/sglang-rdna4`; pin deployments by digest because registry tags remain mutable. If a version alias is needed, create it in a trusted release workflow by promoting an already verified digest—do not rebuild from a tag.
 
 The image defaults to `GPU_IDS=0`; `TP` defaults to the comma-separated `GPU_IDS` count. For example, use `GPU_IDS=0 TP=1` or `GPU_IDS=0,1 TP=2`. It exports the selection through `HIP_VISIBLE_DEVICES`, `ROCR_VISIBLE_DEVICES`, `GPU_DEVICE_ORDINAL`, and `CUDA_VISIBLE_DEVICES`, and rejects TP values larger than the selection. The TP=1-only `SGLANG_RDNA4_DISABLE_STORE_CACHE=1` fallback avoids the RDNA4 JIT KV-store crash; TP=2 leaves the store-cache path unchanged.
 
@@ -238,9 +238,9 @@ Keep the private `/dev/shm` allocation bounded; do not replace it with `--ipc=ho
 --tmpfs /home/sglang/.cache:rw,nodev,nosuid,size=8g,uid=10001,gid=10001,mode=0700
 ```
 
-The image sets `SGLANG_TRUST_REMOTE_CODE=0`, disables unauthenticated metrics and custom serialized logit processors, and bounds the request queue at 32 by default. Its hardened preset path also rejects LoRA tensor deserialization, tool servers, KV-event/debug publishers, the scripted test runtime, remote-instance and ModelExpress transports, MoE/elastic backends, multi-node/disaggregated modes, and alternate gRPC/bootstrap listeners. Single-node PyTorch/RCCL bootstrap traffic is forced onto loopback even though the keyed HTTP API listens inside the container on `0.0.0.0`. It patches v0.5.15 to keep credentials out of logs, status responses, dumps, and WebSocket authentication gaps. Remote-URL and local-path multimodal inputs are disabled by default across the shared and model-specific loaders; inline/base64 media remains available. Enable remote model code only for a reviewed, immutable checkpoint with `-e SGLANG_TRUST_REMOTE_CODE=1`; a read-only model mount does not make its Python code safe. Tune the queue with `SGLANG_MAX_QUEUED_REQUESTS`. If metrics are needed, set `SGLANG_ENABLE_METRICS=1` only on a private monitoring network.
+The image sets `SGLANG_TRUST_REMOTE_CODE=0`, disables unauthenticated metrics and custom serialized logit processors, and bounds the request queue at 32 by default. Its hardened preset path also rejects LoRA tensor deserialization, tool servers, KV-event/debug publishers, the scripted test runtime, remote-instance and ModelExpress transports, MoE/elastic backends, multi-node/disaggregated modes, and alternate gRPC/bootstrap listeners. Single-node PyTorch/RCCL bootstrap traffic is forced onto loopback even though the keyed HTTP API listens inside the container on `0.0.0.0`. It patches v0.5.16 to keep credentials out of logs, status responses, dumps, and WebSocket authentication gaps. Remote-URL and local-path multimodal inputs are disabled by default across the shared and model-specific loaders; inline/base64 media remains available. Enable remote model code only for a reviewed, immutable checkpoint with `-e SGLANG_TRUST_REMOTE_CODE=1`; a read-only model mount does not make its Python code safe. Tune the queue with `SGLANG_MAX_QUEUED_REQUESTS`. If metrics are needed, set `SGLANG_ENABLE_METRICS=1` only on a private monitoring network.
 
-Do not publish SGLang directly to an untrusted network. Docker's loopback binding above is deliberate, but it does not stop a container on the same bridge network from reaching the container IP; do not share that network with untrusted workloads. For remote clients, use a private network plus a TLS reverse proxy that authenticates, rate-limits, caps request bodies, denies management routes (including `/server_info` and `/get_server_info`), and blocks `/v1/realtime` unless WebSocket authentication is explicitly supported. SGLang v0.5.15 exempts `/health*` and `/metrics*` from API-key checks. If URL or local-path media is explicitly enabled with `SGLANG_ALLOW_REMOTE_MEDIA=1` or `SGLANG_ALLOW_LOCAL_MEDIA=1`, treat that as a trust-boundary change: restrict proxy routes and container egress to prevent SSRF, local-file disclosure, and unbounded downloads. Do not embed credentials in model/tool URLs or config strings, and do not mount the Docker socket or writable host data into the server.
+Do not publish SGLang directly to an untrusted network. Docker's loopback binding above is deliberate, but it does not stop a container on the same bridge network from reaching the container IP; do not share that network with untrusted workloads. For remote clients, use a private network plus a TLS reverse proxy that authenticates, rate-limits, caps request bodies, denies management routes (including `/server_info` and `/get_server_info`), and blocks `/v1/realtime` unless WebSocket authentication is explicitly supported. SGLang v0.5.16 exempts `/health*` and `/metrics*` from API-key checks. If URL or local-path media is explicitly enabled with `SGLANG_ALLOW_REMOTE_MEDIA=1` or `SGLANG_ALLOW_LOCAL_MEDIA=1`, treat that as a trust-boundary change: restrict proxy routes and container egress to prevent SSRF, local-file disclosure, and unbounded downloads. Do not embed credentials in model/tool URLs or config strings, and do not mount the Docker socket or writable host data into the server.
 
 The entrypoint preserves arbitrary commands (for example, `python -m sglang.launch_server --help`). Such commands intentionally bypass the preset launcher's authentication and remote-code policy, so configure equivalent controls yourself. The image's default command prints SGLang help; invoking the entrypoint itself with an empty argument list prints the preset usage message.
 
@@ -408,7 +408,7 @@ Final experiment dispositions are summarized in [benchmarks/FINDINGS.md](benchma
 | Path | Purpose |
 |---|---|
 | [scripts/](scripts/README.md) | setup, launch, benchmark, evaluation, quantization, and test entry points |
-| [patches/](patches/README.md) | ordered SGLang v0.5.15 patch series |
+| [patches/](patches/README.md) | ordered SGLang v0.5.16 patch series |
 | [PATCHES.md](PATCHES.md) | cross-environment patch inventory |
 | [benchmarks/](benchmarks/README.md) | current results, raw JSON, and consolidated findings |
 | [rules-for-agents.md](rules-for-agents.md) | operational and calibration invariants |

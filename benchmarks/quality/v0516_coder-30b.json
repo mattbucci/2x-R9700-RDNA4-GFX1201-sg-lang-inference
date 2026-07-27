@@ -1,0 +1,22 @@
+{
+  "coder-30b": {
+    "tag": "coder-30b",
+    "model": "/home/letsrtfm/AI/models/Qwen3-Coder-30B-A3B-AWQ-native",
+    "timestamp": "2026-07-27 03:06",
+    "elapsed_sec": 2.2,
+    "checks": {
+      "basic": {
+        "passed": true,
+        "message": "finish=stop answer='paris'"
+      },
+      "tool_call": {
+        "passed": true,
+        "message": "finish=tool_calls name='get_weather' args='{\"location\": \"Paris\"}'"
+      }
+    },
+    "summary": {
+      "passed": 2,
+      "total": 2
+    }
+  }
+}
