@@ -1,6 +1,6 @@
 # SGLang v0.5.15 RDNA4 patches
 
-This directory contains the **68 active numeric patches** applied to pristine SGLang v0.5.15 for the
+This directory contains the **69 active numeric patches** applied to pristine SGLang v0.5.15 for the
 2× Radeon AI PRO R9700 serving stack. The default tree is `/data/sgl-v0515`; the default conda environment
 is `sglang-triton36-v0515`.
 
@@ -163,12 +163,13 @@ can be proposed upstream. `Partial` requires a fresh comparison with upstream be
 | 092 | `openai-tool-call-finish-reason-correctness` | Candidate | Reports `tool_calls` only when structured calls survive parsing and otherwise restores the original content and finish metadata. |
 | 093 | `cohere2moe-swa-window-off-by-one` | Candidate | Converts Hugging Face's inclusive Cohere2-MoE SWA window to SGLang's exclusive distance for both layers and backend metadata. |
 | 095 | `cohere-command4-function-key-name-recovery` | Candidate | Recovers a missing Cohere tool name from a string `function` field that exactly matches an exposed function name — the second malformed North variant, which 091 did not cover. Dropped calls surfaced as raw `<\|START_ACTION\|>` markup in `content` with `finish_reason == "stop"`. The OpenAI nested `{"function": {...}}` object is left untouched. |
+| 096 | `sglang-api-auth-hardening` | Candidate | Hardens the served API for untrusted networks: forces admin auth on `/server_info` and `/get_server_info`, authenticates WebSocket upgrades, redacts `api_key`/`admin_api_key`/`ssl_keyfile_password` from logs and info payloads, gates remote-URL and local-file multimodal sources behind `SGLANG_ALLOW_REMOTE_MEDIA`/`SGLANG_ALLOW_LOCAL_MEDIA`, and binds single-node distributed init to loopback. |
 
 ## Build stack
 
 | Component | Version |
 |---|---|
-| SGLang | v0.5.15 plus this 68-patch series |
+| SGLang | v0.5.15 plus this 69-patch series |
 | transformers | 5.12.1 |
 | Triton | 3.6.0 |
 | PyTorch | 2.11.0+rocm7.2 |
