@@ -5,6 +5,7 @@ set -euo pipefail
 
 readonly GPU_ASSERTION="assert torch.cuda.is_available(), 'CUDA not available';"
 readonly STORE_CACHE_FUNCTION='^def can_use_store_cache(size: int) -> bool:$'
+readonly RUSTUP_TARGET="x86_64-unknown-linux-gnu"
 
 # A truncated fetch makes apt report every repository as badly signed, which is
 # indistinguishable from a real signing failure and kills the whole build. Retry
@@ -22,24 +23,45 @@ retry() {
     return 1
 }
 
+download_verified() {
+    local url=$1 output=$2 expected_sha256=$3
+    if [[ ! "$expected_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "download_verified: invalid SHA-256 for $url" >&2
+        return 2
+    fi
+    retry curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --location --fail --silent --show-error "$url" -o "$output"
+    printf '%s  %s\n' "$expected_sha256" "$output" | sha256sum --check --strict -
+}
+
 apt_update() {
     rm -rf /var/lib/apt/lists/*
     apt-get update
 }
 
 install_toolchain() {
+    : "${MINIFORGE_VERSION:?MINIFORGE_VERSION is required}"
+    : "${MINIFORGE_SHA256:?MINIFORGE_SHA256 is required}"
+    : "${RUSTUP_VERSION:?RUSTUP_VERSION is required}"
+    : "${RUSTUP_INIT_SHA256:?RUSTUP_INIT_SHA256 is required}"
+    : "${RUST_TOOLCHAIN:?RUST_TOOLCHAIN is required}"
+
     retry apt_update
     retry apt-get install -y --no-install-recommends \
         git curl ca-certificates build-essential python3-pip
     rm -rf /var/lib/apt/lists/*
 
-    retry curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o /tmp/rustup.sh
-    sh /tmp/rustup.sh -y --no-modify-path --profile minimal --default-toolchain stable
-    rm /tmp/rustup.sh
+    download_verified \
+        "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUSTUP_TARGET}/rustup-init" \
+        /tmp/rustup-init "$RUSTUP_INIT_SHA256"
+    chmod 0755 /tmp/rustup-init
+    /tmp/rustup-init -y --no-modify-path --profile minimal \
+        --default-toolchain "$RUST_TOOLCHAIN"
+    rm /tmp/rustup-init
 
-    retry curl -fsSL \
+    download_verified \
         "https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}/Miniforge3-${MINIFORGE_VERSION}-Linux-x86_64.sh" \
-        -o /tmp/miniforge.sh
+        /tmp/miniforge.sh "$MINIFORGE_SHA256"
     bash /tmp/miniforge.sh -b -p "${CONDA_BASE}"
     rm /tmp/miniforge.sh
 }
@@ -73,13 +95,32 @@ apply_tp_sampler_guard() {
 
 build_sglang() {
     enable_gpu_free_setup
-    STRICT_PATCHES=1 SGLANG_TAG="${SGLANG_TAG}" ./scripts/setup.sh
+    STRICT_PATCHES=1 SGLANG_TAG="${SGLANG_TAG}" \
+        SGLANG_COMMIT="${SGLANG_COMMIT}" \
+        TRITON_PYPI_FALLBACK="${TRITON_PYPI_FALLBACK:-0}" \
+        ./scripts/setup.sh
+    "${CONDA_BASE}/bin/conda" run -n "${ENV_NAME}" python -m py_compile \
+        "${SGLANG_DIR}/python/sglang/srt/utils/auth.py" \
+        "${SGLANG_DIR}/python/sglang/srt/utils/common.py" \
+        "${SGLANG_DIR}/python/sglang/srt/server_args.py" \
+        "${SGLANG_DIR}/python/sglang/srt/entrypoints/engine.py" \
+        "${SGLANG_DIR}/python/sglang/srt/entrypoints/grpc_bridge.py" \
+        "${SGLANG_DIR}/python/sglang/srt/entrypoints/http_server.py" \
+        "${SGLANG_DIR}/python/sglang/srt/managers/scheduler.py" \
+        "${SGLANG_DIR}/python/sglang/srt/managers/tokenizer_manager.py" \
+        "${SGLANG_DIR}/python/sglang/srt/model_executor/model_runner.py" \
+        "${SGLANG_DIR}/python/sglang/srt/multimodal/processors/mimo_audio.py" \
+        "${SGLANG_DIR}/python/sglang/srt/multimodal/processors/mimo_v2.py" \
+        "${SGLANG_DIR}/python/sglang/srt/multimodal/processors/moss_vl.py" \
+        "${SGLANG_DIR}/python/sglang/srt/multimodal/processors/transformers_auto.py"
     apply_tp1_store_cache_fallback
     apply_tp_sampler_guard
     "${CONDA_BASE}/bin/conda" run -n "${ENV_NAME}" pip uninstall kernels -y \
         2>/dev/null || true
     "${CONDA_BASE}/bin/conda" run -n "${ENV_NAME}" python -c "import sglang; print(sglang.__version__)"
     "${CONDA_BASE}/bin/conda" clean -afy
+    rm -rf "${SGLANG_DIR}/.git" "${REPO_DIR}/build"
+    find "${REPO_DIR}" -type d -name __pycache__ -prune -exec rm -rf {} +
 }
 
 case "${1:-}" in

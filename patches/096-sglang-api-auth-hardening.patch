@@ -1,0 +1,709 @@
+diff --git a/python/sglang/srt/entrypoints/engine.py b/python/sglang/srt/entrypoints/engine.py
+index f58dc27..f6edae4 100644
+--- a/python/sglang/srt/entrypoints/engine.py
++++ b/python/sglang/srt/entrypoints/engine.py
+@@ -93,7 +93,11 @@ from sglang.srt.managers.template_manager import TemplateManager
+ from sglang.srt.managers.tokenizer_manager import TokenizerManager
+ from sglang.srt.observability.trace import process_tracing_init, trace_set_thread_info
+ from sglang.srt.plugins import load_plugins
+-from sglang.srt.server_args import PortArgs, ServerArgs
++from sglang.srt.server_args import (
++    PortArgs,
++    ServerArgs,
++    server_args_to_public_dict,
++)
+ from sglang.srt.utils import (
+     MultiprocessingSerializer,
+     SerializedTensorPayload,
+@@ -222,7 +226,7 @@ class Engine(EngineScoreMixin, EngineBase):
+                 kwargs["log_level"] = "error"
+             server_args = self.server_args_class(**kwargs)
+         self.server_args = server_args
+-        logger.info(f"{server_args=}")
++        logger.info("server_args=%s", server_args_to_public_dict(server_args))
+ 
+         # Pre-initialize tokenizer_manager so the atexit handler in
+         # shutdown() won't hit AttributeError.
+@@ -793,7 +797,7 @@ class Engine(EngineScoreMixin, EngineBase):
+         # Allocate ports for inter-process communications
+         if port_args is None:
+             port_args = PortArgs.init_new(server_args)
+-        logger.info(f"{server_args=}")
++        logger.info("server_args=%s", server_args_to_public_dict(server_args))
+ 
+         # Start the engine info bootstrap server if per-rank info is needed.
+         engine_info_bootstrap_server = None
+@@ -1001,7 +1005,7 @@ class Engine(EngineScoreMixin, EngineBase):
+         )
+         return msgspec_to_builtins(
+             {
+-                **dataclasses.asdict(self.tokenizer_manager.server_args),
++                **server_args_to_public_dict(self.tokenizer_manager.server_args),
+                 **self._scheduler_init_result.scheduler_infos[0],
+                 "internal_states": internal_states,
+                 "version": __version__,
+diff --git a/python/sglang/srt/entrypoints/grpc_bridge.py b/python/sglang/srt/entrypoints/grpc_bridge.py
+index fa0ab61..5ea96a9 100644
+--- a/python/sglang/srt/entrypoints/grpc_bridge.py
++++ b/python/sglang/srt/entrypoints/grpc_bridge.py
+@@ -7,7 +7,6 @@ TokenizerManager's event loop.
+ """
+ 
+ import asyncio
+-import dataclasses
+ import json
+ import logging
+ from types import SimpleNamespace
+@@ -15,6 +14,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
+ 
+ from pydantic import ValidationError
+ 
++from sglang.srt.server_args import server_args_to_public_dict
+ from sglang.srt.utils.msgspec_utils import msgspec_to_builtins
+ 
+ logger = logging.getLogger(__name__)
+@@ -385,7 +385,7 @@ class RuntimeHandle:
+         return json.dumps(result, default=str)
+ 
+     def get_server_info(self) -> str:
+-        result: Dict[str, Any] = dataclasses.asdict(self.server_args)
++        result: Dict[str, Any] = server_args_to_public_dict(self.server_args)
+         result.update(self.scheduler_info)
+         return json.dumps(msgspec_to_builtins(result), default=str)
+ 
+diff --git a/python/sglang/srt/entrypoints/http_server.py b/python/sglang/srt/entrypoints/http_server.py
+index bd9d7ea..42f2691 100644
+--- a/python/sglang/srt/entrypoints/http_server.py
++++ b/python/sglang/srt/entrypoints/http_server.py
+@@ -158,7 +158,11 @@ from sglang.srt.observability.trace import (
+     trace_set_thread_info,
+ )
+ from sglang.srt.parser.reasoning_parser import ReasoningParser
+-from sglang.srt.server_args import PortArgs, ServerArgs
++from sglang.srt.server_args import (
++    PortArgs,
++    ServerArgs,
++    server_args_to_public_dict,
++)
+ from sglang.srt.utils import (
+     add_prometheus_middleware,
+     add_prometheus_track_response_middleware,
+@@ -693,6 +697,7 @@ async def weight_version():
+ 
+ 
+ @app.get("/get_server_info")
++@auth_level(AuthLevel.ADMIN_FORCE)
+ async def get_server_info():
+     """Get the server information (deprecated - use /server_info instead)."""
+     logger.warning(
+@@ -703,6 +708,7 @@ async def get_server_info():
+ 
+ 
+ @app.get("/server_info")
++@auth_level(AuthLevel.ADMIN_FORCE)
+ async def server_info():
+     """Get the server information."""
+     # Returns internal states per DP.
+@@ -715,7 +721,7 @@ async def server_info():
+     # server_args.model_config is not serializable but should be excluded by asdict.
+     return msgspec_to_builtins(
+         {
+-            **dataclasses.asdict(server_args),
++            **server_args_to_public_dict(server_args),
+             **_global_state.scheduler_info,
+             "internal_states": internal_states,
+             "version": __version__,
+@@ -1440,6 +1446,7 @@ async def load_lora_adapter(
+ 
+ 
+ @app.api_route("/load_lora_adapter_from_tensors", methods=["POST"])
++@auth_level(AuthLevel.ADMIN_OPTIONAL)
+ async def load_lora_adapter_from_tensors(
+     obj: Annotated[LoadLoRAAdapterFromTensorsReqInput, Body()], request: Request
+ ):
+diff --git a/python/sglang/srt/managers/scheduler.py b/python/sglang/srt/managers/scheduler.py
+index bfdd72b..520411b 100644
+--- a/python/sglang/srt/managers/scheduler.py
++++ b/python/sglang/srt/managers/scheduler.py
+@@ -240,7 +240,12 @@ from sglang.srt.parser.reasoning_parser import ReasoningParser
+ from sglang.srt.platforms import current_platform
+ from sglang.srt.plugins import load_plugins
+ from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
+-from sglang.srt.server_args import PortArgs, ServerArgs, get_global_server_args
++from sglang.srt.server_args import (
++    PortArgs,
++    ServerArgs,
++    get_global_server_args,
++    redact_server_args_dict,
++)
+ from sglang.srt.session.session_controller import SessionController
+ from sglang.srt.speculative.dflash_utils import validate_dflash_request
+ from sglang.srt.speculative.eagle_utils import get_draft_recurrent_hidden_state_spec
+@@ -3756,7 +3761,7 @@ class Scheduler(
+         return success
+ 
+     def get_internal_state(self, recv_req: GetInternalStateReq):
+-        ret = dict(vars(get_global_server_args()))  # vars returns a ref to obj.__dict__
++        ret = redact_server_args_dict(vars(get_global_server_args()))
+         ret["last_gen_throughput"] = self.metrics_reporter.last_gen_throughput
+         ret["memory_usage"] = {
+             "weight": round(self.tp_worker.model_runner.weight_load_mem_usage, 2),
+@@ -3827,7 +3832,7 @@ class Scheduler(
+                 setattr(get_global_server_args(), k, v)
+             logger.info(f"Global server args updated! {get_global_server_args()=}")
+ 
+-        server_args = dict(vars(get_global_server_args()))
++        server_args = redact_server_args_dict(vars(get_global_server_args()))
+         # This field is not serializable.
+         server_args.pop("model_config", None)
+         return SetInternalStateReqOutput(
+diff --git a/python/sglang/srt/managers/tokenizer_manager.py b/python/sglang/srt/managers/tokenizer_manager.py
+index 7468860..c88fcd6 100644
+--- a/python/sglang/srt/managers/tokenizer_manager.py
++++ b/python/sglang/srt/managers/tokenizer_manager.py
+@@ -110,6 +110,8 @@ from sglang.srt.sampling.sampling_params import SamplingParams
+ from sglang.srt.server_args import (
+     PortArgs,
+     ServerArgs,
++    redact_sensitive_cli_args,
++    server_args_to_public_dict,
+     set_global_server_args_for_tokenizer,
+ )
+ from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+@@ -2510,7 +2512,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
+     ):
+         logger.info(log_message)
+         to_dump_with_server_args = {
+-            "server_args": self.server_args,
++            "server_args": server_args_to_public_dict(self.server_args),
+             "requests": data_list.copy(),
+         }
+ 
+@@ -2591,9 +2593,9 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
+ 
+                 # Write the data to the file
+                 data_to_dump_with_server_args = {
+-                    "server_args": self.server_args,
++                    "server_args": server_args_to_public_dict(self.server_args),
+                     "requests": data_to_dump,
+-                    "launch_command": " ".join(sys.argv),
++                    "launch_command": " ".join(redact_sensitive_cli_args(sys.argv)),
+                 }
+                 with open(filename, "wb") as f:
+                     try:
+diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
+index ac774b8..ab24db4 100644
+--- a/python/sglang/srt/server_args.py
++++ b/python/sglang/srt/server_args.py
+@@ -362,6 +362,51 @@ def add_linear_attn_kernel_backend_choices(choices):
+     LINEAR_ATTN_KERNEL_BACKEND_CHOICES.extend(choices)
+ 
+ 
++def _sensitive_server_arg_fields() -> frozenset[str]:
++    return frozenset(
++        field.name
++        for field in dataclasses.fields(ServerArgs)
++        if field.metadata.get("sensitive")
++    )
++
++
++def redact_server_args_dict(values: Dict[str, Any]) -> Dict[str, Any]:
++    """Copy a ServerArgs-shaped mapping without credential-bearing fields."""
++    values = dict(values)
++    for field_name in _sensitive_server_arg_fields():
++        values.pop(field_name, None)
++    return values
++
++
++def server_args_to_public_dict(server_args: Any) -> Dict[str, Any]:
++    """Serialize ServerArgs without credential-bearing fields."""
++    return redact_server_args_dict(dataclasses.asdict(server_args))
++
++
++def redact_sensitive_cli_args(argv: List[str]) -> List[str]:
++    """Return argv with values for credential-bearing ServerArgs removed."""
++    sensitive_options = {
++        f"--{name.replace('_', '-')}" for name in _sensitive_server_arg_fields()
++    }
++    result: List[str] = []
++    redact_next = False
++    for arg in argv:
++        if redact_next:
++            result.append("<redacted>")
++            redact_next = False
++            continue
++        matching_option = next(
++            (option for option in sensitive_options if arg.startswith(f"{option}=")),
++            None,
++        )
++        if matching_option:
++            result.append(f"{matching_option}=<redacted>")
++        else:
++            result.append(arg)
++            redact_next = arg in sensitive_options
++    return result
++
++
+ @dataclasses.dataclass
+ class ServerArgs:
+     """Server-wide configuration for SGLang.
+@@ -996,7 +1041,7 @@ class ServerArgs:
+     ssl_ca_certs: A[Optional[str], "The CA certificates file."] = None
+     ssl_keyfile_password: A[
+         Optional[str], "The password to decrypt the SSL keyfile."
+-    ] = None
++    ] = dataclasses.field(default=None, repr=False, metadata={"sensitive": True})
+     enable_ssl_refresh: A[
+         bool,
+         "Enable automatic SSL certificate hot-reloading when cert/key files change on disk. Requires --ssl-certfile and --ssl-keyfile.",
+@@ -1008,11 +1053,11 @@ class ServerArgs:
+     api_key: A[
+         Optional[str],
+         "Set API key of the server. It is also used in the OpenAI API compatible server.",
+-    ] = None
++    ] = dataclasses.field(default=None, repr=False, metadata={"sensitive": True})
+     admin_api_key: A[
+         Optional[str],
+         "Set admin API key for sensitive management endpoints (e.g. /clear_hicache_storage_backend). When set, admin endpoints require this key and do NOT accept --api-key.",
+-    ] = None
++    ] = dataclasses.field(default=None, repr=False, metadata={"sensitive": True})
+     served_model_name: A[
+         Optional[str],
+         "Override the model name returned by the v1/models endpoint in OpenAI API server.",
+diff --git a/python/sglang/srt/utils/auth.py b/python/sglang/srt/utils/auth.py
+index e7ef076..e1688c1 100644
+--- a/python/sglang/srt/utils/auth.py
++++ b/python/sglang/srt/utils/auth.py
+@@ -167,6 +167,26 @@ def add_api_key_middleware(
+             self.fastapi_app = fastapi_app
+ 
+         async def __call__(self, scope, receive, send):
++            if scope["type"] == "websocket":
++                authz = None
++                for name, value in scope.get("headers", []):
++                    if name.lower() == b"authorization":
++                        authz = value.decode("latin-1")
++                        break
++                decision = decide_request_auth(
++                    method="GET",
++                    path=scope.get("path", ""),
++                    authorization_header=authz,
++                    api_key=self.api_key or self.admin_api_key,
++                    admin_api_key=None,
++                    auth_level=AuthLevel.NORMAL,
++                )
++                if not decision.allowed:
++                    await send({"type": "websocket.close", "code": 1008})
++                    return
++                await self.app(scope, receive, send)
++                return
++
+             if scope["type"] != "http":
+                 await self.app(scope, receive, send)
+                 return
+diff --git a/python/sglang/srt/utils/common.py b/python/sglang/srt/utils/common.py
+index 82db90d..f1e7f36 100644
+--- a/python/sglang/srt/utils/common.py
++++ b/python/sglang/srt/utils/common.py
+@@ -1510,6 +1510,64 @@ def get_mm_http_session() -> requests.Session:
+     return session
+ 
+ 
++def _require_media_source_enabled(env_name: str, source_kind: str) -> None:
++    if os.getenv(env_name, "1").strip().lower() not in {"1", "true", "yes"}:
++        raise ValueError(f"{source_kind} multimodal inputs are disabled")
++
++
++def _media_source_scheme(value: str) -> str:
++    return urlparse(value.strip()).scheme.lower()
++
++
++def _reject_unsupported_media_scheme(value: str, scheme: str) -> None:
++    _require_media_source_enabled("SGLANG_ALLOW_REMOTE_MEDIA", "Remote URL")
++    raise ValueError(f"Unsupported multimodal URL scheme: {scheme!r}")
++
++
++def _enforce_delegated_media_source_policy(value: Any) -> None:
++    """Guard sources passed to third-party processors that may perform their own I/O."""
++    if isinstance(value, (ImageData, VideoData)):
++        value = value.url
++    if isinstance(value, dict):
++        source_keys = {
++            "url",
++            "path",
++            "uri",
++            "src",
++            "source",
++            "image",
++            "video",
++            "audio",
++            "image_url",
++            "video_url",
++            "audio_url",
++            "image_path",
++            "video_path",
++            "audio_path",
++        }
++        for key, item in value.items():
++            if str(key).lower() in source_keys or isinstance(item, (dict, list, tuple)):
++                _enforce_delegated_media_source_policy(item)
++        return
++    if isinstance(value, (list, tuple)):
++        for item in value:
++            _enforce_delegated_media_source_policy(item)
++        return
++    if not isinstance(value, str):
++        return
++    scheme = _media_source_scheme(value)
++    if scheme == "data":
++        return
++    if scheme in {"http", "https"}:
++        _require_media_source_enabled("SGLANG_ALLOW_REMOTE_MEDIA", "Remote URL")
++    elif scheme and scheme != "file":
++        _reject_unsupported_media_scheme(value, scheme)
++    else:
++        # A delegated processor may interpret any other string as a relative,
++        # absolute, or file:// path. Only explicit data: URIs bypass this gate.
++        _require_media_source_enabled("SGLANG_ALLOW_LOCAL_MEDIA", "Local file")
++
++
+ def load_audio(
+     audio_file: str, sr: Optional[int] = None, mono: bool = True
+ ) -> np.ndarray:
+@@ -1519,19 +1577,24 @@ def load_audio(
+     # Normalize input: resolve URL / base64 / file:// to bytes or path
+     if isinstance(audio_file, bytes):
+         source = audio_file
+-    elif isinstance(audio_file, str) and audio_file.startswith("data:"):
+-        source = pybase64.b64decode(audio_file.split(",")[1], validate=True)
+-    elif isinstance(audio_file, str) and (
+-        audio_file.startswith("http://") or audio_file.startswith("https://")
+-    ):
+-        timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
+-        with get_mm_http_session().get(audio_file, timeout=timeout) as response:
+-            response.raise_for_status()
+-            source = response.content
+-    elif isinstance(audio_file, str) and audio_file.startswith("file://"):
+-        source = unquote(urlparse(audio_file).path)
+     elif isinstance(audio_file, str):
+-        source = audio_file
++        scheme = _media_source_scheme(audio_file)
++        if scheme == "data":
++            source = pybase64.b64decode(audio_file.split(",", 1)[1], validate=True)
++        elif scheme in {"http", "https"}:
++            _require_media_source_enabled("SGLANG_ALLOW_REMOTE_MEDIA", "Remote URL")
++            timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
++            with get_mm_http_session().get(audio_file, timeout=timeout) as response:
++                response.raise_for_status()
++                source = response.content
++        elif scheme == "file":
++            _require_media_source_enabled("SGLANG_ALLOW_LOCAL_MEDIA", "Local file")
++            source = unquote(urlparse(audio_file).path)
++        elif scheme:
++            _reject_unsupported_media_scheme(audio_file, scheme)
++        else:
++            _require_media_source_enabled("SGLANG_ALLOW_LOCAL_MEDIA", "Local file")
++            source = audio_file
+     else:
+         raise ValueError(f"Invalid audio format: {audio_file}")
+ 
+@@ -1684,7 +1747,11 @@ def get_image_bytes(image_file: Union[str, bytes]) -> bytes:
+     """Normalize various image inputs into raw bytes."""
+     if isinstance(image_file, bytes):
+         return image_file
+-    if image_file.startswith(("http://", "https://")):
++    if not isinstance(image_file, str):
++        raise NotImplementedError(f"Invalid image: {image_file}")
++    scheme = _media_source_scheme(image_file)
++    if scheme in {"http", "https"}:
++        _require_media_source_enabled("SGLANG_ALLOW_REMOTE_MEDIA", "Remote URL")
+         timeout = int(os.getenv("REQUEST_TIMEOUT", "3"))
+         response = get_mm_http_session().get(image_file, timeout=timeout)
+         try:
+@@ -1693,15 +1760,20 @@ def get_image_bytes(image_file: Union[str, bytes]) -> bytes:
+         finally:
+             response.close()
+         return result
+-    if image_file.startswith(("file://", "/")):
+-        with open(image_file, "rb") as f:
+-            return f.read()
+-    if isinstance(image_file, str) and image_file.startswith("data:"):
++    if scheme == "data":
+         _, encoded = image_file.split(",", 1)
+         return pybase64.b64decode(encoded, validate=True)
+-    if isinstance(image_file, str):
+-        return pybase64.b64decode(image_file, validate=True)
+-    raise NotImplementedError(f"Invalid image: {image_file}")
++    if scheme == "file":
++        _require_media_source_enabled("SGLANG_ALLOW_LOCAL_MEDIA", "Local file")
++        with open(unquote(urlparse(image_file).path), "rb") as f:
++            return f.read()
++    if scheme:
++        _reject_unsupported_media_scheme(image_file, scheme)
++    if os.path.isabs(image_file) or os.path.isfile(image_file):
++        _require_media_source_enabled("SGLANG_ALLOW_LOCAL_MEDIA", "Local file")
++        with open(image_file, "rb") as f:
++            return f.read()
++    return pybase64.b64decode(image_file, validate=True)
+ 
+ 
+ def _normalize_video_input(
+@@ -1716,19 +1788,25 @@ def _normalize_video_input(
+     if isinstance(video_file, bytes):
+         return video_file
+     elif isinstance(video_file, str):
+-        if video_file.startswith(("http://", "https://")):
++        scheme = _media_source_scheme(video_file)
++        if scheme in {"http", "https"}:
++            _require_media_source_enabled("SGLANG_ALLOW_REMOTE_MEDIA", "Remote URL")
+             timeout = int(os.getenv("REQUEST_TIMEOUT", "10"))
+             with get_mm_http_session().get(
+                 video_file, stream=True, timeout=timeout
+             ) as response:
+                 response.raise_for_status()
+                 return response.content
+-        elif video_file.startswith("data:"):
++        elif scheme == "data":
+             _, encoded = video_file.split(",", 1)
+             return pybase64.b64decode(encoded, validate=True)
+-        elif video_file.startswith("file://"):
++        elif scheme == "file":
++            _require_media_source_enabled("SGLANG_ALLOW_LOCAL_MEDIA", "Local file")
+             return unquote(urlparse(video_file).path)
+-        elif os.path.isfile(unquote(urlparse(video_file).path)):
++        elif scheme:
++            _reject_unsupported_media_scheme(video_file, scheme)
++        elif os.path.isfile(video_file):
++            _require_media_source_enabled("SGLANG_ALLOW_LOCAL_MEDIA", "Local file")
+             return video_file
+         else:
+             return pybase64.b64decode(video_file, validate=True)
+diff --git a/python/sglang/srt/multimodal/processors/mimo_audio.py b/python/sglang/srt/multimodal/processors/mimo_audio.py
+index 47295e9..4402c4c 100644
+--- a/python/sglang/srt/multimodal/processors/mimo_audio.py
++++ b/python/sglang/srt/multimodal/processors/mimo_audio.py
+@@ -178,11 +178,15 @@ class MiMoAudioPipeline:
+             if isinstance(audio, bytes):
+                 file = io.BytesIO(audio)
+             elif isinstance(audio, str):
+-                if audio.startswith("data:"):
++                scheme = common._media_source_scheme(audio)
++                if scheme == "data":
+                     file = io.BytesIO(
+-                        pybase64.b64decode(audio.split(",")[1], validate=True)
++                        pybase64.b64decode(audio.split(",", 1)[1], validate=True)
++                    )
++                elif scheme in {"http", "https"}:
++                    common._require_media_source_enabled(
++                        "SGLANG_ALLOW_REMOTE_MEDIA", "Remote URL"
+                     )
+-                elif audio.startswith("http://") or audio.startswith("https://"):
+                     dl_start = time.perf_counter()
+                     timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
+                     try:
+@@ -205,7 +209,17 @@ class MiMoAudioPipeline:
+                             f"error={type(e).__name__}: {e}, url={audio}"
+                         )
+                         raise
++                elif scheme == "file":
++                    common._require_media_source_enabled(
++                        "SGLANG_ALLOW_LOCAL_MEDIA", "Local file"
++                    )
++                    file = common.unquote(common.urlparse(audio).path)
++                elif scheme:
++                    common._reject_unsupported_media_scheme(audio, scheme)
+                 else:
++                    common._require_media_source_enabled(
++                        "SGLANG_ALLOW_LOCAL_MEDIA", "Local file"
++                    )
+                     file = audio
+             if AudioDecoder is None:
+                 raise RuntimeError(
+diff --git a/python/sglang/srt/multimodal/processors/mimo_v2.py b/python/sglang/srt/multimodal/processors/mimo_v2.py
+index 9139769..c866238 100644
+--- a/python/sglang/srt/multimodal/processors/mimo_v2.py
++++ b/python/sglang/srt/multimodal/processors/mimo_v2.py
+@@ -487,21 +487,40 @@ class MiMoProcessor:
+     def has_audio_track(path_or_data) -> bool:
+         # In-process probe via torchcodec for bytes/path; ffprobe range
+         # request for HTTP URLs so we do not pre-download the blob here.
+-        if isinstance(path_or_data, str) and path_or_data.startswith(
+-            ("http://", "https://")
+-        ):
++        if isinstance(path_or_data, str):
++            from sglang.srt.utils.common import (
++                _media_source_scheme,
++                _reject_unsupported_media_scheme,
++                _require_media_source_enabled,
++            )
++
++            scheme = _media_source_scheme(path_or_data)
++        else:
++            scheme = ""
++        if scheme in {"http", "https"}:
++            _require_media_source_enabled("SGLANG_ALLOW_REMOTE_MEDIA", "Remote URL")
+             return _ffprobe_has_audio(path_or_data, stdin=None, label=path_or_data)
++        if scheme and scheme not in {"data", "file"}:
++            _reject_unsupported_media_scheme(path_or_data, scheme)
+ 
+         if isinstance(path_or_data, bytes):
+             source = BytesIO(path_or_data)
+         elif (
+             isinstance(path_or_data, str)
+-            and path_or_data.startswith("data:")
++            and scheme == "data"
+             and ";base64," in path_or_data
+         ):
+             source = BytesIO(base64.b64decode(path_or_data.split(";base64,")[1]))
+         else:
++            if isinstance(path_or_data, str):
++                _require_media_source_enabled(
++                    "SGLANG_ALLOW_LOCAL_MEDIA", "Local file"
++                )
+-            source = path_or_data  # local path or file://
++            source = (
++                path_or_data[7:]
++                if isinstance(path_or_data, str) and scheme == "file"
++                else path_or_data
++            )
+         try:
+             AudioDecoder(source)
+             return True
+@@ -1445,20 +1464,38 @@ class MiMoProcessor:
+         if isinstance(image, Image.Image):
+             image_obj = image
+         elif isinstance(image, str):
+-            if image.startswith("http://") or image.startswith("https://"):
++            from sglang.srt.utils.common import (
++                _media_source_scheme,
++                _reject_unsupported_media_scheme,
++                _require_media_source_enabled,
++            )
++
++            scheme = _media_source_scheme(image)
++            if scheme in {"http", "https"}:
++                _require_media_source_enabled(
++                    "SGLANG_ALLOW_REMOTE_MEDIA", "Remote URL"
++                )
+                 with requests.get(image, stream=True) as response:
+                     response.raise_for_status()
+                     with BytesIO(response.content) as bio:
+                         image_obj = copy.deepcopy(Image.open(bio))
+-            elif image.startswith("file://"):
++            elif scheme == "file":
++                _require_media_source_enabled(
++                    "SGLANG_ALLOW_LOCAL_MEDIA", "Local file"
++                )
+                 image_obj = Image.open(image[7:])
+-            elif image.startswith("data:image"):
++            elif scheme == "data":
+                 if "base64," in image:
+                     _, base64_data = image.split("base64,", 1)
+                     data = base64.b64decode(base64_data)
+                     with BytesIO(data) as bio:
+                         image_obj = copy.deepcopy(Image.open(bio))
++            elif scheme:
++                _reject_unsupported_media_scheme(image, scheme)
+             else:
++                _require_media_source_enabled(
++                    "SGLANG_ALLOW_LOCAL_MEDIA", "Local file"
++                )
+                 image_obj = Image.open(image)
+         else:
+             image_obj = Image.open(BytesIO(image))
+diff --git a/python/sglang/srt/multimodal/processors/moss_vl.py b/python/sglang/srt/multimodal/processors/moss_vl.py
+index 409d9eb..5358611 100644
+--- a/python/sglang/srt/multimodal/processors/moss_vl.py
++++ b/python/sglang/srt/multimodal/processors/moss_vl.py
+@@ -25,6 +25,11 @@ from sglang.srt.multimodal.processors.base_processor import (
+     MultimodalSpecialTokens,
+ )
+ from sglang.srt.utils.cuda_ipc_transport_utils import CudaIpcTensorTransportProxy
++from sglang.srt.utils.common import (
++    _media_source_scheme,
++    _reject_unsupported_media_scheme,
++    _require_media_source_enabled,
++)
+ 
+ 
+ class MossVLImageProcessor(SGLangBaseProcessor):
+@@ -421,13 +426,17 @@ class MossVLImageProcessor(SGLangBaseProcessor):
+             return f.name
+ 
+     def _normalize_video_string(self, value: str) -> Tuple[str, Optional[str]]:
+-        if value.startswith("file://"):
++        scheme = _media_source_scheme(value)
++        if scheme == "file":
++            _require_media_source_enabled("SGLANG_ALLOW_LOCAL_MEDIA", "Local file")
+             return self._resolve_file_url(value), None
+ 
+-        if os.path.isfile(value):
++        if not scheme and os.path.isfile(value):
++            _require_media_source_enabled("SGLANG_ALLOW_LOCAL_MEDIA", "Local file")
+             return value, None
+ 
+-        if value.startswith(("http://", "https://")):
++        if scheme in {"http", "https"}:
++            _require_media_source_enabled("SGLANG_ALLOW_REMOTE_MEDIA", "Remote URL")
+             timeout = int(os.getenv("REQUEST_TIMEOUT", "10"))
+             response = requests.get(value, stream=True, timeout=timeout)
+             response.raise_for_status()
+@@ -438,7 +447,7 @@ class MossVLImageProcessor(SGLangBaseProcessor):
+                         f.write(chunk)
+                 return f.name, f.name
+ 
+-        if value.startswith("data:"):
++        if scheme == "data":
+             header, encoded = value.split(",", 1)
+             mime = header.split(";", 1)[0]
+             suffix = ".mp4"
+@@ -452,6 +461,9 @@ class MossVLImageProcessor(SGLangBaseProcessor):
+             )
+             return temp_path, temp_path
+ 
++        if scheme:
++            _reject_unsupported_media_scheme(value, scheme)
++
+         temp_path = self._write_video_bytes_to_tempfile(
+             pybase64.b64decode(value, validate=True)
+         )
+diff --git a/python/sglang/srt/multimodal/processors/transformers_auto.py b/python/sglang/srt/multimodal/processors/transformers_auto.py
+index 1c348b3..87d201b 100644
+--- a/python/sglang/srt/multimodal/processors/transformers_auto.py
++++ b/python/sglang/srt/multimodal/processors/transformers_auto.py
+@@ -12,6 +12,7 @@ from sglang.srt.multimodal.processors.base_processor import (
+     MultimodalSpecialTokens,
+ )
+ from sglang.srt.utils import load_image
++from sglang.srt.utils.common import _enforce_delegated_media_source_policy
+ 
+ 
+ def _first_attr(obj, names: tuple[str, ...], default=None):
+@@ -152,6 +153,8 @@ class TransformersAutoMultimodalProcessor(BaseMultimodalProcessor):
+         video_data = getattr(request_obj, "video_data", None)
+         if video_data is not None and not isinstance(video_data, list):
+             video_data = [video_data]
++        for video in video_data or []:
++            _enforce_delegated_media_source_policy(video)
+ 
+         # Load raw media
+         images = self._load_images(image_data)
+diff --git a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/srt/model_executor/model_runner.py
+index ea17a25..ed3e040 100644
+--- a/python/sglang/srt/model_executor/model_runner.py
++++ b/python/sglang/srt/model_executor/model_runner.py
+@@ -1276,8 +1276,13 @@ class ModelRunner(ModelRunnerKVCacheMixin):
+             na = NetworkAddress.parse(self.server_args.dist_init_addr)
+             dist_init_method = na.to_tcp()
+         else:
++            bootstrap_host = (
++                "127.0.0.1"
++                if self.server_args.nnodes == 1
++                else (self.server_args.host or "127.0.0.1")
++            )
+             dist_init_method = NetworkAddress(
+-                self.server_args.host or "127.0.0.1", self.dist_port
++                bootstrap_host, self.dist_port
+             ).to_tcp()
+         set_custom_all_reduce(not self.server_args.disable_custom_all_reduce)
+         set_mscclpp_all_reduce(self.server_args.enable_mscclpp)

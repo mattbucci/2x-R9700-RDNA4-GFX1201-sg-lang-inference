@@ -9,22 +9,30 @@ on:
       - docker/**
       - scripts/**
       - patches/**
+      - tests/**
       - .github/workflows/build-image.yaml
   push:
     branches: [main]
-    tags: ["v*"]
+
+concurrency:
+  group: build-image-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  verify:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
     permissions:
       contents: read
-      packages: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
       - name: Move Docker data-root to /mnt
         run: |
           sudo systemctl stop docker
@@ -33,25 +41,134 @@ jobs:
           printf '{"data-root":"/mnt/docker"}\n' | sudo tee /etc/docker/daemon.json
           sudo systemctl start docker
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Run offline security checks
+        run: |
+          bash -n docker/*.sh scripts/*.sh tests/*.sh
+          bash tests/test_gpu_selection.sh
+          python tests/test_secure_launch.py
+          git show -m --check --format= --no-renames HEAD
+          docker buildx build --check .
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: local/sglang-rdna4:verify
+          sbom: false
+          provenance: false
+          github-token: ""
+      - name: Inspect the final PR image
+        run: |
+          test "$(docker image inspect local/sglang-rdna4:verify --format '{{.Config.User}}')" = "10001:10001"
+          docker run --rm --entrypoint /bin/sh local/sglang-rdna4:verify -ec '
+            test "$(id -u):$(id -g)" = "10001:10001"
+            test -x /usr/local/libexec/rdna4/secure-launch.py
+            test "$SGLANG_SECURE_LAUNCH" = 1
+            test "$SGLANG_ALLOW_LOCAL_MEDIA" = 0
+            test "$SGLANG_ALLOW_REMOTE_MEDIA" = 0
+            test "$SGLANG_USE_PICKLE_IPC" = 0
+            grep -q "def server_args_to_public_dict(" \
+              /opt/rdna4-inference/components/sglang/python/sglang/srt/server_args.py
+            grep -q "_enforce_delegated_media_source_policy(video)" \
+              /opt/rdna4-inference/components/sglang/python/sglang/srt/multimodal/processors/transformers_auto.py
+          '
+
+  publish:
+    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/sglang-rdna4
+      CANDIDATE_TAG: ghcr.io/${{ github.repository_owner }}/sglang-rdna4:candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Move Docker data-root to /mnt
+        run: |
+          sudo systemctl stop docker
+          sudo mkdir -p /mnt/docker /etc/docker
+          sudo rsync -a /var/lib/docker/ /mnt/docker/
+          printf '{"data-root":"/mnt/docker"}\n' | sudo tee /etc/docker/daemon.json
+          sudo systemctl start docker
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Run offline security checks
+        run: |
+          bash -n docker/*.sh scripts/*.sh tests/*.sh
+          bash tests/test_gpu_selection.sh
+          python tests/test_secure_launch.py
+          git show -m --check --format= --no-renames HEAD
+          docker buildx build --check .
       - id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/${{ github.repository_owner }}/sglang-rdna4
+          images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=sha,prefix=sha-
-            type=ref,event=tag
+            type=sha,format=long,prefix=sha-
       - name: Log in to GHCR
-        if: github.event_name == 'push' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v'))
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      - id: candidate
+        name: Build the candidate once
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
-          push: ${{ github.event_name == 'push' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v')) }}
-          tags: ${{ steps.meta.outputs.tags }}
+          push: true
+          tags: ${{ env.CANDIDATE_TAG }}
           labels: ${{ steps.meta.outputs.labels }}
           sbom: true
           provenance: mode=max
+          github-token: ""
+      - name: Verify the exact candidate digest
+        env:
+          CANDIDATE_DIGEST: ${{ steps.candidate.outputs.digest }}
+        run: |
+          if [[ ! "$CANDIDATE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Build did not return a valid OCI digest." >&2
+            exit 1
+          fi
+          candidate_ref="${CANDIDATE_TAG}@${CANDIDATE_DIGEST}"
+          docker buildx imagetools inspect "$candidate_ref"
+          docker pull "$candidate_ref"
+          test "$(docker image inspect "$candidate_ref" --format '{{.Config.User}}')" = "10001:10001"
+          docker run --rm --entrypoint /bin/sh "$candidate_ref" -ec '
+            test "$(id -u):$(id -g)" = "10001:10001"
+            test -x /usr/local/libexec/rdna4/secure-launch.py
+            test "$SGLANG_SECURE_LAUNCH" = 1
+            test "$SGLANG_ALLOW_LOCAL_MEDIA" = 0
+            test "$SGLANG_ALLOW_REMOTE_MEDIA" = 0
+            test "$SGLANG_USE_PICKLE_IPC" = 0
+            grep -q "def server_args_to_public_dict(" \
+              /opt/rdna4-inference/components/sglang/python/sglang/srt/server_args.py
+            grep -q "_enforce_delegated_media_source_policy(video)" \
+              /opt/rdna4-inference/components/sglang/python/sglang/srt/multimodal/processors/transformers_auto.py
+          '
+      - name: Promote the verified digest
+        env:
+          CANDIDATE_DIGEST: ${{ steps.candidate.outputs.digest }}
+          FINAL_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          candidate_ref="${CANDIDATE_TAG}@${CANDIDATE_DIGEST}"
+          while IFS= read -r tag; do
+            [[ -n "$tag" ]] || continue
+            metadata_file="$(mktemp)"
+            docker buildx imagetools create \
+              --metadata-file "$metadata_file" \
+              --tag "$tag" \
+              "$candidate_ref"
+            promoted_digest="$(
+              jq -r '."containerimage.descriptor".digest // empty' "$metadata_file"
+            )"
+            if [[ "$promoted_digest" != "$CANDIDATE_DIGEST" ]]; then
+              echo "Promoted tag $tag resolved to $promoted_digest, expected $CANDIDATE_DIGEST." >&2
+              exit 1
+            fi
+            docker buildx imagetools inspect "$tag"
+          done <<< "$FINAL_TAGS"

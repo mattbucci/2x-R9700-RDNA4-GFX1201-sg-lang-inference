@@ -1,5 +1,5 @@
 #!/bin/bash
-# Reproducible RDNA4 inference setup: SGLang v0.5.15 + numbered patch series
+# Version-constrained RDNA4 inference setup: SGLang v0.5.15 + numbered patch series
 # + system RCCL + Triton 3.6.0.
 #
 # No custom RCCL build. The repository's ordered patches are applied to a
@@ -37,10 +37,38 @@ TORCH_VERSION="${TORCH_VERSION:-2.11.0+rocm7.2}"
 TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.26.0+rocm7.2}"
 TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION:-2.11.0+rocm7.2}"
 TORCH_INDEX="${TORCH_INDEX:-https://download.pytorch.org/whl/rocm7.2}"
+PYTHON_VERSION="${PYTHON_VERSION:-3.12.13}"
+LIBPROTOBUF_VERSION="${LIBPROTOBUF_VERSION:-7.35.1}"
+TRANSFORMERS_VERSION="${TRANSFORMERS_VERSION:-5.12.1}"
+GGUF_VERSION="${GGUF_VERSION:-0.19.0}"
+IMAGEIO_VERSION="${IMAGEIO_VERSION:-2.37.3}"
+IMAGEIO_FFMPEG_VERSION="${IMAGEIO_FFMPEG_VERSION:-0.6.0}"
+PILLOW_VERSION="${PILLOW_VERSION:-12.3.0}"
+LIBROSA_VERSION="${LIBROSA_VERSION:-0.11.0}"
 
 SGLANG_REPO="https://github.com/sgl-project/sglang.git"
 SGLANG_TAG="${SGLANG_TAG:-v0.5.15}"  # live baseline promoted 2026-07-11; overridable for version rebases
+SGLANG_COMMIT="${SGLANG_COMMIT:-}"
 STRICT_PATCHES="${STRICT_PATCHES:-0}"
+TRITON_PYPI_FALLBACK="${TRITON_PYPI_FALLBACK:-1}"
+REQUIRED_SECURITY_PATCH="$REPO_DIR/patches/096-sglang-api-auth-hardening.patch"
+
+verify_sglang_commit() {
+    if [ -z "$SGLANG_COMMIT" ]; then
+        return 0
+    fi
+    if [[ ! "$SGLANG_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+        echo "FATAL: SGLANG_COMMIT must be a full lowercase Git commit SHA."
+        exit 1
+    fi
+    local actual_commit
+    actual_commit="$(git -C "$SGLANG_DIR" rev-parse HEAD)"
+    if [ "$actual_commit" != "$SGLANG_COMMIT" ]; then
+        echo "FATAL: SGLang $SGLANG_TAG resolved to $actual_commit, expected $SGLANG_COMMIT."
+        echo "Refusing a moved tag or unexpected source tree."
+        exit 1
+    fi
+}
 
 SKIP_ENV=false
 for arg in "$@"; do
@@ -75,11 +103,16 @@ fi
 # Step 1: Clone pristine SGLang and apply the ordered patch series
 # -------------------------------------------------------------------
 echo ""
+if [ "$STRICT_PATCHES" = "1" ] && [ ! -f "$REQUIRED_SECURITY_PATCH" ]; then
+    echo "FATAL: required security patch is missing: $REQUIRED_SECURITY_PATCH"
+    exit 1
+fi
 if [ ! -d "$SGLANG_DIR" ] || [ ! -d "$SGLANG_DIR/.git" ]; then
     echo "[1/5] Cloning pristine SGLang $SGLANG_TAG..."
     rm -rf "$SGLANG_DIR"
     mkdir -p "$(dirname "$SGLANG_DIR")"
     git clone --branch "$SGLANG_TAG" --depth 1 "$SGLANG_REPO" "$SGLANG_DIR"
+    verify_sglang_commit
 
     # Apply numbered sglang patches only. transformers_disable_qwen3moe_fusion.patch
     # targets the transformers package (calibration-time, applied via the
@@ -122,6 +155,30 @@ if [ ! -d "$SGLANG_DIR" ] || [ ! -d "$SGLANG_DIR/.git" ]; then
     fi
 else
     echo "[1/5] Using existing SGLang source at $SGLANG_DIR"
+    verify_sglang_commit
+fi
+
+if [ "$STRICT_PATCHES" = "1" ]; then
+    grep -qF "def server_args_to_public_dict(" \
+        "$SGLANG_DIR/python/sglang/srt/server_args.py" \
+        || { echo "FATAL: security redaction patch marker is missing"; exit 1; }
+    grep -qF "def _require_media_source_enabled(" \
+        "$SGLANG_DIR/python/sglang/srt/utils/common.py" \
+        || { echo "FATAL: media-source policy patch marker is missing"; exit 1; }
+    grep -qF 'common._require_media_source_enabled(' \
+        "$SGLANG_DIR/python/sglang/srt/multimodal/processors/mimo_audio.py" \
+        || { echo "FATAL: MiMo audio media guard is missing"; exit 1; }
+    for guarded_processor in mimo_v2.py moss_vl.py; do
+        grep -qF '_require_media_source_enabled("SGLANG_ALLOW_REMOTE_MEDIA"' \
+            "$SGLANG_DIR/python/sglang/srt/multimodal/processors/$guarded_processor" \
+            || { echo "FATAL: $guarded_processor media guards are missing"; exit 1; }
+    done
+    grep -qF "_enforce_delegated_media_source_policy(video)" \
+        "$SGLANG_DIR/python/sglang/srt/multimodal/processors/transformers_auto.py" \
+        || { echo "FATAL: delegated Transformers media guard is missing"; exit 1; }
+    grep -qF '"127.0.0.1"' \
+        "$SGLANG_DIR/python/sglang/srt/model_executor/model_runner.py" \
+        || { echo "FATAL: loopback distributed-bootstrap guard is missing"; exit 1; }
 fi
 
 # -------------------------------------------------------------------
@@ -136,7 +193,7 @@ if [ "$SKIP_ENV" = false ]; then
     if conda env list | grep -q "${ENV_NAME}"; then
         conda env remove -n "$ENV_NAME" -y 2>/dev/null || true
     fi
-    conda create -n "$ENV_NAME" python=3.12 -y
+    conda create -n "$ENV_NAME" "python=$PYTHON_VERSION" -y
     conda activate "$ENV_NAME"
 
     # SGLang v0.5.11 added a Rust gRPC component (python/sglang/srt/grpc_lib/)
@@ -145,7 +202,7 @@ if [ "$SKIP_ENV" = false ]; then
     # from libprotobuf which provides the binary alongside the lib. Required
     # since 2026-05-11 (first hit when reviving the env build for task #25).
     echo "Installing libprotobuf (provides protoc for SGLang v0.5.11+ Rust grpc build)..."
-    conda install -c conda-forge -y libprotobuf
+    conda install -c conda-forge -y "libprotobuf=$LIBPROTOBUF_VERSION"
 
     echo "Installing PyTorch $TORCH_VERSION..."
     pip install "torch==$TORCH_VERSION" --index-url "$TORCH_INDEX"
@@ -166,7 +223,9 @@ if [ "$SKIP_ENV" = false ]; then
         echo "  Install it, then re-run: pacman -S rust   (Arch/EndeavourOS)  |  rustup default stable  (rustup)"
         exit 1
     fi
-    pip install -e ".[srt_hip]"
+    # v0.5.15 has no srt_hip optional extra. ROCm selection comes from the
+    # pinned PyTorch index and the repository's HIP patches.
+    pip install -e .
 
     # Re-pin PyTorch (SGLang deps may change it)
     echo "Re-pinning PyTorch..."
@@ -180,11 +239,13 @@ if [ "$SKIP_ENV" = false ]; then
     echo "Removing pip triton packages..."
     pip uninstall triton triton-rocm -y 2>/dev/null || true
 
-    echo "Upgrading transformers to 5.x..."
-    pip install --no-deps "transformers>=5.0" gguf
+    echo "Installing pinned transformers and GGUF packages..."
+    pip install --no-deps \
+        "transformers==$TRANSFORMERS_VERSION" \
+        "gguf==$GGUF_VERSION"
 
-    # Eval/validator deps — pillow already comes via SGLang's [srt_hip] extras,
-    # but imageio[ffmpeg] is needed for validate_capabilities.py video check
+    # Eval/validator deps — Pillow already comes through SGLang's base
+    # dependencies, but imageio[ffmpeg] is needed for the video check in
     # (12-frame mp4 build via iio.imwrite). Without it the video step silently
     # skips with "no module named imageio" and you lose the modality.
     # Ported from 3090 commit 9ee3b0d.
@@ -193,7 +254,11 @@ if [ "$SKIP_ENV" = false ]; then
     # Nemotron-Omni AVLM). Without it the model crashes at processor init with
     # "ParakeetExtractor requires the librosa library" (caught in the 2026-06-16
     # v0.5.13 resweep — the fresh env omitted it; v0.5.12 env had 0.11.0).
-    pip install "imageio[ffmpeg]" pillow "librosa==0.11.0"
+    pip install \
+        "imageio[ffmpeg]==$IMAGEIO_VERSION" \
+        "imageio-ffmpeg==$IMAGEIO_FFMPEG_VERSION" \
+        "pillow==$PILLOW_VERSION" \
+        "librosa==$LIBROSA_VERSION"
 else
     echo "[2/5] Skipping conda env creation"
     init_conda
@@ -232,8 +297,16 @@ else
     # Clear any prior (possibly broken) install so the wheel install isn't
     # short-circuited by a "Requirement already satisfied" cache hit.
     pip uninstall triton -y 2>/dev/null || true
-    pip install "triton==3.6.0" --index-url "$TORCH_INDEX" || \
-      pip install "triton==3.6.0"  # fall back to PyPI if ROCm channel lacks it
+    if ! pip install "triton==3.6.0" --index-url "$TORCH_INDEX"; then
+        if [ "$TRITON_PYPI_FALLBACK" = "1" ]; then
+            echo "WARNING: approved ROCm index failed; trying the legacy PyPI fallback."
+            pip install "triton==3.6.0"
+        else
+            echo "FATAL: triton 3.6.0 was unavailable from the approved ROCm index."
+            echo "TRITON_PYPI_FALLBACK=0 forbids changing package provenance on failure."
+            exit 1
+        fi
+    fi
 fi
 
 python -c "import triton; print(f'triton {triton.__version__} OK at {triton.__file__}')"

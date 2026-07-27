@@ -65,6 +65,10 @@ WARMUP=""
 WATCHDOG=600
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 EXTRA_ENV="${EXTRA_ENV:-}"
+SGLANG_SECURE_LAUNCH="${SGLANG_SECURE_LAUNCH:-0}"
+SGLANG_TRUST_REMOTE_CODE="${SGLANG_TRUST_REMOTE_CODE:-1}"
+SGLANG_ENABLE_METRICS="${SGLANG_ENABLE_METRICS:-1}"
+MAX_QUEUED_REQUESTS="${SGLANG_MAX_QUEUED_REQUESTS:-}"
 CUSTOM_AR="--disable-custom-all-reduce"
 [[ "${ENABLE_CUSTOM_ALL_REDUCE:-}" == "1" ]] && CUSTOM_AR=""
 # Tensor-parallel size defaults to the selected GPUs (both R9700s by default).
@@ -825,13 +829,166 @@ if [[ -n "$WANT_SPEC" ]]; then
     echo "[launch] --spec: $SPEC_ALGO draft=$SPEC_DRAFT + split-KV verify (SGLANG_TREE_VERIFY_SPLITKV=1) · ctx $CTX (≤64K spec lane)"
 fi
 
-# Resolve chat template (deferred $MODEL expansion)
-CHAT_TEMPLATE=$(eval echo "$CHAT_TEMPLATE")
+# Resolve security policy before activating an environment or loading model
+# metadata. The OCI image sets SGLANG_SECURE_LAUNCH=1; bare-metal behavior stays
+# compatible unless an operator opts into this policy.
+case "$SGLANG_SECURE_LAUNCH" in
+    0|1) ;;
+    *) echo "ERROR: SGLANG_SECURE_LAUNCH must be 0 or 1" >&2; exit 2 ;;
+esac
+
+apply_extra_env() {
+    local assignment name
+    local -a assignments=()
+    [[ -z "$EXTRA_ENV" ]] && return 0
+    read -r -a assignments <<< "$EXTRA_ENV"
+    for assignment in "${assignments[@]}"; do
+        if [[ ! "$assignment" =~ ^[A-Za-z_][A-Za-z0-9_]*=.*$ ]]; then
+            echo "ERROR: EXTRA_ENV entries must be NAME=value assignments" >&2
+            exit 2
+        fi
+        name="${assignment%%=*}"
+        if [[ "$SGLANG_SECURE_LAUNCH" == "1" ]]; then
+            case "$name" in
+                SGLANG_SECURE_LAUNCH|SGLANG_TRUST_REMOTE_CODE|SGLANG_ENABLE_METRICS|\
+                SGLANG_ALLOW_LOCAL_MEDIA|SGLANG_ALLOW_REMOTE_MEDIA|\
+                SGLANG_MAX_QUEUED_REQUESTS|SGLANG_API_KEY|SGLANG_ADMIN_API_KEY|\
+                SGLANG_API_KEY_FILE|SGLANG_ADMIN_API_KEY_FILE|\
+                SGLANG_ENABLE_GRPC|SGLANG_GRPC_PORT|\
+                SGLANG_USE_PICKLE_IPC|SGLANG_TEST_SCRIPTED_RUNTIME*|\
+                SGLANG_DISTRIBUTED_INIT_METHOD_OVERRIDE|MASTER_ADDR|MASTER_PORT|\
+                NCCL_SOCKET_IFNAME|GLOO_SOCKET_IFNAME|NCCL_IB_DISABLE|NCCL_COMM_ID|\
+                DUMPER_*)
+                    echo "ERROR: EXTRA_ENV cannot override protected setting $name" >&2
+                    exit 2
+                    ;;
+            esac
+        fi
+        export "$assignment"
+    done
+}
+
+apply_extra_env
+
+load_secret_file() {
+    local value_name=$1 file_name=$2
+    local value="${!value_name:-}" secret_file="${!file_name:-}"
+    if [[ -z "$value" && -n "$secret_file" ]]; then
+        if [[ ! -f "$secret_file" || ! -r "$secret_file" ]]; then
+            echo "ERROR: $file_name is not a readable regular file" >&2
+            exit 2
+        fi
+        value="$(<"$secret_file")"
+        if [[ -z "$value" || "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+            echo "ERROR: $file_name must contain exactly one secret line" >&2
+            exit 2
+        fi
+        printf -v "$value_name" '%s' "$value"
+    fi
+}
+
+case "$SGLANG_TRUST_REMOTE_CODE" in
+    0|1) ;;
+    *) echo "ERROR: SGLANG_TRUST_REMOTE_CODE must be 0 or 1" >&2; exit 2 ;;
+esac
+case "$SGLANG_ENABLE_METRICS" in
+    0|1) ;;
+    *) echo "ERROR: SGLANG_ENABLE_METRICS must be 0 or 1" >&2; exit 2 ;;
+esac
+
+if [[ "$SGLANG_SECURE_LAUNCH" == "1" ]]; then
+    if [[ -n "${SGLANG_API_KEY:-}" || -n "${SGLANG_ADMIN_API_KEY:-}" ]]; then
+        echo "ERROR: secure image launches require file-backed credentials" >&2
+        echo "Use SGLANG_API_KEY_FILE and SGLANG_ADMIN_API_KEY_FILE." >&2
+        exit 2
+    fi
+    for secret_file_var in SGLANG_API_KEY_FILE SGLANG_ADMIN_API_KEY_FILE; do
+        secret_file="${!secret_file_var:-}"
+        if [[ -z "$secret_file" || ! -f "$secret_file" || ! -r "$secret_file" || -L "$secret_file" ]]; then
+            echo "ERROR: $secret_file_var must reference a readable, non-symlink regular file" >&2
+            exit 2
+        fi
+    done
+else
+    load_secret_file SGLANG_API_KEY SGLANG_API_KEY_FILE
+    load_secret_file SGLANG_ADMIN_API_KEY SGLANG_ADMIN_API_KEY_FILE
+fi
+
+if [[ "$SGLANG_SECURE_LAUNCH" == "0" && ( -n "${SGLANG_API_KEY:-}" || -n "${SGLANG_ADMIN_API_KEY:-}" ) ]]; then
+    if [[ -z "${SGLANG_API_KEY:-}" || -z "${SGLANG_ADMIN_API_KEY:-}" ]]; then
+        echo "ERROR: configure both SGLANG_API_KEY and SGLANG_ADMIN_API_KEY" >&2
+        exit 2
+    fi
+    if (( ${#SGLANG_API_KEY} < 32 || ${#SGLANG_ADMIN_API_KEY} < 32 )); then
+        echo "ERROR: API and admin keys must each contain at least 32 characters" >&2
+        exit 2
+    fi
+    if [[ "$SGLANG_API_KEY" == "$SGLANG_ADMIN_API_KEY" ]]; then
+        echo "ERROR: API and admin keys must be distinct" >&2
+        exit 2
+    fi
+fi
+if [[ -n "$MAX_QUEUED_REQUESTS" && ! "$MAX_QUEUED_REQUESTS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: SGLANG_MAX_QUEUED_REQUESTS must be a positive integer" >&2
+    exit 2
+fi
+
+EXTRA_ARGS_ARRAY=()
+if [[ -n "$EXTRA_ARGS" ]]; then
+    read -r -a EXTRA_ARGS_ARRAY <<< "$EXTRA_ARGS"
+fi
+if [[ "$SGLANG_SECURE_LAUNCH" == "1" ]]; then
+    for arg in "${EXTRA_ARGS_ARRAY[@]}"; do
+        case "$arg" in
+            --api-key|--api-key=*|--admin-api-key|--admin-api-key=*|\
+            --trust-remote-code|--trust-remote-code=*|--enable-metrics|--enable-metrics=*|\
+            --max-queued-requests|--max-queued-requests=*|\
+            --tokenizer-worker-num|--tokenizer-worker-num=*|--grpc-mode|--grpc-mode=*|\
+            --encoder-only|--encoder-only=*|--language-only|--language-only=*|\
+            --encoder-urls|--encoder-urls=*|\
+            --encoder-bootstrap-port|--encoder-bootstrap-port=*|\
+            --encoder-register-urls|--encoder-register-urls=*|\
+            --use-ray|--use-ray=*|\
+            --enable-igw|--enable-igw=*|\
+            --enable-custom-logit-processor|--enable-custom-logit-processor=*|\
+            --kv-events-config|--kv-events-config=*|\
+            --enable-forward-pass-metrics|--enable-forward-pass-metrics=*|\
+            --forward-pass-metrics-ipc-name|--forward-pass-metrics-ipc-name=*|\
+            --forward-pass-metrics-worker-id|--forward-pass-metrics-worker-id=*|\
+            --enable-lora|--enable-lora=*|--lora-paths|--lora-paths=*|\
+            --disaggregation-mode|--disaggregation-mode=*|\
+            --remote-instance-weight-loader-start-seed-via-transfer-engine|\
+            --remote-instance-weight-loader-start-seed-via-transfer-engine=*|\
+            --remote-instance-weight-loader-seed-instance-ip|\
+            --remote-instance-weight-loader-seed-instance-ip=*|\
+            --remote-instance-weight-loader-seed-instance-service-port|\
+            --remote-instance-weight-loader-seed-instance-service-port=*|\
+            --remote-instance-weight-loader-send-weights-group-ports|\
+            --remote-instance-weight-loader-send-weights-group-ports=*|\
+            --remote-instance-weight-loader-backend|--remote-instance-weight-loader-backend=*|\
+            --engine-info-bootstrap-port|--engine-info-bootstrap-port=*|\
+            --modelexpress-config|--modelexpress-config=*|\
+            --tool-server|--tool-server=*|\
+            --enable-elastic-expert-backup|--enable-elastic-expert-backup=*|\
+            --elastic-ep-backend|--elastic-ep-backend=*|\
+            --moe-a2a-backend|--moe-a2a-backend=*|\
+            --speculative-moe-a2a-backend|--speculative-moe-a2a-backend=*|\
+            --pipeline-parallel-size|--pipeline-parallel-size=*|--pp-size|--pp-size=*|\
+            --data-parallel-size|--data-parallel-size=*|--dp-size|--dp-size=*|\
+            --nnodes|--nnodes=*|--node-rank|--node-rank=*|\
+            --dist-init-addr|--dist-init-addr=*|--nccl-init-addr|--nccl-init-addr=*|\
+            --nccl-port|--nccl-port=*|\
+            --config|--config=*)
+                echo "ERROR: EXTRA_ARGS cannot override protected option $arg" >&2
+                exit 2
+                ;;
+        esac
+    done
+fi
 
 # --- Setup environment ---
 activate_conda
 setup_rdna4_env
-[[ -n "$EXTRA_ENV" ]] && export $EXTRA_ENV
 
 echo "=============================================="
 echo "$PRESET — SGLang on 2x R9700 RDNA4"
@@ -842,7 +999,12 @@ echo "Quant:  ${QUANT:-none}  Context: $CTX  Port: $PORT"
 echo "=============================================="
 
 # --- Build command ---
-CMD=(python -m sglang.launch_server
+if [[ "$SGLANG_SECURE_LAUNCH" == "1" ]]; then
+    CMD=(/usr/local/libexec/rdna4/secure-launch.py)
+else
+    CMD=(python -m sglang.launch_server)
+fi
+CMD+=(
     --model-path "$MODEL"
     --tensor-parallel-size "$TP"
     --dtype "$DTYPE"
@@ -867,12 +1029,18 @@ CMD=(python -m sglang.launch_server
     # never sets it (stays False) — upstream bug; PR-candidate to default it True on HIP.
     # HIP-only-applicable + a ~0.2s no-op at TP=1 / cuda-graph-off, so pass unconditionally.
     --pre-warm-nccl
-    --trust-remote-code
     --watchdog-timeout "$WATCHDOG"
     --port "$PORT"
     --host 0.0.0.0
-    --enable-metrics
 )
+if [[ "$SGLANG_SECURE_LAUNCH" == "0" ]]; then
+    [[ -n "$MAX_QUEUED_REQUESTS" ]] && CMD+=(--max-queued-requests "$MAX_QUEUED_REQUESTS")
+    [[ "$SGLANG_TRUST_REMOTE_CODE" == "1" ]] && CMD+=(--trust-remote-code)
+    [[ "$SGLANG_ENABLE_METRICS" == "1" ]] && CMD+=(--enable-metrics)
+    if [[ -n "${SGLANG_API_KEY:-}" ]]; then
+        CMD+=(--api-key "$SGLANG_API_KEY" --admin-api-key "$SGLANG_ADMIN_API_KEY")
+    fi
+fi
 
 # FORCE_FP8=1 → runtime FP8 quantization of a BF16/FP16 base (serve a BF16 dir as FP8), applied
 # after all preset + config-detect logic so it wins regardless of the preset's hard-set QUANT.
@@ -895,7 +1063,7 @@ CMD=(python -m sglang.launch_server
 # but allow production A/B tests without editing a model preset.
 [[ "${ENABLE_OVERLAP_SCHEDULE:-}" == "1" ]] && OVERLAP=""
 [[ -n "$OVERLAP" ]] && CMD+=($OVERLAP)
-[[ -n "$EXTRA_ARGS" ]] && CMD+=($EXTRA_ARGS)
+(( ${#EXTRA_ARGS_ARRAY[@]} > 0 )) && CMD+=("${EXTRA_ARGS_ARRAY[@]}")
 
 # CUDA graph: either --disable-cuda-graph or --cuda-graph-bs <sizes>.
 # DISABLE_CUDA_GRAPH=1 forces graphs OFF regardless of preset — use for AGENTIC evals.
@@ -908,8 +1076,19 @@ CMD=(python -m sglang.launch_server
 CMD+=($CUDA_GRAPH)
 
 if [[ "${LAUNCH_DRY_RUN:-}" == "1" ]]; then
+    redact_next=0
     printf '[launch dry-run]'
-    printf ' %q' "${CMD[@]}"
+    for arg in "${CMD[@]}"; do
+        if (( redact_next )); then
+            printf ' %q' '<redacted>'
+            redact_next=0
+            continue
+        fi
+        printf ' %q' "$arg"
+        case "$arg" in
+            --api-key|--admin-api-key) redact_next=1 ;;
+        esac
+    done
     printf '\n'
     exit 0
 fi
