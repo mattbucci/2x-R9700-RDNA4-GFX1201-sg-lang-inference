@@ -44,6 +44,14 @@ ENV HOME=/home/sglang XDG_CACHE_HOME=/home/sglang/.cache \
     NCCL_SOCKET_IFNAME=lo GLOO_SOCKET_IFNAME=lo NCCL_IB_DISABLE=1 \
     SGLANG_MAX_QUEUED_REQUESTS=32 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+# HiCache JIT-compiles mem_cache/cpp_utils/hash_binding.cpp on the first prefill and it
+# includes <openssl/sha.h>, so the headers are a runtime need rather than a build one. This
+# base ships the OpenSSL runtime without them, and g++ and ninja are already present, so the
+# headers are the only gap. Without them --hicache-storage-backend passes startup and health
+# checks, then raises "Failed to load HiCache native hash extension" from the first insert.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /opt/conda /opt/conda
 COPY --from=builder /opt/rdna4-inference/components/sglang /opt/rdna4-inference/components/sglang
 COPY --from=builder /opt/rdna4-inference/scripts/common.sh \
@@ -52,6 +60,10 @@ COPY --from=builder /opt/rdna4-inference/scripts/common.sh \
     /opt/rdna4-inference/scripts/
 COPY --from=builder /opt/rdna4-inference/scripts/*.jinja /opt/rdna4-inference/scripts/
 RUN "${CONDA_BASE}/bin/conda" run -n "${ENV_NAME}" python -c "import torch, sglang, sgl_kernel"
+# Compile the HiCache extension here so a missing header or toolchain fails the build rather
+# than a live request; the JIT is lazy enough to clear both startup and the health endpoint.
+RUN "${CONDA_BASE}/bin/conda" run -n "${ENV_NAME}" python -c \
+    "from sglang.srt.mem_cache.cpp_utils.native_hash import _load_native_hash_module; _load_native_hash_module()"
 RUN groupadd --gid "${APP_GID}" sglang \
     && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home \
         --home-dir /home/sglang --shell /usr/sbin/nologin sglang \
