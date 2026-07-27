@@ -35,6 +35,7 @@ ENV HOME=/home/sglang XDG_CACHE_HOME=/home/sglang/.cache \
     REPO_DIR=/opt/rdna4-inference SGLANG_DIR=/opt/rdna4-inference/components/sglang \
     PATH=/opt/conda/envs/sglang-rdna4/bin:/opt/conda/bin:${PATH} \
     TRITON_CACHE_DIR=/home/sglang/.cache/triton_rdna4_t36 \
+    TORCH_EXTENSIONS_DIR=/home/sglang/.cache/torch_extensions \
     SGLANG_USE_AITER=0 SGLANG_USE_AITER_AR=0 HIP_FORCE_DEV_KERNARG=1 \
     HSA_FORCE_FINE_GRAIN_PCIE=1 GPU_MAX_HW_QUEUES=8 PYTORCH_HIP_ALLOC_CONF=expandable_segments:True \
     VLLM_USE_TRITON_AWQ=1 VLLM_USE_TRITON_FLASH_ATTN=1 FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \
@@ -44,11 +45,8 @@ ENV HOME=/home/sglang XDG_CACHE_HOME=/home/sglang/.cache \
     NCCL_SOCKET_IFNAME=lo GLOO_SOCKET_IFNAME=lo NCCL_IB_DISABLE=1 \
     SGLANG_MAX_QUEUED_REQUESTS=32 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
-# HiCache JIT-compiles mem_cache/cpp_utils/hash_binding.cpp on the first prefill and it
-# includes <openssl/sha.h>, so the headers are a runtime need rather than a build one. This
-# base ships the OpenSSL runtime without them, and g++ and ninja are already present, so the
-# headers are the only gap. Without them --hicache-storage-backend passes startup and health
-# checks, then raises "Failed to load HiCache native hash extension" from the first insert.
+# hash_binding.cpp is JIT-compiled at request time and includes <openssl/sha.h>; this base has
+# the OpenSSL runtime but not the headers, and g++ and ninja are already present.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libssl-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -60,15 +58,16 @@ COPY --from=builder /opt/rdna4-inference/scripts/common.sh \
     /opt/rdna4-inference/scripts/
 COPY --from=builder /opt/rdna4-inference/scripts/*.jinja /opt/rdna4-inference/scripts/
 RUN "${CONDA_BASE}/bin/conda" run -n "${ENV_NAME}" python -c "import torch, sglang, sgl_kernel"
-# Compile the HiCache extension here so a missing header or toolchain fails the build rather
-# than a live request; the JIT is lazy enough to clear both startup and the health endpoint.
-RUN "${CONDA_BASE}/bin/conda" run -n "${ENV_NAME}" python -c \
-    "from sglang.srt.mem_cache.cpp_utils.native_hash import _load_native_hash_module; _load_native_hash_module()"
 RUN groupadd --gid "${APP_GID}" sglang \
     && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home \
         --home-dir /home/sglang --shell /usr/sbin/nologin sglang \
     && install -d -o "${APP_UID}" -g "${APP_GID}" -m 0700 \
         /home/sglang/.cache /home/sglang/.config
+# Compile the HiCache extension so a missing header fails the build, not a live request, and
+# leave it in the runtime user's cache so the first prefill reuses it instead of recompiling.
+RUN "${CONDA_BASE}/bin/conda" run -n "${ENV_NAME}" python -c \
+        "from sglang.srt.mem_cache.cpp_utils.native_hash import _load_native_hash_module; _load_native_hash_module()" \
+    && chown -R "${APP_UID}:${APP_GID}" "${TORCH_EXTENSIONS_DIR}"
 COPY --chmod=0555 scripts/gpu-selection.sh /usr/local/libexec/rdna4/gpu-selection.sh
 COPY --chmod=0555 docker/secure-launch.py /usr/local/libexec/rdna4/secure-launch.py
 COPY --chmod=0555 docker/entrypoint.sh /usr/local/bin/entrypoint.sh
