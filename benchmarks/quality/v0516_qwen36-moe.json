@@ -2,12 +2,12 @@
   "qwen36-moe": {
     "tag": "qwen36-moe",
     "model": "/home/letsrtfm/AI/models/Qwen3.6-35B-A3B-AWQ",
-    "timestamp": "2026-07-27 03:11",
-    "elapsed_sec": 10.1,
+    "timestamp": "2026-07-27 15:21",
+    "elapsed_sec": 12.5,
     "checks": {
       "basic": {
         "passed": true,
-        "message": "finish=stop answer=' paris'"
+        "message": "finish=stop answer='paris\\n'"
       },
       "tool_call": {
         "passed": true,
@@ -15,11 +15,11 @@
       },
       "thinking": {
         "passed": true,
-        "message": "reasoning_seen terminated answer_ok (271 tok, finish=stop)"
+        "message": "reasoning_seen terminated answer_ok (751 tok, finish=stop)"
       },
       "vision": {
         "passed": true,
-        "message": "saw=['red', 'circle', 'round']  response='\\n\\na solid red circle.\\n</think>\\n\\na solid red circle.\\n</think>\\n\\na solid red circle.\\n</think>\\n\\na solid red circle.\\n</think>'"
+        "message": "saw=['red', 'circle', 'round']  response='a red circle with a black outline is centered on a white background.'"
       }
     },
     "summary": {

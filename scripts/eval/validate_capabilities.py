@@ -437,7 +437,18 @@ def check_vision(base_url: str, model: str) -> tuple[bool, str]:
                 {"type": "text", "text": "Describe this image in one short sentence."},
             ],
         }],
-        "max_tokens": 128,
+        # This is a PERCEPTION check ("does it see the red circle"), not a
+        # reasoning check. Reasoning models (Qwen3.x) whose chat template injects
+        # <think> by default will, on this trivial prompt, sometimes degenerate
+        # into a repeated "answer</think>" loop that runs to max_tokens (the
+        # model has nothing distinct to say after the think block); the reasoning
+        # parser then splits on the first </think> and leaks stray markers into
+        # content. It is stochastic, so a bigger budget doesn't fix it. Disable
+        # thinking here so perception is tested directly and deterministically;
+        # the separate thinking probe covers reasoning. (The keyword check already
+        # scans reasoning_content too, so correctness never depended on this.)
+        "chat_template_kwargs": {"enable_thinking": False},
+        "max_tokens": 256,
         # Greedy (temp=0) can send Qwen3/Gemma4 into an immediate-EOS state;
         # use nucleus sampling like the other checks.
         "temperature": 0.7,
