@@ -4,7 +4,7 @@
 # Sequence (Rule 2 enforced: no rollout + score concurrent):
 #   1. Launch SGLang server for $PRESET (detached via setsid)
 #   2. Wait /health=200 (max 12 min)
-#   3. For each scaffold in {opencode, claw-code, little-coder}: full 300-inst rollout
+#   3. For each scaffold in {opencode, little-coder}: full 300-inst rollout
 #   4. Stop server
 #   5. Audit each scaffold's predictions for infrastructure failures
 #   6. If any infra failures: relaunch server, reroll just those instances, stop server
@@ -22,7 +22,7 @@
 #   the preset to a different id under the sglang provider.
 #
 # Environment overrides:
-#   SCAFFOLDS       space-separated list (default: "opencode claw-code little-coder")
+#   SCAFFOLDS       space-separated list (default: "opencode little-coder")
 #   INSTANCES       per-scaffold instance count (default: 0 = full 300)
 #   TIMEOUT         per-instance rollout timeout in seconds (default: 1800)
 #   LOG_DIR         where to write per-phase logs (default: /tmp/run-model-cycle-logs/<preset>)
@@ -42,7 +42,7 @@ if [ -z "$PRESET" ]; then
   exit 1
 fi
 
-SCAFFOLDS="${SCAFFOLDS:-opencode claw-code little-coder}"
+SCAFFOLDS="${SCAFFOLDS:-opencode little-coder}"  # claw-code retired 2026-08-30 (unmaintained); its historical cells remain on disk
 INSTANCES="${INSTANCES:-0}"
 TIMEOUT="${TIMEOUT:-1800}"
 SERVER_TIMEOUT="${SERVER_TIMEOUT:-720}"
@@ -186,7 +186,7 @@ for SCAFFOLD in "${NEED_RESCORE[@]}"; do
   rm -f "$OUT/scores-docker-summary.json"
   rm -rf "$OUT/scores-docker"
   flock -x /tmp/loop-bakeoff-logs/score.lock \
-    python "$REPO_DIR/evals/swebench/score_docker.py" \
+    "${SWEBENCH_PY:-/data/swebench-harness-env/bin/python}" "$REPO_DIR/evals/swebench/score_docker.py" \
       --predictions "$OUT/predictions.jsonl" \
       --max-workers 1 \
       --timeout "$TIMEOUT" \

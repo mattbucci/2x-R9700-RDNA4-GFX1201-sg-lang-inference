@@ -61,7 +61,7 @@ def parse_args():
                    help="Skip pre-rollout venv setup — agent runs read-edit-pray "
                         "without a working test loop. Compatible with v1 runs.")
     p.add_argument("--scaffold", default="opencode",
-                   choices=["opencode", "little-coder", "claw-code"],
+                   choices=["opencode", "little-coder", "claw-code"],  # claw-code deprecated (unmaintained; kept for reproducing historical cells)
                    help="Coding-agent scaffold to drive (host-side, no docker)")
     p.add_argument("--shard", default=None,
                    help="K/N: process only instances where index%%N==K (for concurrent "

@@ -33,7 +33,7 @@ TIMEOUT=${ROLLOUT_TIMEOUT:-1800}    # per-instance (3090 uses 1800; concurrency 
 CTX=${CTX:-131072}                  # claw needs headroom; dense FP8 caps below 256K
 SCORE_WORKERS=${SCORE_WORKERS:-8}   # concurrent docker eval containers (scoring runs after the
                                     # rollout, GPU idle; watch for the docker-IO kernel hang)
-SCAFFOLDS=(opencode little-coder claw-code)
+SCAFFOLDS=(opencode little-coder)  # claw-code retired 2026-08-30 (unmaintained)
 mkdir -p "$ROOT"
 [ -f "$SUMMARY" ] || printf 'model\tscaffold\tresolved\tapplied\tempty\n' > "$SUMMARY"
 
