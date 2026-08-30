@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/srt/model_executor/model_runner.py
-index ea17a25587..e916d56719 100644
+index 017198c7..1f19d5cc 100644
 --- a/python/sglang/srt/model_executor/model_runner.py
 +++ b/python/sglang/srt/model_executor/model_runner.py
-@@ -1575,6 +1575,20 @@ class ModelRunner(ModelRunnerKVCacheMixin):
+@@ -1144,6 +1144,20 @@ class ModelRunner:
  
          self.dtype = self.model_config.dtype
  
@@ -22,4 +22,4 @@ index ea17a25587..e916d56719 100644
 +        torch.cuda.empty_cache()
          after_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
          self.weight_load_mem_usage = before_avail_memory - after_avail_memory
-         # Get quantization config from ModelConfig
+         self.weight_load_time = time.perf_counter() - tic_total

@@ -1,8 +1,8 @@
-diff --git a/python/sglang/jit_kernel/triton_store_cache.py b/python/sglang/jit_kernel/triton_store_cache.py
-index 9824989..8c82b94 100644
---- a/python/sglang/jit_kernel/triton_store_cache.py
-+++ b/python/sglang/jit_kernel/triton_store_cache.py
-@@ -235,3 +235,123 @@ def triton_fused_store_cache(
+diff --git a/python/sglang/kernels/ops/kvcache/triton_store_cache.py b/python/sglang/kernels/ops/kvcache/triton_store_cache.py
+index 509171e5..4c321aba 100644
+--- a/python/sglang/kernels/ops/kvcache/triton_store_cache.py
++++ b/python/sglang/kernels/ops/kvcache/triton_store_cache.py
+@@ -258,3 +258,123 @@ def triton_fused_store_cache(
          triton_fused_store_flashmla(input, cache, indices, page_size)
      else:
          triton_fused_store_indexer(input, cache, indices, page_size)
@@ -127,10 +127,10 @@ index 9824989..8c82b94 100644
 +        num_warps=8 if block >= 512 else 4,
 +    )
 diff --git a/python/sglang/srt/mem_cache/memory_pool.py b/python/sglang/srt/mem_cache/memory_pool.py
-index fdb87ae..060080e 100644
+index d4606cff..bfb5369d 100644
 --- a/python/sglang/srt/mem_cache/memory_pool.py
 +++ b/python/sglang/srt/mem_cache/memory_pool.py
-@@ -76,6 +76,7 @@ from sglang.srt.platforms import current_platform
+@@ -77,6 +77,7 @@ from sglang.srt.platforms import current_platform
  from sglang.srt.runtime_context import get_parallel
  from sglang.srt.utils import (
      cpu_has_amx_support,
@@ -138,7 +138,7 @@ index fdb87ae..060080e 100644
      is_cpu,
      is_cuda,
      is_float4_e2m1fn_x2,
-@@ -110,6 +111,9 @@ _FP8_KV_CACHE_DTYPES = (
+@@ -117,6 +118,9 @@ _FP8_KV_CACHE_DTYPES = (
  # the SHUFFLE 5D pool layout has no consumer kernels, so the env var is
  # silently ignored and the legacy NHD layout is used.
  _use_aiter = bool(envs.SGLANG_USE_AITER.get()) and _is_hip
@@ -148,7 +148,7 @@ index fdb87ae..060080e 100644
  
  
  def conv_window_dedup_enabled(
-@@ -2280,6 +2284,40 @@ class MHATokenToKVPool(KVCache):
+@@ -2363,6 +2367,40 @@ class MHATokenToKVPool(KVCache):
              )
              return
  
@@ -162,14 +162,14 @@ index fdb87ae..060080e 100644
 +            # byte-level and end-to-end coverage.
 +            and self.dtype == torch.float8_e4m3fn
 +            and self.kv_cache_layout == "nhd"
-+            and self.same_kv_dim
++            and self.head_dim == self.v_head_dim
 +            and dcp_kv_mask is None
 +        ):
 +            # The ordinary HIP path expands this into scale/clamp/cast chains
 +            # for K and V followed by a separate scatter. Collapse up to seven
 +            # graph nodes into one typed FP8 Triton store while preserving
 +            # strided QKV-split token rows and the reserved padding slot.
-+            from sglang.jit_kernel.triton_store_cache import (
++            from sglang.kernels.ops.kvcache.triton_store_cache import (
 +                triton_fused_static_fp8_kv_store,
 +            )
 +
@@ -189,11 +189,11 @@ index fdb87ae..060080e 100644
          if cache_k.dtype != self.dtype:
              if self.dtype in _FP8_KV_CACHE_DTYPES:
                  if k_scale is not None:
-diff --git a/test/registered/jit/test_rdna4_fp8_kv_store.py b/test/registered/jit/test_rdna4_fp8_kv_store.py
+diff --git a/test/registered/kernels/test_rdna4_fp8_kv_store.py b/test/registered/kernels/test_rdna4_fp8_kv_store.py
 new file mode 100644
-index 0000000..51061ee
+index 00000000..2a6282df
 --- /dev/null
-+++ b/test/registered/jit/test_rdna4_fp8_kv_store.py
++++ b/test/registered/kernels/test_rdna4_fp8_kv_store.py
 @@ -0,0 +1,135 @@
 +# SPDX-License-Identifier: Apache-2.0
 +"""Correctness coverage for the RDNA4 fused static-scale FP8 KV writer."""
@@ -202,7 +202,7 @@ index 0000000..51061ee
 +
 +import torch
 +
-+from sglang.jit_kernel.triton_store_cache import triton_fused_static_fp8_kv_store
++from sglang.kernels.ops.kvcache.triton_store_cache import triton_fused_static_fp8_kv_store
 +from sglang.srt.utils import is_hip
 +from sglang.test.ci.ci_register import register_amd_ci
 +

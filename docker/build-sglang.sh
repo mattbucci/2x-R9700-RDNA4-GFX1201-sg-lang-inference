@@ -4,7 +4,9 @@
 set -euo pipefail
 
 readonly GPU_ASSERTION="assert torch.cuda.is_available(), 'CUDA not available';"
-readonly STORE_CACHE_FUNCTION='^def can_use_store_cache(size: int) -> bool:$'
+# v0.5.18: can_use_store_cache(k_row_bytes: int, v_row_bytes: int = 0) in
+# python/sglang/kernels/ops/kvcache/kvcache.py (was jit_kernel/kvcache.py, (size: int)).
+readonly STORE_CACHE_FUNCTION='^def can_use_store_cache(.*) -> bool:$'
 readonly RUSTUP_TARGET="x86_64-unknown-linux-gnu"
 
 # A truncated fetch makes apt report every repository as badly signed, which is
@@ -74,10 +76,10 @@ enable_gpu_free_setup() {
 }
 
 apply_tp1_store_cache_fallback() {
-    local kvcache="${SGLANG_DIR}/python/sglang/jit_kernel/kvcache.py"
+    local kvcache="${SGLANG_DIR}/python/sglang/kernels/ops/kvcache/kvcache.py"
     grep -q "$STORE_CACHE_FUNCTION" "$kvcache"
     # The entrypoint sets this only for TP=1. TP=2 keeps its existing JIT path.
-    sed -i '/^def can_use_store_cache(size: int) -> bool:$/a\    if __import__("os").environ.get("SGLANG_RDNA4_DISABLE_STORE_CACHE") == "1":\n        return False  # RDNA4 TP=1: JIT store_cache crashes' "$kvcache"
+    sed -i '/^def can_use_store_cache(.*) -> bool:$/a\    if __import__("os").environ.get("SGLANG_RDNA4_DISABLE_STORE_CACHE") == "1":\n        return False  # RDNA4 TP=1: JIT store_cache crashes' "$kvcache"
     grep -A2 "$STORE_CACHE_FUNCTION" "$kvcache" \
         | grep -q 'SGLANG_RDNA4_DISABLE_STORE_CACHE'
     grep -A3 "$STORE_CACHE_FUNCTION" "$kvcache" \

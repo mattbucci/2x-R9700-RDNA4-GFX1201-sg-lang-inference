@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/distributed/bootstrap.py b/python/sglang/srt/distributed/bootstrap.py
-index ab7be1f..70fe244 100644
+index c6962839..1b3addc7 100644
 --- a/python/sglang/srt/distributed/bootstrap.py
 +++ b/python/sglang/srt/distributed/bootstrap.py
-@@ -179,9 +179,12 @@ def _resolve_dist_init_method(*, server_args: ServerArgs, dist_port: int) -> str
+@@ -178,9 +178,12 @@ def _resolve_dist_init_method(*, server_args: ServerArgs, dist_port: int) -> str
          na = NetworkAddress.parse(server_args.dist_init_addr)
          dist_init_method = na.to_tcp()
      else:
@@ -19,13 +19,13 @@ index ab7be1f..70fe244 100644
  
  
 diff --git a/python/sglang/srt/entrypoints/engine.py b/python/sglang/srt/entrypoints/engine.py
-index 5c15853..8eb50e5 100644
+index ca2c429f..f61dc1fb 100644
 --- a/python/sglang/srt/entrypoints/engine.py
 +++ b/python/sglang/srt/entrypoints/engine.py
-@@ -93,7 +93,11 @@ from sglang.srt.observability.trace import process_tracing_init, trace_set_threa
- from sglang.srt.parser.template_detection import resolve_auto_parsers
- from sglang.srt.parser.template_manager import TemplateManager
- from sglang.srt.plugins import load_plugins
+@@ -107,7 +107,11 @@ from sglang.srt.runtime_context import (
+     get_serving,
+     publish,
+ )
 -from sglang.srt.server_args import PortArgs, ServerArgs
 +from sglang.srt.server_args import (
 +    PortArgs,
@@ -35,16 +35,16 @@ index 5c15853..8eb50e5 100644
  from sglang.srt.utils import (
      MultiprocessingSerializer,
      SerializedTensorPayload,
-@@ -222,7 +226,7 @@ class Engine(EngineScoreMixin, EngineBase):
+@@ -250,7 +254,7 @@ class Engine(EngineScoreMixin, EngineBase):
                  kwargs["log_level"] = "error"
              server_args = self.server_args_class(**kwargs)
          self.server_args = server_args
 -        logger.info(f"{server_args=}")
 +        logger.info("server_args=%s", server_args_to_public_dict(server_args))
  
-         # Pre-initialize tokenizer_manager so the atexit handler in
-         # shutdown() won't hit AttributeError.
-@@ -795,7 +799,7 @@ class Engine(EngineScoreMixin, EngineBase):
+         # Rust Server is not supported with the offline Engine API
+         if envs.SGLANG_RUST_SERVER.get():
+@@ -1092,7 +1096,7 @@ class Engine(EngineScoreMixin, EngineBase):
          # Allocate ports for inter-process communications
          if port_args is None:
              port_args = PortArgs.init_new(server_args)
@@ -53,17 +53,17 @@ index 5c15853..8eb50e5 100644
  
          # Start the engine info bootstrap server if per-rank info is needed.
          engine_info_bootstrap_server = None
-@@ -1002,7 +1006,7 @@ class Engine(EngineScoreMixin, EngineBase):
+@@ -1364,7 +1368,7 @@ class Engine(EngineScoreMixin, EngineBase):
          )
          return msgspec_to_builtins(
              {
 -                **dataclasses.asdict(self.tokenizer_manager.server_args),
 +                **server_args_to_public_dict(self.tokenizer_manager.server_args),
                  **self._scheduler_init_result.scheduler_infos[0],
+                 "startup_time": self.tokenizer_manager.startup_time,
                  "internal_states": internal_states,
-                 "version": __version__,
 diff --git a/python/sglang/srt/entrypoints/grpc_bridge.py b/python/sglang/srt/entrypoints/grpc_bridge.py
-index fa0ab61..5ea96a9 100644
+index dbab4608..74c58b40 100644
 --- a/python/sglang/srt/entrypoints/grpc_bridge.py
 +++ b/python/sglang/srt/entrypoints/grpc_bridge.py
 @@ -7,7 +7,6 @@ TokenizerManager's event loop.
@@ -74,28 +74,30 @@ index fa0ab61..5ea96a9 100644
  import json
  import logging
  from types import SimpleNamespace
-@@ -15,6 +14,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
- 
+@@ -16,6 +15,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
  from pydantic import ValidationError
  
+ from sglang.srt.configs.embedding_model_spec import resolved_embedding_plan
 +from sglang.srt.server_args import server_args_to_public_dict
  from sglang.srt.utils.msgspec_utils import msgspec_to_builtins
  
  logger = logging.getLogger(__name__)
-@@ -385,7 +385,7 @@ class RuntimeHandle:
+@@ -417,7 +417,9 @@ class RuntimeHandle:
          return json.dumps(result, default=str)
  
      def get_server_info(self) -> str:
--        result: Dict[str, Any] = dataclasses.asdict(self.server_args)
-+        result: Dict[str, Any] = server_args_to_public_dict(self.server_args)
+-        result: Dict[str, Any] = dataclasses.asdict(self.tokenizer_manager.server_args)
++        result: Dict[str, Any] = server_args_to_public_dict(
++            self.tokenizer_manager.server_args
++        )
          result.update(self.scheduler_info)
-         return json.dumps(msgspec_to_builtins(result), default=str)
- 
+         result["kv_events"] = (
+             self.tokenizer_manager.server_args.describe_kv_events_publisher()
 diff --git a/python/sglang/srt/entrypoints/http_server.py b/python/sglang/srt/entrypoints/http_server.py
-index 51c85e6..61f09ba 100644
+index fe9697a0..33a2ddd2 100644
 --- a/python/sglang/srt/entrypoints/http_server.py
 +++ b/python/sglang/srt/entrypoints/http_server.py
-@@ -161,7 +161,11 @@ from sglang.srt.observability.trace import (
+@@ -164,7 +164,11 @@ from sglang.srt.observability.trace import (
  )
  from sglang.srt.parser.reasoning_parser import ReasoningParser
  from sglang.srt.parser.template_manager import TemplateManager
@@ -108,7 +110,7 @@ index 51c85e6..61f09ba 100644
  from sglang.srt.utils import (
      add_prometheus_middleware,
      add_prometheus_track_response_middleware,
-@@ -731,6 +735,7 @@ async def weight_version():
+@@ -784,6 +788,7 @@ async def weight_version():
  
  
  @app.get("/get_server_info")
@@ -116,24 +118,24 @@ index 51c85e6..61f09ba 100644
  async def get_server_info():
      """Get the server information (deprecated - use /server_info instead)."""
      logger.warning(
-@@ -741,6 +746,7 @@ async def get_server_info():
+@@ -794,6 +799,7 @@ async def get_server_info():
  
  
  @app.get("/server_info")
 +@auth_level(AuthLevel.ADMIN_FORCE)
  async def server_info():
-     """Get the server information."""
-     # Returns internal states per DP.
-@@ -753,7 +759,7 @@ async def server_info():
+     """The startup configuration, plus live scheduler state.
+ 
+@@ -813,7 +819,7 @@ async def server_info():
      # server_args.model_config is not serializable but should be excluded by asdict.
      return msgspec_to_builtins(
          {
 -            **dataclasses.asdict(server_args),
 +            **server_args_to_public_dict(server_args),
              **_global_state.scheduler_info,
+             "startup_time": _global_state.tokenizer_manager.startup_time,
              "internal_states": internal_states,
-             "version": __version__,
-@@ -1485,6 +1491,7 @@ async def load_lora_adapter(
+@@ -1548,6 +1554,7 @@ async def load_lora_adapter(
  
  
  @app.api_route("/load_lora_adapter_from_tensors", methods=["POST"])
@@ -142,11 +144,11 @@ index 51c85e6..61f09ba 100644
      obj: Annotated[LoadLoRAAdapterFromTensorsReqInput, Body()], request: Request
  ):
 diff --git a/python/sglang/srt/managers/scheduler.py b/python/sglang/srt/managers/scheduler.py
-index c46a8c5..4f5118e 100644
+index 7dc5be83..f02d16d5 100644
 --- a/python/sglang/srt/managers/scheduler.py
 +++ b/python/sglang/srt/managers/scheduler.py
-@@ -244,7 +244,11 @@ from sglang.srt.plugins import load_plugins
- from sglang.srt.runtime_context import get_parallel, get_server_args
+@@ -291,7 +291,11 @@ from sglang.srt.plugins import load_plugins
+ from sglang.srt.runtime_context import get_context, publish
  from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
  from sglang.srt.sampling.sampling_params import TOP_K_ALL
 -from sglang.srt.server_args import PortArgs, ServerArgs
@@ -156,22 +158,22 @@ index c46a8c5..4f5118e 100644
 +    redact_server_args_dict,
 +)
  from sglang.srt.session.session_controller import SessionController
+ from sglang.srt.speculative.base_spec_worker import BaseSpecWorker
  from sglang.srt.speculative.dflash_utils import validate_dflash_request
- from sglang.srt.speculative.eagle_utils import get_draft_recurrent_hidden_state_spec
-@@ -3874,7 +3878,7 @@ class Scheduler(
-         return success
- 
+@@ -4281,7 +4285,7 @@ class Scheduler(
      def get_internal_state(self, recv_req: GetInternalStateReq):
--        ret = dict(vars(get_server_args()))  # vars returns a ref to obj.__dict__
-+        ret = redact_server_args_dict(vars(get_server_args()))
+         # Resolved config (pristine server_args + post-publish overrides) so a
+         # readback reflects values changed via /set_internal_state, not startup.
+-        ret = get_context().resolved_server_args_dict()
++        ret = redact_server_args_dict(get_context().resolved_server_args_dict())
          ret["last_gen_throughput"] = self.metrics_reporter.last_gen_throughput
-         ret["memory_usage"] = {
-             "weight": round(self.tp_worker.model_runner.weight_load_mem_usage, 2),
+         draft_graph_memory_usage = (
+             None if self.draft_worker is None else self.draft_worker.graph_memory_usage
 diff --git a/python/sglang/srt/managers/tokenizer_manager.py b/python/sglang/srt/managers/tokenizer_manager.py
-index 60b35ea..6f93677 100644
+index 41c9cd21..5a67f8bf 100644
 --- a/python/sglang/srt/managers/tokenizer_manager.py
 +++ b/python/sglang/srt/managers/tokenizer_manager.py
-@@ -114,6 +114,8 @@ from sglang.srt.sampling.sampling_params import SamplingParams
+@@ -138,6 +138,8 @@ from sglang.srt.sampling.sampling_params import SamplingParams
  from sglang.srt.server_args import (
      PortArgs,
      ServerArgs,
@@ -179,22 +181,24 @@ index 60b35ea..6f93677 100644
 +    server_args_to_public_dict,
      set_global_server_args_for_tokenizer,
  )
- from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
-@@ -2590,7 +2592,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
+ from sglang.srt.utils import (
+@@ -2971,7 +2973,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
      ):
          logger.info(log_message)
          to_dump_with_server_args = {
 -            "server_args": self.server_args,
 +            "server_args": server_args_to_public_dict(self.server_args),
+             "config_updates": get_context().overrides_log(),
+             "resolved_config": self._dump_config_snapshot(),
              "requests": data_list.copy(),
-         }
- 
-@@ -2671,9 +2673,9 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
+@@ -3056,11 +3058,11 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
  
                  # Write the data to the file
                  data_to_dump_with_server_args = {
 -                    "server_args": self.server_args,
 +                    "server_args": server_args_to_public_dict(self.server_args),
+                     "config_updates": get_context().overrides_log(),
+                     "resolved_config": self._dump_config_snapshot(),
                      "requests": data_to_dump,
 -                    "launch_command": " ".join(sys.argv),
 +                    "launch_command": " ".join(redact_sensitive_cli_args(sys.argv)),
@@ -202,7 +206,7 @@ index 60b35ea..6f93677 100644
                  with open(filename, "wb") as f:
                      try:
 diff --git a/python/sglang/srt/multimodal/processors/mimo_audio.py b/python/sglang/srt/multimodal/processors/mimo_audio.py
-index 47295e9..4402c4c 100644
+index a0f727e4..55264d51 100644
 --- a/python/sglang/srt/multimodal/processors/mimo_audio.py
 +++ b/python/sglang/srt/multimodal/processors/mimo_audio.py
 @@ -178,11 +178,15 @@ class MiMoAudioPipeline:
@@ -224,7 +228,7 @@ index 47295e9..4402c4c 100644
                      dl_start = time.perf_counter()
                      timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
                      try:
-@@ -205,7 +209,17 @@ class MiMoAudioPipeline:
+@@ -201,7 +205,17 @@ class MiMoAudioPipeline:
                              f"error={type(e).__name__}: {e}, url={audio}"
                          )
                          raise
@@ -243,13 +247,13 @@ index 47295e9..4402c4c 100644
              if AudioDecoder is None:
                  raise RuntimeError(
 diff --git a/python/sglang/srt/multimodal/processors/mimo_v2.py b/python/sglang/srt/multimodal/processors/mimo_v2.py
-index 9139769..c866238 100644
+index 022bb41c..dc7a5d1c 100644
 --- a/python/sglang/srt/multimodal/processors/mimo_v2.py
 +++ b/python/sglang/srt/multimodal/processors/mimo_v2.py
-@@ -487,21 +487,40 @@ class MiMoProcessor:
-     def has_audio_track(path_or_data) -> bool:
-         # In-process probe via torchcodec for bytes/path; ffprobe range
-         # request for HTTP URLs so we do not pre-download the blob here.
+@@ -490,22 +490,41 @@ class MiMoProcessor:
+         # Never hand a client-supplied URL to ffprobe: its internal HTTP client
+         # would bypass the shared domain and redirect policy. Resolve it through
+         # the guarded downloader first, then probe the resulting bytes in-process.
 -        if isinstance(path_or_data, str) and path_or_data.startswith(
 -            ("http://", "https://")
 -        ):
@@ -265,8 +269,9 @@ index 9139769..c866238 100644
 +            scheme = ""
 +        if scheme in {"http", "https"}:
 +            _require_media_source_enabled("SGLANG_ALLOW_REMOTE_MEDIA", "Remote URL")
-             return _ffprobe_has_audio(path_or_data, stdin=None, label=path_or_data)
-+        if scheme and scheme not in {"data", "file"}:
+             timeout = int(os.getenv("REQUEST_TIMEOUT", "10"))
+             path_or_data = download_remote_media(path_or_data, timeout=timeout)
++        elif scheme and scheme not in {"data", "file"}:
 +            _reject_unsupported_media_scheme(path_or_data, scheme)
  
          if isinstance(path_or_data, bytes):
@@ -292,7 +297,7 @@ index 9139769..c866238 100644
          try:
              AudioDecoder(source)
              return True
-@@ -1445,20 +1464,38 @@ class MiMoProcessor:
+@@ -1449,18 +1468,36 @@ class MiMoProcessor:
          if isinstance(image, Image.Image):
              image_obj = image
          elif isinstance(image, str):
@@ -308,10 +313,8 @@ index 9139769..c866238 100644
 +                _require_media_source_enabled(
 +                    "SGLANG_ALLOW_REMOTE_MEDIA", "Remote URL"
 +                )
-                 with requests.get(image, stream=True) as response:
-                     response.raise_for_status()
-                     with BytesIO(response.content) as bio:
-                         image_obj = copy.deepcopy(Image.open(bio))
+                 with BytesIO(download_remote_media(image, timeout=3)) as bio:
+                     image_obj = copy.deepcopy(Image.open(bio))
 -            elif image.startswith("file://"):
 +            elif scheme == "file":
 +                _require_media_source_enabled(
@@ -335,22 +338,24 @@ index 9139769..c866238 100644
          else:
              image_obj = Image.open(BytesIO(image))
 diff --git a/python/sglang/srt/multimodal/processors/moss_vl.py b/python/sglang/srt/multimodal/processors/moss_vl.py
-index 565b0ec..ec5771f 100644
+index 8df4655b..d403f4f2 100644
 --- a/python/sglang/srt/multimodal/processors/moss_vl.py
 +++ b/python/sglang/srt/multimodal/processors/moss_vl.py
-@@ -21,6 +21,11 @@ from sglang.srt.multimodal.processors.base_processor import (
+@@ -20,7 +20,12 @@ from sglang.srt.multimodal.processors.base_processor import (
  from sglang.srt.multimodal.processors.base_processor import (
      MultimodalSpecialTokens,
  )
+-from sglang.srt.utils.common import download_remote_media
 +from sglang.srt.utils.common import (
 +    _media_source_scheme,
 +    _reject_unsupported_media_scheme,
 +    _require_media_source_enabled,
++    download_remote_media,
 +)
  
  
  class MossVLImageProcessor(SGLangBaseProcessor):
-@@ -417,13 +422,17 @@ class MossVLImageProcessor(SGLangBaseProcessor):
+@@ -418,13 +423,17 @@ class MossVLImageProcessor(SGLangBaseProcessor):
              return f.name
  
      def _normalize_video_string(self, value: str) -> Tuple[str, Optional[str]]:
@@ -369,10 +374,10 @@ index 565b0ec..ec5771f 100644
 +        if scheme in {"http", "https"}:
 +            _require_media_source_enabled("SGLANG_ALLOW_REMOTE_MEDIA", "Remote URL")
              timeout = int(os.getenv("REQUEST_TIMEOUT", "10"))
-             response = requests.get(value, stream=True, timeout=timeout)
-             response.raise_for_status()
-@@ -434,7 +443,7 @@ class MossVLImageProcessor(SGLangBaseProcessor):
-                         f.write(chunk)
+             content = download_remote_media(value, timeout=timeout)
+             suffix = os.path.splitext(urlparse(value).path)[1] or ".mp4"
+@@ -432,7 +441,7 @@ class MossVLImageProcessor(SGLangBaseProcessor):
+                 f.write(content)
                  return f.name, f.name
  
 -        if value.startswith("data:"):
@@ -380,7 +385,7 @@ index 565b0ec..ec5771f 100644
              header, encoded = value.split(",", 1)
              mime = header.split(";", 1)[0]
              suffix = ".mp4"
-@@ -448,6 +457,9 @@ class MossVLImageProcessor(SGLangBaseProcessor):
+@@ -446,6 +455,9 @@ class MossVLImageProcessor(SGLangBaseProcessor):
              )
              return temp_path, temp_path
  
@@ -391,7 +396,7 @@ index 565b0ec..ec5771f 100644
              pybase64.b64decode(value, validate=True)
          )
 diff --git a/python/sglang/srt/multimodal/processors/transformers_auto.py b/python/sglang/srt/multimodal/processors/transformers_auto.py
-index 1c348b3..87d201b 100644
+index 1c348b3c..87d201bf 100644
 --- a/python/sglang/srt/multimodal/processors/transformers_auto.py
 +++ b/python/sglang/srt/multimodal/processors/transformers_auto.py
 @@ -12,6 +12,7 @@ from sglang.srt.multimodal.processors.base_processor import (
@@ -412,10 +417,10 @@ index 1c348b3..87d201b 100644
          # Load raw media
          images = self._load_images(image_data)
 diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
-index 506ba98..a83d229 100644
+index 0c6fd759..544f2376 100644
 --- a/python/sglang/srt/server_args.py
 +++ b/python/sglang/srt/server_args.py
-@@ -408,6 +408,51 @@ def add_linear_attn_kernel_backend_choices(choices):
+@@ -444,6 +444,51 @@ def add_linear_attn_kernel_backend_choices(choices):
      LINEAR_ATTN_KERNEL_BACKEND_CHOICES.extend(choices)
  
  
@@ -467,31 +472,32 @@ index 506ba98..a83d229 100644
  @dataclasses.dataclass
  class ServerArgs:
      """Server-wide configuration for SGLang.
-@@ -1104,7 +1149,7 @@ class ServerArgs:
-     ssl_ca_certs: A[Optional[str], "The CA certificates file."] = None
+@@ -1346,7 +1391,7 @@ class ServerArgs:
+     ssl_ca_certs: A[Optional[str], "The CA certificates file.", NS("serving")] = None
      ssl_keyfile_password: A[
-         Optional[str], "The password to decrypt the SSL keyfile."
+         Optional[str], "The password to decrypt the SSL keyfile.", NS("serving")
 -    ] = None
 +    ] = dataclasses.field(default=None, repr=False, metadata={"sensitive": True})
      enable_ssl_refresh: A[
          bool,
          "Enable automatic SSL certificate hot-reloading when cert/key files change on disk. Requires --ssl-certfile and --ssl-keyfile.",
-@@ -1116,11 +1161,11 @@ class ServerArgs:
-     api_key: A[
+@@ -1360,12 +1405,12 @@ class ServerArgs:
          Optional[str],
          "Set API key of the server. It is also used in the OpenAI API compatible server.",
+         NS("serving"),
 -    ] = None
 +    ] = dataclasses.field(default=None, repr=False, metadata={"sensitive": True})
      admin_api_key: A[
          Optional[str],
          "Set admin API key for sensitive management endpoints (e.g. /clear_hicache_storage_backend). When set, admin endpoints require this key and do NOT accept --api-key.",
+         NS("serving"),
 -    ] = None
 +    ] = dataclasses.field(default=None, repr=False, metadata={"sensitive": True})
      served_model_name: A[
          Optional[str],
          "Override the model name returned by the v1/models endpoint in OpenAI API server.",
 diff --git a/python/sglang/srt/utils/auth.py b/python/sglang/srt/utils/auth.py
-index e7ef076..e1688c1 100644
+index e7ef0767..e1688c13 100644
 --- a/python/sglang/srt/utils/auth.py
 +++ b/python/sglang/srt/utils/auth.py
 @@ -167,6 +167,26 @@ def add_api_key_middleware(
@@ -522,11 +528,11 @@ index e7ef076..e1688c1 100644
                  await self.app(scope, receive, send)
                  return
 diff --git a/python/sglang/srt/utils/common.py b/python/sglang/srt/utils/common.py
-index 103a89c..d31399d 100644
+index 053f2cdb..80b9a4d6 100644
 --- a/python/sglang/srt/utils/common.py
 +++ b/python/sglang/srt/utils/common.py
-@@ -1507,6 +1507,64 @@ def get_mm_http_session() -> requests.Session:
-     return session
+@@ -1690,6 +1690,64 @@ CLIENT_MEDIA_EXCEPTIONS = (
+ )
  
  
 +def _require_media_source_enabled(env_name: str, source_kind: str) -> None:
@@ -588,9 +594,9 @@ index 103a89c..d31399d 100644
 +
 +
  def load_audio(
-     audio_file: str, sr: Optional[int] = None, mono: bool = True
+     audio_file: Union[str, bytes], sr: Optional[int] = None, mono: bool = True
  ) -> np.ndarray:
-@@ -1516,19 +1574,24 @@ def load_audio(
+@@ -1699,17 +1757,22 @@ def load_audio(
      # Normalize input: resolve URL / base64 / file:// to bytes or path
      if isinstance(audio_file, bytes):
          source = audio_file
@@ -600,9 +606,7 @@ index 103a89c..d31399d 100644
 -        audio_file.startswith("http://") or audio_file.startswith("https://")
 -    ):
 -        timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
--        with get_mm_http_session().get(audio_file, timeout=timeout) as response:
--            response.raise_for_status()
--            source = response.content
+-        source = download_remote_media(audio_file, timeout=timeout)
 -    elif isinstance(audio_file, str) and audio_file.startswith("file://"):
 -        source = unquote(urlparse(audio_file).path)
      elif isinstance(audio_file, str):
@@ -613,9 +617,7 @@ index 103a89c..d31399d 100644
 +        elif scheme in {"http", "https"}:
 +            _require_media_source_enabled("SGLANG_ALLOW_REMOTE_MEDIA", "Remote URL")
 +            timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
-+            with get_mm_http_session().get(audio_file, timeout=timeout) as response:
-+                response.raise_for_status()
-+                source = response.content
++            source = download_remote_media(audio_file, timeout=timeout)
 +        elif scheme == "file":
 +            _require_media_source_enabled("SGLANG_ALLOW_LOCAL_MEDIA", "Local file")
 +            source = unquote(urlparse(audio_file).path)
@@ -627,7 +629,7 @@ index 103a89c..d31399d 100644
      else:
          raise ValueError(f"Invalid audio format: {audio_file}")
  
-@@ -1681,7 +1744,11 @@ def get_image_bytes(image_file: Union[str, bytes]) -> bytes:
+@@ -1906,18 +1969,27 @@ def get_image_bytes(image_file: Union[str, bytes]) -> bytes:
      """Normalize various image inputs into raw bytes."""
      if isinstance(image_file, bytes):
          return image_file
@@ -638,12 +640,7 @@ index 103a89c..d31399d 100644
 +    if scheme in {"http", "https"}:
 +        _require_media_source_enabled("SGLANG_ALLOW_REMOTE_MEDIA", "Remote URL")
          timeout = int(os.getenv("REQUEST_TIMEOUT", "3"))
-         response = get_mm_http_session().get(image_file, timeout=timeout)
-         try:
-@@ -1690,15 +1757,20 @@ def get_image_bytes(image_file: Union[str, bytes]) -> bytes:
-         finally:
-             response.close()
-         return result
+         return download_remote_media(image_file, timeout=timeout)
 -    if image_file.startswith(("file://", "/")):
 -        with open(image_file, "rb") as f:
 -            return f.read()
@@ -668,7 +665,7 @@ index 103a89c..d31399d 100644
  
  
  def _normalize_video_input(
-@@ -1713,19 +1785,25 @@ def _normalize_video_input(
+@@ -1932,15 +2004,21 @@ def _normalize_video_input(
      if isinstance(video_file, bytes):
          return video_file
      elif isinstance(video_file, str):
@@ -677,11 +674,7 @@ index 103a89c..d31399d 100644
 +        if scheme in {"http", "https"}:
 +            _require_media_source_enabled("SGLANG_ALLOW_REMOTE_MEDIA", "Remote URL")
              timeout = int(os.getenv("REQUEST_TIMEOUT", "10"))
-             with get_mm_http_session().get(
-                 video_file, stream=True, timeout=timeout
-             ) as response:
-                 response.raise_for_status()
-                 return response.content
+             return download_remote_media(video_file, timeout=timeout)
 -        elif video_file.startswith("data:"):
 +        elif scheme == "data":
              _, encoded = video_file.split(",", 1)

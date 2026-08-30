@@ -27,8 +27,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 PATCH_DIR="$REPO_DIR/patches"
-SGL_KERNEL_DIR="${SGL_KERNEL_DIR:-$REPO_DIR/components/sglang/sgl-kernel}"  # overridable for version rebases
-SGL_KERNEL_SRC="$SGL_KERNEL_DIR/python/sgl_kernel"
+SGL_KERNEL_DIR="${SGL_KERNEL_DIR:-}"  # resolved after common.sh (version-aware default)
 
 TARGET_ENV=""
 VERIFY_ONLY=false
@@ -47,6 +46,8 @@ done
 
 # Find conda
 source "$SCRIPT_DIR/common.sh"
+SGL_KERNEL_DIR="${SGL_KERNEL_DIR:-$(default_sgl_kernel_dir)}"
+SGL_KERNEL_SRC="$SGL_KERNEL_DIR/python/sgl_kernel"
 init_conda
 
 if [ -n "$TARGET_ENV" ]; then

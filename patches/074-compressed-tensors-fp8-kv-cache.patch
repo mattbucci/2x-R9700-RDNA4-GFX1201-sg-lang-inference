@@ -1,5 +1,5 @@
 diff --git a/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py b/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py
-index f9d3e2e..f2b4df2 100644
+index 3490fc6a..8c4a9f61 100644
 --- a/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py
 +++ b/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py
 @@ -63,6 +63,7 @@ from sglang.srt.layers.quantization.compressed_tensors.utils import (
@@ -40,7 +40,7 @@ index f9d3e2e..f2b4df2 100644
          from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
  
          if isinstance(layer, FusedMoE):
-@@ -251,6 +261,7 @@ class CompressedTensorsConfig(QuantizationConfig):
+@@ -262,6 +272,7 @@ class CompressedTensorsConfig(QuantizationConfig):
              config=config,
              packed_modules_mapping=packed_modules_mapping,
              linear_fp8_config=linear_fp8_config,
@@ -48,7 +48,7 @@ index f9d3e2e..f2b4df2 100644
          )
  
      @classmethod
-@@ -958,6 +969,43 @@ class CompressedTensorsConfig(QuantizationConfig):
+@@ -1012,6 +1023,43 @@ class CompressedTensorsConfig(QuantizationConfig):
          return weight_quant.num_bits == input_quant.num_bits == 8
  
  
@@ -93,12 +93,12 @@ index f9d3e2e..f2b4df2 100644
  
      def __init__(self, quantization_config: CompressedTensorsConfig):
 diff --git a/python/sglang/srt/models/laguna.py b/python/sglang/srt/models/laguna.py
-index 0373fd0..18e95ae 100644
+index c7c85e3e..c424e326 100644
 --- a/python/sglang/srt/models/laguna.py
 +++ b/python/sglang/srt/models/laguna.py
-@@ -51,7 +51,10 @@ from sglang.srt.layers.vocab_parallel_embedding import (
-     VocabParallelEmbedding,
+@@ -52,7 +52,10 @@ from sglang.srt.layers.vocab_parallel_embedding import (
  )
+ from sglang.srt.lora.utils import get_default_hidden_dim
  from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 -from sglang.srt.model_loader.weight_utils import default_weight_loader
 +from sglang.srt.model_loader.weight_utils import (
@@ -106,9 +106,9 @@ index 0373fd0..18e95ae 100644
 +    maybe_remap_kv_scale_name,
 +)
  from sglang.srt.models.utils import apply_qk_norm
- from sglang.srt.runtime_context import get_forward, get_parallel, get_server_args
+ from sglang.srt.runtime_context import get_exec, get_forward, get_parallel
  from sglang.srt.utils import LazyValue, add_prefix, make_layers
-@@ -631,6 +634,7 @@ class LagunaForCausalLM(nn.Module):
+@@ -657,6 +660,7 @@ class LagunaForCausalLM(nn.Module):
          super().__init__()
          self.pp_group = get_pp_group()
          self.config = config
@@ -116,7 +116,7 @@ index 0373fd0..18e95ae 100644
          self.model = LagunaModel(
              config, quant_config=quant_config, prefix=add_prefix("model", prefix)
          )
-@@ -736,6 +740,10 @@ class LagunaForCausalLM(nn.Module):
+@@ -765,6 +769,10 @@ class LagunaForCausalLM(nn.Module):
              if self.config.tie_word_embeddings and "lm_head.weight" in name:
                  continue
  
@@ -129,7 +129,7 @@ index 0373fd0..18e95ae 100644
              if name.endswith("mlp.experts.e_score_correction_bias"):
 diff --git a/test/registered/unit/layers/quantization/test_compressed_tensors_kv_cache.py b/test/registered/unit/layers/quantization/test_compressed_tensors_kv_cache.py
 new file mode 100644
-index 0000000..e857987
+index 00000000..e8579871
 --- /dev/null
 +++ b/test/registered/unit/layers/quantization/test_compressed_tensors_kv_cache.py
 @@ -0,0 +1,153 @@

@@ -1,16 +1,17 @@
-# SGLang v0.5.16 RDNA4 patches
+# SGLang v0.5.18 RDNA4 patches
 
-This directory contains the **69 active numeric patches** applied to pristine SGLang v0.5.16 for the
-2× Radeon AI PRO R9700 serving stack. The default tree is `/data/sgl-v0516`; the default conda environment
-is `sglang-triton36-v0516`.
+This directory contains the **70 active numeric patches** applied to pristine SGLang v0.5.18 for the
+2× Radeon AI PRO R9700 serving stack. The default tree is `/data/sgl-v0518`; the default conda environment
+is `sglang-triton36-v0518`.
 
 Patch 072 is not part of the series because transformers 5.12.1 supplies the Gemma 4 unified configuration
 and processor. Patch 083 adds the tokenizer-backend correction required for Mistral checkpoints that ship
 `tekken.json`. Patch 003 includes safe fallbacks for both the base CUDA-only `sgl_kernel` imports and the
-optional `infllm_v2` extension reported in [issue #3](https://github.com/mattbucci/2x-R9700-RDNA4-GFX1201-sglang-inference/issues/3). On the v0.5.16 rebase, patch 059 was dropped because its FuseEP dispatcher target was removed upstream, and patch 097 was added as the JIT fused-gate None-bias guard.
+optional `infllm_v2` extension reported in [issue #3](https://github.com/mattbucci/2x-R9700-RDNA4-GFX1201-sglang-inference/issues/3). On the v0.5.16 rebase, patch 059 was dropped because its FuseEP dispatcher target was removed upstream, and patch 097 was added as the JIT fused-gate None-bias guard. The v0.5.18 rebase went 69 → 70: 26 patches were regenerated for upstream's kernel-tree relocation (`sgl-kernel/` → `python/sglang/kernels/aot/`, `sglang.jit_kernel` → `sglang.kernels.ops`), the upstreamed max-head sizing was dropped from 077, and patch 098 was added so `gemma4_unified` resolves to transformers' native `Gemma4UnifiedConfig` (the `Gemma4Config` alias broke the encoder-free 12B at init).
 
 Validation receipts:
 
+- [v0.5.18 rebase](v0518-rebase-2026-08-29.md)
 - [v0.5.16 rebase](v0516-rebase-2026-07-27.md)
 - [v0.5.15 base](v0515-rebase-2026-07-11.md)
 - [North Mini Code and Laguna extension](v0515-north-laguna-2026-07-12.md)
@@ -24,11 +25,11 @@ The supported setup path applies the numeric series in filename order:
 scripts/setup.sh
 ```
 
-For an isolated replay, start with a pristine v0.5.16 worktree and fail immediately on any bad patch:
+For an isolated replay, start with a pristine v0.5.18 worktree and fail immediately on any bad patch:
 
 ```bash
-target=/tmp/sglang-v0516-replay
-git clone --branch v0.5.16 --depth 1 https://github.com/sgl-project/sglang.git "$target"
+target=/tmp/sglang-v0518-replay
+git clone --branch v0.5.18 --depth 1 https://github.com/sgl-project/sglang.git "$target"
 for patch in "$PWD"/patches/0*.patch; do
     git -C "$target" apply --check "$patch"
     git -C "$target" apply "$patch"
@@ -38,9 +39,9 @@ done
 Every series change must pass:
 
 1. **Pristine replay:** every numeric patch applies, with no skips or fallback mode.
-2. **Tree equivalence:** the replayed delta matches the intended `/data/sgl-v0516` delta byte-for-byte.
-3. **No double apply:** each patch is rejected on the fully patched tree. Patch 026 is the documented
-   non-unique-anchor exception and must be checked explicitly.
+2. **Tree equivalence:** the replayed delta matches the intended `/data/sgl-v0518` delta byte-for-byte.
+3. **No double apply:** each patch is rejected on the fully patched tree. (Patch 026 was the documented
+   non-unique-anchor exception through v0.5.16; since it also covers `get_video_feature` it is rejected too.)
 
 Also run `git diff --check`, focused unit/GPU tests, and the affected model capability checks.
 
@@ -48,7 +49,7 @@ Also run `git diff --check`, focused unit/GPU tests, and the affected model capa
 
 | Path | Role |
 |---|---|
-| `/data/sgl-v0516` | Serving and development tree for v0.5.16 plus this series |
+| `/data/sgl-v0518` | Serving and development tree for v0.5.18 plus this series |
 | `patches/` | Reviewable source of truth for the serving-tree delta |
 | temporary pristine worktree | Replay and equivalence validation only |
 
@@ -64,7 +65,7 @@ can be proposed upstream. `Partial` requires a fresh comparison with upstream be
 | 001 | `upstream-sync` | Partial | Supplies model, configuration, attention, and cache compatibility required by the supported model set. |
 | 002 | `rdna4-torch-compile-disable` | Carry | Disables compile paths that stall on HIP for rotary, sampling, and embedding operations. |
 | 003 | `rdna4-sgl-kernel-fallbacks` | Carry | Guards CUDA-only `sgl_kernel` and `infllm_v2` imports and provides safe native fallbacks or sentinels. |
-| 008 | `rdna4-sgl-kernel-build-arch` | Carry | Adds gfx12xx to the native `sgl_kernel` ROCm architecture list. |
+| 008 | `rdna4-sgl-kernel-build-arch` | Carry | Adds gfx12xx to the native `sgl_kernel` ROCm architecture list (`python/sglang/kernels/aot/setup_rocm.py` since v0.5.17). |
 | 060 | `aiter-mxfp4-moe-guard` | Candidate | Guards the optional AITER MXFP4 MoE import when AITER is unavailable. |
 | 063 | `rdna4-relu2-hip-fallback` | Candidate | Provides the squared-ReLU implementation used by Nemotron on HIP. |
 | 094 | `rdna4-batch-invariant-matmul-lds` | Carry | Uses two Triton pipeline stages for HIP batch-invariant MM/BMM so deterministic inference fits gfx1201's 64 KiB LDS limit; non-HIP platforms retain three stages. |
@@ -82,7 +83,7 @@ can be proposed upstream. `Partial` requires a fresh comparison with upstream be
 | 075 | `rdna4-fused-moe-tuner-model-support` | Carry | Adds compressed-tensors FP8 shape discovery and output support for North and Laguna to the MoE tuner. |
 | 076 | `rdna4-sigmoid-topk-hip-fallback` | Carry | Implements correct grouped sigmoid top-k routing when the fused router is disabled. |
 | 078 | `r9700-north-laguna-fp8-moe-configs` | Carry | Installs measured gfx1201 FP8 MoE configurations for North and Laguna. |
-| 079 | `rdna4-fused-sigmoid-router-laguna-bf16-gate` | Candidate | Enables the unified Triton sigmoid router on HIP and keeps Laguna's gate GEMV in checkpoint BF16 before FP32 logits. |
+| 079 | `rdna4-fused-sigmoid-router-laguna-bf16-gate` | Candidate | Enables the unified Triton sigmoid router on HIP (keeping the removed upstream `SGLANG_OPT_USE_JIT_KERNEL_FUSED_TOPK` gate HIP-only so 076's torch fallback stays reachable) and keeps Laguna's gate GEMV in checkpoint BF16 before FP32 logits. |
 | 097 | `moe-jit-fused-gate-none-bias-guard` | Candidate | Substitutes a zero bias for a None correction_bias before the JIT fused-gate kernel so bias-free sigmoid routers (Cohere2/North) do not fault under v0.5.16's default-on `SGLANG_OPT_USE_JIT_KERNEL_FUSED_TOPK`. |
 
 ### Attention and numerics
@@ -92,7 +93,7 @@ can be proposed upstream. `Partial` requires a fresh comparison with upstream be
 | 011 | `rdna4-triton-attention-fp32` | Carry | Uses FP32 value accumulation in Triton attention to limit long-context BF16 error. |
 | 027 | `rdna4-softcap-fp32` | Carry | Computes attention and logits softcapping in FP32. |
 | 065 | `rdna4-split-kv-tree-verify` | Carry | Adds an opt-in split-KV speculative-verification kernel for mid-depth workloads; it remains off by default. |
-| 077 | `triton-mixed-head-fp8-kv-correctness` | Candidate | Sizes scratch buffers for unequal query/KV head counts and derives descales from the actual KV dtype. |
+| 077 | `triton-mixed-head-fp8-kv-correctness` | Candidate | Derives KV descales from the actual cache dtype and saturates before the ROCm FP8 store; the unequal-head scratch sizing was upstreamed in v0.5.18 (`ModelConfig.get_max_num_attention_heads`). |
 | 080 | `laguna-bf16-attention-allreduce` | Candidate | Lets Laguna use its native BF16 attention collective while retaining the defensive HIP FP32 default elsewhere. |
 | 081 | `rdna4-triton-rmsnorm-laguna-fused-qk` | Candidate | Extends the HIP Triton RMSNorm path to standard weights and fuses Laguna's query/key head norms. |
 | 084 | `rdna4-qwen3moe-bf16-attention-allreduce` | Candidate | Opts Qwen3-MoE (coder-30b, coder-reap-25b) out of the HIP FP32 attention all-reduce, using the BF16 collective. Measured +1-3% single-user decode, coherent; FP32 stays the default for recurrent hybrids. |
@@ -139,8 +140,9 @@ can be proposed upstream. `Partial` requires a fresh comparison with upstream be
 | 023 | `gemma4-moe-mlp-no-quant-config` | Carry | Chooses BF16 or quantized dense Gemma MLP construction from the checkpoint ignore rules. |
 | 024 | `gemma4-mm-towers-no-quant-config` | Carry | Loads vision and audio towers through their preserved BF16 Linear modules. |
 | 025 | `gemma4-vision-pooler-padding-fp32` | Carry | Performs vision-pooler padding in FP32 to avoid overflow. |
-| 026 | `gemma4-mm-video-per-frame-batching` | Carry | Processes video frames individually to avoid invalid batched pooler shapes and peak allocation. |
+| 026 | `gemma4-mm-video-per-frame-batching` | Carry | Processes image and video frames individually through the vision tower to avoid invalid batched pooler shapes and the all-frames position one-hot (~1.15 GiB for 12 frames) that OOMs a 128K dense server. |
 | 061 | `gemma4-mm-pp-wrap-restore` | Carry | Restores correct pipeline-parallel wrapping for Gemma multimodal towers. |
+| 098 | `gemma4-unified-native-config` | Candidate | Registers transformers' native `Gemma4UnifiedConfig` for `model_type=gemma4_unified` (alias onto `Gemma4Config` only as the fallback for older transformers), so the encoder-free 12B gets `vision_config.model_patch_size`. |
 
 ### Model, parser, and speculative-decode plumbing
 
@@ -170,7 +172,7 @@ can be proposed upstream. `Partial` requires a fresh comparison with upstream be
 
 | Component | Version |
 |---|---|
-| SGLang | v0.5.16 plus this 69-patch series |
+| SGLang | v0.5.18 plus this 70-patch series |
 | transformers | 5.12.1 |
 | Triton | 3.6.0 |
 | PyTorch | 2.11.0+rocm7.2 |
@@ -180,9 +182,9 @@ can be proposed upstream. `Partial` requires a fresh comparison with upstream be
 Build the optional native components with:
 
 ```bash
-scripts/setup_sgl_kernel.sh --env sglang-triton36-v0516
-scripts/build_awq_gemv.sh --env sglang-triton36-v0516
-scripts/build_skinny_gemms_int4.sh --env sglang-triton36-v0516
+scripts/setup_sgl_kernel.sh --env sglang-triton36-v0518
+scripts/build_awq_gemv.sh --env sglang-triton36-v0518
+scripts/build_skinny_gemms_int4.sh --env sglang-triton36-v0518
 ```
 
 ## Related documentation

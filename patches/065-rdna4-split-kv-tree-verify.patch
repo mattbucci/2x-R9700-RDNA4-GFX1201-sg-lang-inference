@@ -1,78 +1,8 @@
-diff --git a/python/sglang/srt/layers/attention/triton_backend.py b/python/sglang/srt/layers/attention/triton_backend.py
-index 3127f6c75f..9b72943846 100644
---- a/python/sglang/srt/layers/attention/triton_backend.py
-+++ b/python/sglang/srt/layers/attention/triton_backend.py
-@@ -1,5 +1,6 @@
- from __future__ import annotations
- 
-+import os
- from dataclasses import dataclass
- from typing import TYPE_CHECKING, List, Optional
- 
-@@ -27,6 +28,13 @@ from sglang.srt.mem_cache.memory_pool import KVWriteLoc
- from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool
- from sglang.srt.model_executor.cuda_graph_config import cuda_graph_fully_disabled
- from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
-+
-+# RDNA4 (gfx1201) opt-in split-KV (flash-decoding) tree-verify for spec-decode (patch 065,
-+# restored on v0.5.14). v0.5.14's native verify_splitkv is hard-gated to gfx95/CDNA4
-+# (is_gfx95_supported()), so it never fires on RDNA4 — this is the gfx1201 path. The default
-+# extend verify reads the deep prefix KV unsplit (~2.7s @244K); this splits it across SMs like
-+# decode does. Off by default; SGLANG_TREE_VERIFY_SPLITKV=1 enables it (launch.sh --spec sets it).
-+_TREE_VERIFY_SPLITKV = os.environ.get("SGLANG_TREE_VERIFY_SPLITKV", "") in ("1", "true", "True")
- from sglang.srt.runtime_context import get_parallel
- from sglang.srt.speculative.spec_utils import (
-     draft_kv_indices_buffer_width,
-@@ -1364,6 +1372,44 @@ class TritonAttnBackend(AttentionBackend):
-         ):
-             return o
- 
-+        # RDNA4 task #10 (opt-in): split-KV tree-verify reads the deep prefix KV split across
-+        # SMs (decode-style flash-decoding) instead of the unsplit extend prefill kernel that
-+        # leaves ~15/16 of SMs idle (~2.7s @244K). Standard GQA verify only; falls through to
-+        # the stock kernel for SWA/MLA/no-mask/decoupled-head-dim. v0.5.14's native verify_splitkv
-+        # above is gfx95-only, so use_verify_splitkv is False on RDNA4 — this is the gfx1201 path.
-+        if (
-+            _TREE_VERIFY_SPLITKV
-+            and forward_batch.forward_mode.is_target_verify()
-+            and sliding_window_size == -1
-+            and not self.use_mla
-+            and self.forward_metadata.custom_mask is not None
-+            and layer.qk_head_dim == layer.v_head_dim
-+        ):
-+            from sglang.srt.layers.attention.triton_ops.tree_verify_attention import (
-+                tree_verify_attention_fwd,
-+            )
-+
-+            tree_verify_attention_fwd(
-+                q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
-+                k.contiguous(),
-+                v.contiguous(),
-+                o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
-+                self.token_to_kv_pool.get_key_buffer(layer.layer_id),
-+                self.token_to_kv_pool.get_value_buffer(layer.layer_id),
-+                self.forward_metadata.qo_indptr,
-+                kv_indptr,
-+                kv_indices,
-+                self.forward_metadata.custom_mask,
-+                self.forward_metadata.mask_indptr,
-+                self.forward_metadata.max_extend_len,
-+                layer.scaling,
-+                logit_cap=logits_soft_cap,
-+                k_descale=k_descale,
-+                v_descale=v_descale,
-+                max_kv_splits=self.max_kv_splits,
-+            )
-+            return o
-+
-         self.extend_attention_fwd(
-             q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
-             k.contiguous(),
-diff --git a/python/sglang/srt/layers/attention/triton_ops/tree_verify_attention.py b/python/sglang/srt/layers/attention/triton_ops/tree_verify_attention.py
+diff --git a/python/sglang/kernels/ops/attention/tree_verify_attention.py b/python/sglang/kernels/ops/attention/tree_verify_attention.py
 new file mode 100644
-index 0000000000..1986dd968c
+index 00000000..e92fec5a
 --- /dev/null
-+++ b/python/sglang/srt/layers/attention/triton_ops/tree_verify_attention.py
++++ b/python/sglang/kernels/ops/attention/tree_verify_attention.py
 @@ -0,0 +1,360 @@
 +"""Split-KV (flash-decoding) tree-verify attention for RDNA4 (task #10).
 +
@@ -95,7 +25,7 @@ index 0000000000..1986dd968c
 +import triton
 +import triton.language as tl
 +
-+from sglang.srt.layers.attention.triton_ops.merge_state import merge_state_triton
++from sglang.kernels.ops.attention.merge_state import merge_state_triton
 +
 +try:
 +    from sglang.srt.utils import is_hip
@@ -434,3 +364,73 @@ index 0000000000..1986dd968c
 +    merged, _ = merge_state_triton(pre_o, pre_lse, suf_o, suf_lse)
 +    o.copy_(merged.to(o.dtype))
 +    return o
+diff --git a/python/sglang/srt/layers/attention/triton_backend.py b/python/sglang/srt/layers/attention/triton_backend.py
+index 766cb500..34dc8653 100644
+--- a/python/sglang/srt/layers/attention/triton_backend.py
++++ b/python/sglang/srt/layers/attention/triton_backend.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import os
+ from dataclasses import dataclass
+ from typing import TYPE_CHECKING, List, Optional
+ 
+@@ -33,6 +34,13 @@ from sglang.srt.model_executor.cuda_graph_config import (
+     cuda_graph_fully_disabled,
+ )
+ from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
++
++# RDNA4 (gfx1201) opt-in split-KV (flash-decoding) tree-verify for spec-decode (patch 065,
++# restored on v0.5.14). v0.5.14's native verify_splitkv is hard-gated to gfx95/CDNA4
++# (is_gfx95_supported()), so it never fires on RDNA4 — this is the gfx1201 path. The default
++# extend verify reads the deep prefix KV unsplit (~2.7s @244K); this splits it across SMs like
++# decode does. Off by default; SGLANG_TREE_VERIFY_SPLITKV=1 enables it (launch.sh --spec sets it).
++_TREE_VERIFY_SPLITKV = os.environ.get("SGLANG_TREE_VERIFY_SPLITKV", "") in ("1", "true", "True")
+ from sglang.srt.runtime_context import get_parallel, get_spec
+ from sglang.srt.speculative.spec_utils import (
+     draft_kv_indices_buffer_width,
+@@ -1467,6 +1475,44 @@ class TritonAttnBackend(AttentionBackend):
+         ):
+             return o
+ 
++        # RDNA4 task #10 (opt-in): split-KV tree-verify reads the deep prefix KV split across
++        # SMs (decode-style flash-decoding) instead of the unsplit extend prefill kernel that
++        # leaves ~15/16 of SMs idle (~2.7s @244K). Standard GQA verify only; falls through to
++        # the stock kernel for SWA/MLA/no-mask/decoupled-head-dim. v0.5.14's native verify_splitkv
++        # above is gfx95-only, so use_verify_splitkv is False on RDNA4 — this is the gfx1201 path.
++        if (
++            _TREE_VERIFY_SPLITKV
++            and forward_batch.forward_mode.is_target_verify()
++            and sliding_window_size == -1
++            and not self.use_mla
++            and self.forward_metadata.custom_mask is not None
++            and layer.qk_head_dim == layer.v_head_dim
++        ):
++            from sglang.kernels.ops.attention.tree_verify_attention import (
++                tree_verify_attention_fwd,
++            )
++
++            tree_verify_attention_fwd(
++                q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
++                k.contiguous(),
++                v.contiguous(),
++                o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
++                self.token_to_kv_pool.get_key_buffer(layer.layer_id),
++                self.token_to_kv_pool.get_value_buffer(layer.layer_id),
++                self.forward_metadata.qo_indptr,
++                kv_indptr,
++                kv_indices,
++                self.forward_metadata.custom_mask,
++                self.forward_metadata.mask_indptr,
++                self.forward_metadata.max_extend_len,
++                layer.scaling,
++                logit_cap=logits_soft_cap,
++                k_descale=k_descale,
++                v_descale=v_descale,
++                max_kv_splits=self.max_kv_splits,
++            )
++            return o
++
+         self.extend_attention_fwd(
+             q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
+             k.contiguous(),

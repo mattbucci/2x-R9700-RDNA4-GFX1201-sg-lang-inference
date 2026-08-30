@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/utils/hf_transformers/tokenizer.py b/python/sglang/srt/utils/hf_transformers/tokenizer.py
-index ad4eb4e..9e7f1dc 100644
+index a992bae2..f4b90057 100644
 --- a/python/sglang/srt/utils/hf_transformers/tokenizer.py
 +++ b/python/sglang/srt/utils/hf_transformers/tokenizer.py
-@@ -160,6 +160,33 @@ def _resolve_tokenizer_name(tokenizer_name, kwargs):
+@@ -172,6 +172,33 @@ def _resolve_tokenizer_name(tokenizer_name, kwargs):
      return tokenizer_name
  
  
@@ -36,8 +36,8 @@ index ad4eb4e..9e7f1dc 100644
  def _auto_tokenizer_from_pretrained(tokenizer_name, *args, **common_kwargs):
      """Call ``AutoTokenizer.from_pretrained`` with error handling."""
      try:
-@@ -488,6 +515,9 @@ def get_tokenizer(
-             kwargs["use_fast"] = True
+@@ -509,6 +536,9 @@ def get_tokenizer(
+         return patch_tokenizer(tokenizer)
  
      tokenizer_name = _resolve_tokenizer_name(tokenizer_name, kwargs)
 +    _set_laguna_regex_preservation_default(
@@ -47,7 +47,7 @@ index ad4eb4e..9e7f1dc 100644
      common_kwargs = dict(
          trust_remote_code=trust_remote_code,
 diff --git a/test/registered/unit/utils/test_hf_transformers.py b/test/registered/unit/utils/test_hf_transformers.py
-index 547a912..34e815d 100644
+index 27c04941..8110e419 100644
 --- a/test/registered/unit/utils/test_hf_transformers.py
 +++ b/test/registered/unit/utils/test_hf_transformers.py
 @@ -5,9 +5,11 @@ context length, GGUF detection, etc.) that don't require actual model files.
@@ -70,7 +70,7 @@ index 547a912..34e815d 100644
  from sglang.srt.utils.hf_transformers.tokenizer import _fix_special_tokens_pattern
  from sglang.srt.utils.hf_transformers_patches import normalize_rope_scaling_compat
  from sglang.test.ci.ci_register import register_cpu_ci
-@@ -99,6 +102,63 @@ class TestImageProcessorKwargsPatch(unittest.TestCase):
+@@ -165,6 +168,63 @@ class TestImageProcessorKwargsPatch(unittest.TestCase):
          self.assertEqual(signature.call_count, 1)
  
  

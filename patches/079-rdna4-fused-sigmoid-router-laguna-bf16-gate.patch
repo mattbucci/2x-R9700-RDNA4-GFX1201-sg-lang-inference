@@ -1,25 +1,27 @@
 diff --git a/python/sglang/srt/layers/moe/topk.py b/python/sglang/srt/layers/moe/topk.py
-index 43a7d03..b89464a 100644
+index f57c1727..0fd8ce27 100644
 --- a/python/sglang/srt/layers/moe/topk.py
 +++ b/python/sglang/srt/layers/moe/topk.py
-@@ -880,8 +880,13 @@ def fused_topk(
+@@ -923,8 +923,15 @@ def fused_topk(
                  topk_weights *= (
                      routed_scaling_factor if routed_scaling_factor is not None else 1.0
                  )
--        elif _is_cuda and envs.SGLANG_OPT_USE_JIT_KERNEL_FUSED_TOPK.get():
+-        elif _is_cuda:
 -            # Unified Triton router (subsumes the AOT topk_sigmoid CUDA kernel).
-+        elif (
-+            _is_cuda or _is_hip
-+        ) and envs.SGLANG_OPT_USE_JIT_KERNEL_FUSED_TOPK.get():
++        elif _is_cuda or (
++            _is_hip and get_bool_env_var("SGLANG_OPT_USE_JIT_KERNEL_FUSED_TOPK", "true")
++        ):
 +            # Unified Triton router. Unlike the AOT topk_sigmoid HIP op, this
 +            # kernel is backend-portable and runs correctly on gfx1201. It also
 +            # collapses sigmoid + bias + top-k + gather + renormalize into one
-+            # launch instead of the multi-op torch fallback below.
-             from sglang.jit_kernel.moe_fused_gate import (
++            # launch instead of the multi-op torch fallback below. Upstream
++            # dropped the SGLANG_OPT_USE_JIT_KERNEL_FUSED_TOPK gate; it is kept
++            # for HIP only so the torch fallback stays reachable for A/B runs.
+             from sglang.kernels.ops.moe.moe_fused_gate import (
                  moe_fused_gate as _jit_moe_fused_gate,
              )
 diff --git a/python/sglang/srt/models/cohere2_moe.py b/python/sglang/srt/models/cohere2_moe.py
-index aa3e39a..1ca05dc 100644
+index aa3e39a2..1ca05dce 100644
 --- a/python/sglang/srt/models/cohere2_moe.py
 +++ b/python/sglang/srt/models/cohere2_moe.py
 @@ -248,7 +248,10 @@ class Cohere2MoeSparseMoeBlock(nn.Module):
@@ -35,10 +37,10 @@ index aa3e39a..1ca05dc 100644
              routing_method_type = (
                  RoutingMethodType.SigmoidRenorm
 diff --git a/python/sglang/srt/models/laguna.py b/python/sglang/srt/models/laguna.py
-index 18e95ae..70d31df 100644
+index c424e326..8ec955bf 100644
 --- a/python/sglang/srt/models/laguna.py
 +++ b/python/sglang/srt/models/laguna.py
-@@ -121,7 +121,7 @@ class LagunaMoEGate(nn.Module):
+@@ -122,7 +122,7 @@ class LagunaMoEGate(nn.Module):
      ):
          super().__init__()
          self.weight = nn.Parameter(
@@ -47,7 +49,7 @@ index 18e95ae..70d31df 100644
          )
          # Released checkpoint stores this under `mlp.experts.e_score_correction_bias`
          # (load_weights remaps it) but every value is 0.0; zero-init keeps us
-@@ -132,7 +132,11 @@ class LagunaMoEGate(nn.Module):
+@@ -133,7 +133,11 @@ class LagunaMoEGate(nn.Module):
          )
  
      def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -61,34 +63,43 @@ index 18e95ae..70d31df 100644
  
  class LagunaMoE(nn.Module):
 diff --git a/test/registered/unit/layers/moe/test_rdna4_sigmoid_topk.py b/test/registered/unit/layers/moe/test_rdna4_sigmoid_topk.py
-index b735084..244df02 100644
+index b7350846..4aff91b1 100644
 --- a/test/registered/unit/layers/moe/test_rdna4_sigmoid_topk.py
 +++ b/test/registered/unit/layers/moe/test_rdna4_sigmoid_topk.py
-@@ -29,6 +29,11 @@ class TestRDNA4SigmoidTopK(CustomTestCase):
+@@ -1,5 +1,6 @@
+ """CPU regression coverage for the HIP sigmoid top-k fallback."""
+ 
++import os
+ import unittest
+ from unittest.mock import patch
+ 
+@@ -29,6 +30,12 @@ class TestRDNA4SigmoidTopK(CustomTestCase):
              patch.object(topk_module, "_is_hip", True),
              patch.object(topk_module, "_is_cuda", False),
              patch.object(topk_module, "_use_aiter", False),
-+            patch.object(
-+                topk_module.envs.SGLANG_OPT_USE_JIT_KERNEL_FUSED_TOPK,
-+                "get",
-+                return_value=False,
++            # Upstream dropped the JIT gate; patch 079 keeps it HIP-only as a
++            # plain env var read at call time, so disable it to reach the
++            # torch fallback under test.
++            patch.dict(
++                os.environ, {"SGLANG_OPT_USE_JIT_KERNEL_FUSED_TOPK": "false"}
 +            ),
              patch.object(
                  topk_module,
                  "topk_sigmoid",
-@@ -67,6 +72,11 @@ class TestRDNA4SigmoidTopK(CustomTestCase):
+@@ -67,6 +74,12 @@ class TestRDNA4SigmoidTopK(CustomTestCase):
              patch.object(topk_module, "_is_hip", True),
              patch.object(topk_module, "_is_cuda", False),
              patch.object(topk_module, "_use_aiter", False),
-+            patch.object(
-+                topk_module.envs.SGLANG_OPT_USE_JIT_KERNEL_FUSED_TOPK,
-+                "get",
-+                return_value=False,
++            # Upstream dropped the JIT gate; patch 079 keeps it HIP-only as a
++            # plain env var read at call time, so disable it to reach the
++            # torch fallback under test.
++            patch.dict(
++                os.environ, {"SGLANG_OPT_USE_JIT_KERNEL_FUSED_TOPK": "false"}
 +            ),
          ):
              weights, ids = topk_module.fused_topk(
                  hidden_states=hidden_states,
-@@ -84,6 +94,39 @@ class TestRDNA4SigmoidTopK(CustomTestCase):
+@@ -84,6 +97,37 @@ class TestRDNA4SigmoidTopK(CustomTestCase):
          torch.testing.assert_close(ids, expected_ids.to(torch.int32), rtol=0, atol=0)
          torch.testing.assert_close(weights, expected_weights, rtol=0, atol=0)
  
@@ -102,13 +113,11 @@ index b735084..244df02 100644
 +            patch.object(topk_module, "_is_hip", True),
 +            patch.object(topk_module, "_is_cuda", False),
 +            patch.object(topk_module, "_use_aiter", False),
-+            patch.object(
-+                topk_module.envs.SGLANG_OPT_USE_JIT_KERNEL_FUSED_TOPK,
-+                "get",
-+                return_value=True,
++            patch.dict(
++                os.environ, {"SGLANG_OPT_USE_JIT_KERNEL_FUSED_TOPK": "true"}
 +            ),
 +            patch(
-+                "sglang.jit_kernel.moe_fused_gate.moe_fused_gate",
++                "sglang.kernels.ops.moe.moe_fused_gate.moe_fused_gate",
 +                return_value=(expected_weights, expected_ids),
 +            ) as fused_gate,
 +        ):
@@ -130,7 +139,7 @@ index b735084..244df02 100644
      unittest.main()
 diff --git a/test/registered/unit/models/test_laguna_router.py b/test/registered/unit/models/test_laguna_router.py
 new file mode 100644
-index 0000000..c442a91
+index 00000000..c442a910
 --- /dev/null
 +++ b/test/registered/unit/models/test_laguna_router.py
 @@ -0,0 +1,33 @@

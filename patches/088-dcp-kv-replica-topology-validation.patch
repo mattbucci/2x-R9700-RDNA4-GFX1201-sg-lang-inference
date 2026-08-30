@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/layers/dcp/__init__.py b/python/sglang/srt/layers/dcp/__init__.py
-index eb6aeea..b82a77a 100644
+index 54ae1919..9798d6db 100644
 --- a/python/sglang/srt/layers/dcp/__init__.py
 +++ b/python/sglang/srt/layers/dcp/__init__.py
-@@ -48,6 +48,7 @@ from sglang.srt.layers.dcp.layout import (
+@@ -50,6 +50,7 @@ from sglang.srt.layers.dcp.layout import (
      filter_dcp_local_kv_indices,
      get_dcp_lens,
      update_local_kv_lens_for_dcp,
@@ -10,14 +10,14 @@ index eb6aeea..b82a77a 100644
  )
  from sglang.srt.layers.dcp.metadata import DecodeContextParallelMetadata
  
-@@ -75,4 +76,5 @@ __all__ = [
+@@ -79,4 +80,5 @@ __all__ = [
      "get_attention_dcp_world_size",
      "get_dcp_lens",
      "update_local_kv_lens_for_dcp",
 +    "validate_mha_dcp_kv_head_topology",
  ]
 diff --git a/python/sglang/srt/layers/dcp/layout.py b/python/sglang/srt/layers/dcp/layout.py
-index 4157e2e..102cd3b 100644
+index 56f9a193..a56aca5e 100644
 --- a/python/sglang/srt/layers/dcp/layout.py
 +++ b/python/sglang/srt/layers/dcp/layout.py
 @@ -20,6 +20,39 @@ import torch
@@ -61,52 +61,48 @@ index 4157e2e..102cd3b 100644
      lens: torch.Tensor,
      dcp_size: int,
 diff --git a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/srt/model_executor/model_runner.py
-index 547494b..bd20ea2 100644
+index 1f19d5cc..43c58667 100644
 --- a/python/sglang/srt/model_executor/model_runner.py
 +++ b/python/sglang/srt/model_executor/model_runner.py
-@@ -77,6 +77,7 @@ from sglang.srt.layers.attention.dsa.utils import is_dsa_enable_prefill_cp
- from sglang.srt.layers.cp.utils import (
+@@ -78,6 +78,7 @@ from sglang.srt.layers.cp.utils import (
      get_cp_strategy,
+     is_cp_v2_active,
  )
 +from sglang.srt.layers.dcp import validate_mha_dcp_kv_head_topology
  from sglang.srt.layers.logits_processor import LogitsProcessorOutput
  from sglang.srt.layers.sampler import create_sampler
- from sglang.srt.layers.torchao_utils import apply_torchao_config_to_model
-@@ -280,6 +281,16 @@ class ModelRunner:
+ from sglang.srt.layers.utils.cp_utils import is_mla_prefill_cp_enabled
+@@ -345,6 +346,16 @@ class ModelRunner:
          self.is_hybrid_swa = model_config.is_hybrid_swa
          self.is_hybrid_swa_compress = model_config.is_hybrid_swa_compress
          self.use_mla_backend = self.model_config.attention_arch == AttentionArch.MLA
 +        if (
-+            self.dcp_size > 1
++            server_args.dcp_size > 1
 +            and self.model_config.attention_arch == AttentionArch.MHA
 +        ):
 +            attention_tp_size = self.ps.attn_tp_size
 +            validate_mha_dcp_kv_head_topology(
 +                attention_tp_size=attention_tp_size,
 +                total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
-+                dcp_size=self.dcp_size,
++                dcp_size=server_args.dcp_size,
 +            )
          self.attention_chunk_size = model_config.attention_chunk_size
          self.enable_elastic_ep = server_args.elastic_ep_backend is not None
          self.forward_pass_id = 0
 diff --git a/test/registered/dcp/test_dcp_layout_unit.py b/test/registered/dcp/test_dcp_layout_unit.py
-index ec053d5..bde8d5d 100644
+index 53242ec0..3ae27088 100644
 --- a/test/registered/dcp/test_dcp_layout_unit.py
 +++ b/test/registered/dcp/test_dcp_layout_unit.py
-@@ -16,7 +16,10 @@ import unittest
- 
- import torch
- 
--from sglang.srt.layers.dcp.layout import get_dcp_lens
-+from sglang.srt.layers.dcp.layout import (
-+    get_dcp_lens,
+@@ -25,6 +25,7 @@ from sglang.srt.layers.attention.triton_backend import TritonAttnBackend
+ from sglang.srt.layers.dcp.layout import (
+     filter_dcp_local_chunk_kv_indices,
+     get_dcp_lens,
 +    validate_mha_dcp_kv_head_topology,
-+)
- from sglang.test.ci.ci_register import register_cpu_ci
- 
- register_cpu_ci(est_time=10, suite="base-a-test-cpu")
-@@ -87,5 +90,50 @@ class TestGetDcpLens(unittest.TestCase):
-         self.assertTrue(torch.equal(get_dcp_lens(lens, 1, 0), lens))
+ )
+ from sglang.srt.layers.linear import QKVParallelLinear
+ from sglang.srt.mem_cache.allocator.paged import PagedTokenToKVPoolAllocator
+@@ -503,5 +504,50 @@ class TestGetDcpLens(CustomTestCase):
+         pool.full_kv_pool.get_kv_buffer_shape.assert_called_once_with()
  
  
 +class TestMhaDcpKvHeadTopology(unittest.TestCase):

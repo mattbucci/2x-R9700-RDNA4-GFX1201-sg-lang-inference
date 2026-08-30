@@ -1,0 +1,36 @@
+diff --git a/python/sglang/srt/utils/hf_transformers/common.py b/python/sglang/srt/utils/hf_transformers/common.py
+index de126595..5768ab84 100644
+--- a/python/sglang/srt/utils/hf_transformers/common.py
++++ b/python/sglang/srt/utils/hf_transformers/common.py
+@@ -194,13 +194,27 @@ except ImportError:
+     pass
+ 
+ 
++# transformers >= 5.12 ships Gemma4UnifiedConfig natively; its
++# Gemma4UnifiedVisionConfig derives `model_patch_size` (patch_size *
++# pooling_kernel_size), which the encoder-free Gemma4UnifiedVisionEmbedder
++# reads. Aliasing the model type onto Gemma4Config instead yields the SigLIP
++# Gemma4VisionConfig and the unified model fails at init with
++# "'Gemma4VisionConfig' object has no attribute 'model_patch_size'". Keep the
++# alias only as the fallback for older transformers (same shape as Mellum above).
+ try:
+-    from transformers import Gemma4Config as _HFGemma4Config
++    import transformers as _hf_transformers
++
++    _HFGemma4UnifiedConfig = getattr(_hf_transformers, "Gemma4UnifiedConfig", None)
++
++    if _HFGemma4UnifiedConfig is not None:
++        _CONFIG_REGISTRY["gemma4_unified"] = _HFGemma4UnifiedConfig
++    else:
++        from transformers import Gemma4Config as _HFGemma4Config
+ 
+-    class _Gemma4UnifiedConfigAlias(_HFGemma4Config):
+-        model_type = "gemma4_unified"
++        class _Gemma4UnifiedConfigAlias(_HFGemma4Config):
++            model_type = "gemma4_unified"
+ 
+-    _CONFIG_REGISTRY["gemma4_unified"] = _Gemma4UnifiedConfigAlias
++        _CONFIG_REGISTRY["gemma4_unified"] = _Gemma4UnifiedConfigAlias
+ except ImportError:
+     pass
+ 

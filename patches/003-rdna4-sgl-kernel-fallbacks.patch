@@ -1,7 +1,7 @@
-diff --git a/sgl-kernel/python/sgl_kernel/__init__.py b/sgl-kernel/python/sgl_kernel/__init__.py
-index 1632d64..16e9fa1 100644
---- a/sgl-kernel/python/sgl_kernel/__init__.py
-+++ b/sgl-kernel/python/sgl_kernel/__init__.py
+diff --git a/python/sglang/kernels/aot/python/sgl_kernel/__init__.py b/python/sglang/kernels/aot/python/sgl_kernel/__init__.py
+index f725f62c..c22ae857 100644
+--- a/python/sglang/kernels/aot/python/sgl_kernel/__init__.py
++++ b/python/sglang/kernels/aot/python/sgl_kernel/__init__.py
 @@ -15,8 +15,12 @@ else:
          _preload_cuda_library,
      )
@@ -17,7 +17,7 @@ index 1632d64..16e9fa1 100644
  
      # Preload the CUDA library to avoid the issue of libcudart.so.12 not found
      if torch.version.cuda is not None:
-@@ -68,10 +72,17 @@ else:
+@@ -66,10 +70,17 @@ else:
          shuffle_rows,
      )
      from sgl_kernel.grammar import apply_token_bitmask_inplace_cuda

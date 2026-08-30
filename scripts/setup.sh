@@ -1,5 +1,5 @@
 #!/bin/bash
-# Version-constrained RDNA4 inference setup: SGLang v0.5.15 + numbered patch series
+# Version-constrained RDNA4 inference setup: SGLang v0.5.18 + numbered patch series
 # + system RCCL + Triton 3.6.0.
 #
 # No custom RCCL build. The repository's ordered patches are applied to a
@@ -45,9 +45,13 @@ IMAGEIO_VERSION="${IMAGEIO_VERSION:-2.37.3}"
 IMAGEIO_FFMPEG_VERSION="${IMAGEIO_FFMPEG_VERSION:-0.6.0}"
 PILLOW_VERSION="${PILLOW_VERSION:-12.3.0}"
 LIBROSA_VERSION="${LIBROSA_VERSION:-0.11.0}"
+# torchcodec must match the torch ABI: 0.11.x is the torch-2.11 series (the
+# v0.5.18 CUDA pyproject pins 0.15.0 for torch 2.13, which we do not run).
+TORCHCODEC_VERSION="${TORCHCODEC_VERSION:-0.11.1}"
+NUMBA_VERSION="${NUMBA_VERSION:-0.65.1}"
 
 SGLANG_REPO="https://github.com/sgl-project/sglang.git"
-SGLANG_TAG="${SGLANG_TAG:-v0.5.16}"  # live baseline promoted 2026-07-27; overridable for version rebases
+SGLANG_TAG="${SGLANG_TAG:-v0.5.18}"  # live baseline promoted 2026-08-29; overridable for version rebases
 SGLANG_COMMIT="${SGLANG_COMMIT:-}"
 STRICT_PATCHES="${STRICT_PATCHES:-0}"
 TRITON_PYPI_FALLBACK="${TRITON_PYPI_FALLBACK:-1}"
@@ -223,9 +227,45 @@ if [ "$SKIP_ENV" = false ]; then
         echo "  Install it, then re-run: pacman -S rust   (Arch/EndeavourOS)  |  rustup default stable  (rustup)"
         exit 1
     fi
-    # v0.5.15 has no srt_hip optional extra. ROCm selection comes from the
-    # pinned PyTorch index and the repository's HIP patches.
-    pip install -e .
+    if [ -f pyproject_other.toml ]; then
+        # v0.5.17+ splits packaging: pyproject.toml is the CUDA build (it pins
+        # torch==2.13.0 and a CUDA-only kernel set: flashinfer, sgl-deep-*,
+        # nvidia-*, tilelang, ...) while pyproject_other.toml carries the
+        # platform-neutral runtime set used by upstream's ROCm image. Install
+        # the package itself without dependency resolution so the CUDA torch
+        # pin never pulls a CUDA wheel over the ROCm torch, then resolve the
+        # runtime set from pyproject_other.toml's runtime_common extra.
+        pip install -e . --no-deps
+        ROCM_RUNTIME_DEPS="$(python - <<'PYEOF'
+import re, tomllib
+with open("pyproject_other.toml", "rb") as f:
+    extras = tomllib.load(f)["project"]["optional-dependencies"]
+seen, out = set(), []
+def expand(name):
+    for dep in extras[name]:
+        m = re.fullmatch(r"sglang\[(\w+)\]", dep.strip())
+        if m:
+            expand(m.group(1))
+        elif dep not in seen:
+            seen.add(dep); out.append(dep)
+expand("runtime_common")
+print(" ".join(f'"{d}"' for d in out))
+PYEOF
+)"
+        echo "Installing ROCm runtime dependency set (pyproject_other.toml runtime_common)..."
+        eval pip install $ROCM_RUNTIME_DEPS
+        # Runtime packages the CUDA pyproject carries but pyproject_other omits
+        # and that SGLang imports on the serving path (numba: mm_utils;
+        # zstandard: request decompression; watchfiles: SSL hot-reload;
+        # torchcodec: video decode). torchcodec is --no-deps so its torch
+        # requirement cannot disturb the ROCm pin.
+        pip install "numba==$NUMBA_VERSION" zstandard watchfiles
+        pip install --no-deps "torchcodec==$TORCHCODEC_VERSION"
+    else
+        # v0.5.15/v0.5.16 have no srt_hip optional extra. ROCm selection comes
+        # from the pinned PyTorch index and the repository's HIP patches.
+        pip install -e .
+    fi
 
     # Re-pin PyTorch (SGLang deps may change it)
     echo "Re-pinning PyTorch..."
@@ -254,11 +294,14 @@ if [ "$SKIP_ENV" = false ]; then
     # Nemotron-Omni AVLM). Without it the model crashes at processor init with
     # "ParakeetExtractor requires the librosa library" (caught in the 2026-06-16
     # v0.5.13 resweep — the fresh env omitted it; v0.5.12 env had 0.11.0).
+    # pytest: the patch-series unit tests (test/registered/{unit,kernels,dcp})
+    # are part of the rebase gate and run inside this env.
     pip install \
         "imageio[ffmpeg]==$IMAGEIO_VERSION" \
         "imageio-ffmpeg==$IMAGEIO_FFMPEG_VERSION" \
         "pillow==$PILLOW_VERSION" \
-        "librosa==$LIBROSA_VERSION"
+        "librosa==$LIBROSA_VERSION" \
+        pytest
 else
     echo "[2/5] Skipping conda env creation"
     init_conda
@@ -314,12 +357,29 @@ python -c "import triton; print(f'triton {triton.__version__} OK at {triton.__fi
 # -------------------------------------------------------------------
 # Step 4: Build + install sgl_kernel with native HIP ops
 # -------------------------------------------------------------------
+# v0.5.17 moved the kernel tree from sgl-kernel/ into
+# python/sglang/kernels/aot/ (the standalone sglang-kernel package source).
+if [ -f "$SGLANG_DIR/python/sglang/kernels/aot/setup_rocm.py" ]; then
+    SGL_KERNEL_DIR="$SGLANG_DIR/python/sglang/kernels/aot"
+    # The HIP build overlays common_ops.so + the patched __init__ onto an
+    # installed sgl_kernel package (setup_sgl_kernel.sh). pyproject_other's
+    # runtime set does not depend on sglang-kernel, so install the matching
+    # PyPI wheel as the package skeleton (its CUDA .so files are inert here),
+    # exactly as the CUDA-pyproject dependency did on v0.5.16.
+    SGL_KERNEL_VERSION="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$SGL_KERNEL_DIR/python/sgl_kernel/version.py")"
+    echo "Installing sglang-kernel==$SGL_KERNEL_VERSION package skeleton for the HIP overlay..."
+    pip install --no-deps "sglang-kernel==$SGL_KERNEL_VERSION"
+else
+    SGL_KERNEL_DIR="$SGLANG_DIR/sgl-kernel"
+fi
+# Not exported: SGLang itself reads a (deprecated) SGL_KERNEL_DIR env var for
+# its JIT kernel directory, so pass the builder path per invocation instead.
 echo ""
-echo "[4/5] Building sgl_kernel with native HIP ops for gfx1201..."
+echo "[4/5] Building sgl_kernel with native HIP ops for gfx1201 (source: $SGL_KERNEL_DIR)..."
 echo "  CRITICAL: Without this, rotary_embedding uses a Python fallback"
 echo "  that produces wrong results on non-contiguous tensors, causing"
 echo "  garbage output for dense AWQ models."
-SGL_KERNEL_DIR="$SGLANG_DIR/sgl-kernel" "$SCRIPT_DIR/setup_sgl_kernel.sh" --env "$ENV_NAME" || {
+SGL_KERNEL_DIR="$SGL_KERNEL_DIR" "$SCRIPT_DIR/setup_sgl_kernel.sh" --env "$ENV_NAME" || {
     echo "FATAL: [4/5] sgl_kernel build failed."
     echo "  On gfx1201 the usual cause is sgl-kernel/setup_rocm.py rejecting the arch;"
     echo "  patches/008-rdna4-sgl-kernel-build-arch.patch adds gfx12xx to the whitelist"
@@ -333,7 +393,7 @@ SGL_KERNEL_DIR="$SGLANG_DIR/sgl-kernel" "$SCRIPT_DIR/setup_sgl_kernel.sh" --env 
 echo ""
 echo "[5/6] Building AWQ GEMV HIP kernel for gfx1201..."
 echo "  30% faster M=1 decode, fused MoE expert dispatch"
-SGL_KERNEL_DIR="$SGLANG_DIR/sgl-kernel" "$SCRIPT_DIR/build_awq_gemv.sh" --env "$ENV_NAME"
+SGL_KERNEL_DIR="$SGL_KERNEL_DIR" "$SCRIPT_DIR/build_awq_gemv.sh" --env "$ENV_NAME"
 
 # -------------------------------------------------------------------
 # Step 5b: Build wvSplitK INT4 MoE kernel (mgehre port, patches/032)
@@ -343,7 +403,7 @@ echo "[5b/6] Building wvSplitK INT4 MoE HIP kernel for gfx1201..."
 echo "  Hybrid W4A16 MoE kernel from mgehre-amd/vllm 0b992ff."
 echo "  See patches/032-rdna4-hybrid-w4a16-moe.patch."
 if [ -f "$SCRIPT_DIR/build_skinny_gemms_int4.sh" ]; then
-    SGL_KERNEL_DIR="$SGLANG_DIR/sgl-kernel" "$SCRIPT_DIR/build_skinny_gemms_int4.sh" --env "$ENV_NAME" || \
+    SGL_KERNEL_DIR="$SGL_KERNEL_DIR" "$SCRIPT_DIR/build_skinny_gemms_int4.sh" --env "$ENV_NAME" || \
       echo "  WARNING: wvSplitK kernel build failed (non-fatal — Triton MoE fallback works)"
 fi
 

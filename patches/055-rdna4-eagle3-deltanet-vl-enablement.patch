@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/models/qwen3_vl.py b/python/sglang/srt/models/qwen3_vl.py
-index 75c807a5d7..f1683f6407 100644
+index afd7659f..a0ac1620 100644
 --- a/python/sglang/srt/models/qwen3_vl.py
 +++ b/python/sglang/srt/models/qwen3_vl.py
-@@ -1540,13 +1540,31 @@ class Qwen3VLForConditionalGeneration(nn.Module):
+@@ -1580,13 +1580,31 @@ class Qwen3VLForConditionalGeneration(nn.Module):
          self.model.capture_aux_hidden_states = True
          if layer_ids is None:
              num_layers = self.config.num_hidden_layers
@@ -35,9 +35,9 @@ index 75c807a5d7..f1683f6407 100644
 +                setattr(self.model.layers[layer_id], "_is_layer_to_capture", True)
  
  
- EntryClass = Qwen3VLForConditionalGeneration
+ def _require_vision(model) -> None:
 diff --git a/python/sglang/srt/utils/hf_transformers_patches.py b/python/sglang/srt/utils/hf_transformers_patches.py
-index 17a394190a..277ce62e7b 100644
+index 614fc95b..514ccedd 100644
 --- a/python/sglang/srt/utils/hf_transformers_patches.py
 +++ b/python/sglang/srt/utils/hf_transformers_patches.py
 @@ -56,6 +56,7 @@ def apply_all():

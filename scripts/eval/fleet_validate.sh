@@ -12,13 +12,16 @@
 #   bash scripts/eval/fleet_validate.sh            # all models (fast-first)
 #   bash scripts/eval/fleet_validate.sh <slug|preset>  # one model (babysit / re-run a fail)
 # Env: FV_OUTDIR (serve logs, default /tmp/fleet-validate), PORT (default 23334),
-#      SKIP_DEEP=1 (capabilities only), DEEP_ONLY=1 (skip capability suite).
+#      SKIP_DEEP=1 (capabilities only), DEEP_ONLY=1 (skip capability suite),
+#      FV_CAP_JSON / FV_DEEP_JSON (result files; default = the 086 campaign receipts).
 # No `set -e`: the sweep MUST continue past per-model failures.
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUTDIR="${FV_OUTDIR:-/tmp/fleet-validate}"
 PORT="${PORT:-23334}"
-CAP_JSON="$REPO/benchmarks/validation/capabilities-toolcall-2026-07.json"
-DEEP_JSON="$REPO/benchmarks/validation/deep-probe-086.json"
+# Result files are overridable so a fleet re-validation (e.g. a version rebase) lands in its own
+# receipt instead of appending to the 086 campaign files.
+CAP_JSON="${FV_CAP_JSON:-$REPO/benchmarks/validation/capabilities-toolcall-2026-07.json}"
+DEEP_JSON="${FV_DEEP_JSON:-$REPO/benchmarks/validation/deep-probe-086.json}"
 mkdir -p "$OUTDIR" "$REPO/benchmarks/validation"
 cd "$REPO"
 source scripts/common.sh

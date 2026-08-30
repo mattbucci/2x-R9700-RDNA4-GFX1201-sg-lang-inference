@@ -24,8 +24,7 @@ REPO_DIR="$(dirname "$SCRIPT_DIR")"
 # stack). Was orphaned 2026-04-14 (commit 1550f38) when an over-aggressive
 # patch shrink for an unrelated Gemma 4-31B fix stripped the new-file blocks;
 # restored 2026-05-09 in commit XXX as a kernel-CSR-only patch.
-SGL_KERNEL_DIR="${SGL_KERNEL_DIR:-$REPO_DIR/components/sglang/sgl-kernel}"  # overridable for version rebases
-SRC_FILE="$SGL_KERNEL_DIR/csrc/quantization/awq/awq_gemv_hip.cu"
+SGL_KERNEL_DIR="${SGL_KERNEL_DIR:-}"  # resolved after common.sh (version-aware default)
 
 TARGET_ENV=""
 while [[ $# -gt 0 ]]; do
@@ -38,6 +37,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 source "$SCRIPT_DIR/common.sh"
+SGL_KERNEL_DIR="${SGL_KERNEL_DIR:-$(default_sgl_kernel_dir)}"
+SRC_FILE="$SGL_KERNEL_DIR/csrc/quantization/awq/awq_gemv_hip.cu"
 init_conda
 
 if [ -n "$TARGET_ENV" ]; then

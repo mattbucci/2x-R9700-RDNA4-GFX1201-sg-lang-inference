@@ -1,9 +1,10 @@
 diff --git a/python/sglang/srt/layers/moe/topk.py b/python/sglang/srt/layers/moe/topk.py
+index 0fd8ce27..4f532df9 100644
 --- a/python/sglang/srt/layers/moe/topk.py
 +++ b/python/sglang/srt/layers/moe/topk.py
-@@ -1248,6 +1248,17 @@ def biased_topk_jit_kernel_impl(
+@@ -1302,6 +1302,17 @@ def biased_topk_jit_kernel_impl(
      else:
-         from sglang.jit_kernel.moe_fused_gate import moe_fused_gate
+         from sglang.kernels.ops.moe.moe_fused_gate import moe_fused_gate
  
 +        # moe_fused_gate requires a float32 per-expert bias tensor. Sigmoid
 +        # routers with no correction bias (e.g. Cohere2 / North) pass None,

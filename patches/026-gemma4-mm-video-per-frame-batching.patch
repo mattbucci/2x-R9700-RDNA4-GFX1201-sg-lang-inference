@@ -33,3 +33,28 @@ index 0a3a0b091a..18b882d08e 100644
                      all_embeds.append(
                          self.embed_vision(
                              inputs_embeds=real_tokens.unsqueeze(0)
+diff --git a/python/sglang/srt/models/gemma4_mm.py b/python/sglang/srt/models/gemma4_mm.py
+index f6b3483a..ce1c299a 100644
+--- a/python/sglang/srt/models/gemma4_mm.py
++++ b/python/sglang/srt/models/gemma4_mm.py
+@@ -556,10 +556,16 @@ class Gemma4ForConditionalGeneration(PreTrainedModel):
+                 pv = pv.to(device=vt.device, dtype=self.language_model.dtype())
+                 pp = pp.to(device=vt.device)
+ 
+-                pooled, pooler_mask = vt(pv, pp)
+-
+-                for hs, mask in zip(pooled, pooler_mask):
+-                    real_tokens = hs[mask]
++                # Same per-frame batching as get_image_feature above (patch 026):
++                # the batched call materializes the position one_hot for all
++                # frames at once (~1.15 GiB for 12 frames), which OOMs a dense
++                # 31B TP=2 server at 128K context where <1 GiB is left after
++                # weights + KV pool. Per-frame keeps it at 1/num_frames with the
++                # same total tower cost.
++                num_frames = pv.shape[0]
++                for f in range(num_frames):
++                    pooled_f, mask_f = vt(pv[f : f + 1], pp[f : f + 1])
++                    real_tokens = pooled_f[0][mask_f[0]]
+                     all_embeds.append(
+                         self.embed_vision(
+                             inputs_embeds=real_tokens.unsqueeze(0)

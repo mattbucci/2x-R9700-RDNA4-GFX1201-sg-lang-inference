@@ -1,5 +1,5 @@
 diff --git a/benchmark/kernels/fused_moe_triton/common_utils.py b/benchmark/kernels/fused_moe_triton/common_utils.py
-index ea669a1fab..4763beba54 100644
+index d0b9d623..ae630d9a 100644
 --- a/benchmark/kernels/fused_moe_triton/common_utils.py
 +++ b/benchmark/kernels/fused_moe_triton/common_utils.py
 @@ -1,11 +1,13 @@
@@ -109,7 +109,7 @@ index ea669a1fab..4763beba54 100644
      # Replace config with text_config for encoder-decoder models after getting block_shape and architecture
      if hasattr(config, "text_config"):
          text_config = config.get_text_config()
-@@ -155,6 +217,14 @@ def get_model_config(
+@@ -158,6 +220,14 @@ def get_model_config(
          E = config.num_experts // ep_size
          topk = config.num_experts_per_tok
          intermediate_size = config.moe_intermediate_size
@@ -124,7 +124,7 @@ index ea669a1fab..4763beba54 100644
      elif architecture == "MiniMaxM3SparseForConditionalGeneration":
          # Serving fuses the shared expert into the routed-expert tensor by
          # default (E = num_local_experts + 1), so tune for that shape unless
-@@ -207,8 +277,8 @@ def get_model_config(
+@@ -210,8 +280,8 @@ def get_model_config(
  def get_rocm_configs_compute_bound() -> List[Dict[str, int]]:
      configs: List[BenchmarkConfig] = []
      waves_per_eu_range = 0
@@ -135,7 +135,7 @@ index ea669a1fab..4763beba54 100644
              for block_k in [32, 64, 128, 256]:
                  for block_n in [16, 32, 64, 128, 256]:
                      for num_warps in [1, 2, 4, 8]:
-@@ -288,6 +358,7 @@ def get_config_filename(
+@@ -291,6 +361,7 @@ def get_config_filename(
      use_int4_w4a16: bool,
      per_channel_quant: bool,
      block_shape: List[int],
@@ -143,7 +143,7 @@ index ea669a1fab..4763beba54 100644
  ) -> str:
      dtype_str = get_config_dtype_str(
          dtype,
-@@ -309,6 +380,7 @@ def get_config_filename(
+@@ -312,6 +383,7 @@ def get_config_filename(
          dtype_str,
          block_shape,
          per_channel_quant,
@@ -152,10 +152,10 @@ index ea669a1fab..4763beba54 100644
  
      return filename
 diff --git a/benchmark/kernels/fused_moe_triton/tuning_fused_moe_triton.py b/benchmark/kernels/fused_moe_triton/tuning_fused_moe_triton.py
-index 536cc69135..1956d647d5 100644
+index 8cfc19db..bf03597f 100644
 --- a/benchmark/kernels/fused_moe_triton/tuning_fused_moe_triton.py
 +++ b/benchmark/kernels/fused_moe_triton/tuning_fused_moe_triton.py
-@@ -15,6 +15,7 @@ from common_utils import (
+@@ -16,6 +16,7 @@ from common_utils import (
      get_config_filename,
      get_configs_compute_bound,
      get_default_batch_sizes,
@@ -163,7 +163,7 @@ index 536cc69135..1956d647d5 100644
      get_model_config,
      save_configs,
      sort_config,
-@@ -23,6 +24,7 @@ from ray.experimental.tqdm_ray import tqdm
+@@ -24,6 +25,7 @@ from ray.experimental.tqdm_ray import tqdm
  
  from sglang.srt.layers.moe.fused_moe_triton import override_config
  from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
@@ -171,7 +171,7 @@ index 536cc69135..1956d647d5 100644
  from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import fused_moe
  from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe_triton_config import (
      get_config_dtype_str,
-@@ -139,10 +141,17 @@ def benchmark_config(
+@@ -140,10 +142,17 @@ def benchmark_config(
              )
              w2_scale = torch.randn(num_experts, hidden_size, dtype=torch.float32)
          elif block_shape is None:
@@ -193,7 +193,7 @@ index 536cc69135..1956d647d5 100644
          else:
              block_n, block_k = block_shape[0], block_shape[1]
              n_tiles_w1 = (shard_intermediate_size + block_n - 1) // block_n
-@@ -157,8 +166,8 @@ def benchmark_config(
+@@ -158,8 +167,8 @@ def benchmark_config(
              )
  
      if use_fp8_w8a8:
@@ -205,7 +205,7 @@ index 536cc69135..1956d647d5 100644
      input_gating = torch.randn(num_tokens, num_experts, dtype=torch.float32)
      topk_config = TopKConfig(
 diff --git a/benchmark/kernels/fused_moe_triton/tuning_fused_moe_triton_sep.py b/benchmark/kernels/fused_moe_triton/tuning_fused_moe_triton_sep.py
-index 0167bf7a08..c63ef9fc0d 100644
+index a74972c3..32ff3ce2 100644
 --- a/benchmark/kernels/fused_moe_triton/tuning_fused_moe_triton_sep.py
 +++ b/benchmark/kernels/fused_moe_triton/tuning_fused_moe_triton_sep.py
 @@ -10,7 +10,6 @@ from contextlib import nullcontext
@@ -271,7 +271,7 @@ index 0167bf7a08..c63ef9fc0d 100644
      topk_ids_list,
      block_shape: List[int] = None,
      ep_size: int = 1,
-@@ -228,10 +230,17 @@ def benchmark_config(
+@@ -231,10 +233,17 @@ def benchmark_config(
              )
              w2_scale = torch.randn(num_experts, hidden_size, dtype=torch.float32)
          elif block_shape is None:
@@ -293,7 +293,7 @@ index 0167bf7a08..c63ef9fc0d 100644
          else:
              block_n, block_k = block_shape[0], block_shape[1]
              n_tiles_w1 = (shard_intermediate_size + block_n - 1) // block_n
-@@ -246,8 +255,11 @@ def benchmark_config(
+@@ -249,8 +258,11 @@ def benchmark_config(
              )
  
      if use_fp8_w8a8:
@@ -307,71 +307,119 @@ index 0167bf7a08..c63ef9fc0d 100644
  
      input_gating = torch.randn(num_tokens, num_experts, dtype=torch.float32)
      topk_config = TopKConfig(
-@@ -338,7 +350,7 @@ def benchmark_config(
+@@ -356,7 +368,7 @@ def benchmark_config(
              use_int8_w8a8=use_int8_w8a8,
              use_int8_w8a16=use_int8_w8a16,
              use_int4_w4a16=use_int4_w4a16,
 -            per_channel_quant=False,
 +            per_channel_quant=per_channel_quant,
              block_shape=block_shape,
-             b_use_tma=moe_use_tma,
-             c_sorted=moe_use_tma,
-@@ -364,7 +376,7 @@ def benchmark_config(
+             b_use_tma=False,
+             c_sorted=c_sorted,
+@@ -365,7 +377,8 @@ def benchmark_config(
+             inner_iter=inner_iter,
+         )
+         up_kernels.append(kernel0)
+-        if enable_up_tma or tune_round == "up":
++        # TMA variants are CUDA-only; HIP (RDNA4) tunes the no-TMA kernels.
++        if not _is_hip and (enable_up_tma or tune_round == "up"):
+             kernel0_tma = KernelWrapper(
+                 A=hidden_states,
+                 B=w1,
+@@ -384,7 +397,7 @@ def benchmark_config(
+                 use_int8_w8a8=use_int8_w8a8,
+                 use_int8_w8a16=use_int8_w8a16,
+                 use_int4_w4a16=use_int4_w4a16,
+-                per_channel_quant=False,
++                per_channel_quant=per_channel_quant,
+                 block_shape=block_shape,
+                 b_use_tma=True,
+                 c_sorted=c_sorted,
+@@ -414,7 +427,7 @@ def benchmark_config(
              use_int8_w8a8=use_int8_w8a8,
              use_int8_w8a16=use_int8_w8a16,
              use_int4_w4a16=use_int4_w4a16,
 -            per_channel_quant=False,
 +            per_channel_quant=per_channel_quant,
              block_shape=block_shape,
-             a_use_tma=moe_use_tma,
-             b_use_tma=moe_use_tma,
-@@ -377,14 +389,19 @@ def benchmark_config(
-     use_cuda_graph = True if not ncu_enable else False
- 
-     kernel0, kernel1 = get_kernel_wrapper(False, inner_iter, use_cuda_graph)
--    kernel_tma0, kernel_tma1 = get_kernel_wrapper(True, inner_iter, use_cuda_graph)
-+    kernel_tma0 = kernel_tma1 = None
-+    if not _is_hip:
-+        kernel_tma0, kernel_tma1 = get_kernel_wrapper(
-+            True, inner_iter, use_cuda_graph
-+        )
+             a_use_tma=False,
+             b_use_tma=False,
+@@ -423,33 +436,34 @@ def benchmark_config(
+             inner_iter=inner_iter,
+         )
+         down_kernels.append(kernel1)
+-        kernel1_tma = KernelWrapper(
+-            A=intermediate_cache2,
+-            B=w2,
+-            bias=None,
+-            C=intermediate_cache3,
+-            A_scale=a2_scale,
+-            B_scale=w2_scale,
+-            B_zp=None,
+-            topk_weights=topk_output_.topk_weights,
+-            moe_inputs=moe_inputs,
+-            mul_routed_weight=not apply_router_weight_on_input,
+-            top_k=1,
+-            config=config,
+-            compute_type=compute_type,
+-            use_fp8_w8a8=use_fp8_w8a8,
+-            use_int8_w8a8=use_int8_w8a8,
+-            use_int8_w8a16=use_int8_w8a16,
+-            use_int4_w4a16=use_int4_w4a16,
+-            per_channel_quant=False,
+-            block_shape=block_shape,
+-            a_use_tma=True,
+-            b_use_tma=True,
+-            filter_expert=False,
+-            use_cuda_graph=use_cuda_graph,
+-            inner_iter=inner_iter,
+-        )
+-        down_kernels.append(kernel1_tma)
++        if not _is_hip:
++            kernel1_tma = KernelWrapper(
++                A=intermediate_cache2,
++                B=w2,
++                bias=None,
++                C=intermediate_cache3,
++                A_scale=a2_scale,
++                B_scale=w2_scale,
++                B_zp=None,
++                topk_weights=topk_output_.topk_weights,
++                moe_inputs=moe_inputs,
++                mul_routed_weight=not apply_router_weight_on_input,
++                top_k=1,
++                config=config,
++                compute_type=compute_type,
++                use_fp8_w8a8=use_fp8_w8a8,
++                use_int8_w8a8=use_int8_w8a8,
++                use_int8_w8a16=use_int8_w8a16,
++                use_int4_w4a16=use_int4_w4a16,
++                per_channel_quant=per_channel_quant,
++                block_shape=block_shape,
++                a_use_tma=True,
++                b_use_tma=True,
++                filter_expert=False,
++                use_cuda_graph=use_cuda_graph,
++                inner_iter=inner_iter,
++            )
++            down_kernels.append(kernel1_tma)
  
      # JIT compilation & warmup
      if not ncu_enable:
-         kernel0.forward_cost()
-         kernel1.forward_cost()
--        kernel_tma0.forward_cost()
--        kernel_tma1.forward_cost()
-+        if kernel_tma0 is not None:
-+            kernel_tma0.forward_cost()
-+            kernel_tma1.forward_cost()
- 
-     ts0 = []
-     ts1 = []
-@@ -395,14 +412,15 @@ def benchmark_config(
-         prepare(i, inner_iter)
-         ts0.append(kernel0.forward_cost())
-         ts1.append(kernel1.forward_cost())
--        ts_tma0.append(kernel_tma0.forward_cost())
--        ts_tma1.append(kernel_tma1.forward_cost())
-+        if kernel_tma0 is not None:
-+            ts_tma0.append(kernel_tma0.forward_cost())
-+            ts_tma1.append(kernel_tma1.forward_cost())
+@@ -469,7 +483,8 @@ def benchmark_config(
+                 ts_tma0.append(kernel0_tma.forward_cost())  # up tma
+         if build_down:
+             ts1.append(kernel1.forward_cost())  # down no-tma
+-            ts_tma1.append(kernel1_tma.forward_cost())  # down tma
++            if len(down_kernels) > 1:
++                ts_tma1.append(kernel1_tma.forward_cost())  # down tma
      torch.cuda.synchronize()
  
-     avg = sum(ts0) / (num_iters) * 1000  # us
-     avg1 = sum(ts1) / (num_iters) * 1000  # us
--    avg_tma = sum(ts_tma0) / (num_iters) * 1000  # us
--    avg1_tma = sum(ts_tma1) / (num_iters) * 1000  # us
-+    avg_tma = sum(ts_tma0) / (num_iters) * 1000 if ts_tma0 else float("inf")
-+    avg1_tma = sum(ts_tma1) / (num_iters) * 1000 if ts_tma1 else float("inf")
- 
-     return avg, avg_tma, avg1, avg1_tma
- 
-@@ -437,11 +455,12 @@ class BestConfigTrace:
-         config, _, time_cost_all = self.best_costs_m[block_m]
-         if not self.down_moe:
-             return config
+     avg = sum(ts0) / (num_iters) * 1000 if ts0 else float("inf")
+@@ -527,11 +542,12 @@ class BestConfigTrace:
+                 # Up TMA not enabled — do not add USE_TMA key so the runtime
+                 # defaults to no-TMA for up-projection.
+                 return config
 -        else:
 +        elif not _is_hip:
              return {
@@ -382,7 +430,7 @@ index 0167bf7a08..c63ef9fc0d 100644
  
  
  class BenchmarkWorker:
-@@ -467,6 +486,7 @@ class BenchmarkWorker:
+@@ -557,6 +573,7 @@ class BenchmarkWorker:
          use_int8_w8a8: bool,
          use_int8_w8a16: bool,
          use_int4_w4a16: bool,
@@ -390,15 +438,31 @@ index 0167bf7a08..c63ef9fc0d 100644
          block_shape: List[int],
          cfg: Dict[str, int],
          topk_ids_dir: str,
-@@ -487,6 +507,7 @@ class BenchmarkWorker:
-                 use_int8_w8a8,
-                 use_int8_w8a16,
-                 use_int4_w4a16,
-+                per_channel_quant,
-                 topk_ids_list,
-                 block_shape,
-                 ep_size=ep_size,
-@@ -505,6 +526,7 @@ class BenchmarkWorker:
+@@ -581,6 +598,7 @@ class BenchmarkWorker:
+                     use_int8_w8a8,
+                     use_int8_w8a16,
+                     use_int4_w4a16,
++                    per_channel_quant,
+                     topk_ids_list,
+                     block_shape,
+                     ep_size=ep_size,
+@@ -600,6 +618,7 @@ class BenchmarkWorker:
+                     use_int8_w8a8,
+                     use_int8_w8a16,
+                     use_int4_w4a16,
++                    per_channel_quant,
+                     topk_ids_list,
+                     block_shape,
+                     ep_size=ep_size,
+@@ -621,6 +640,7 @@ class BenchmarkWorker:
+                     use_int8_w8a8,
+                     use_int8_w8a16,
+                     use_int4_w4a16,
++                    per_channel_quant,
+                     topk_ids_list,
+                     block_shape,
+                     ep_size=ep_size,
+@@ -641,6 +661,7 @@ class BenchmarkWorker:
          use_int8_w8a8: bool,
          use_int8_w8a16: bool,
          use_int4_w4a16: bool,
@@ -406,22 +470,58 @@ index 0167bf7a08..c63ef9fc0d 100644
          block_shape: List[int],
          search_space: List[Dict[str, int]],
          topk_ids_dir: str,
-@@ -529,12 +551,13 @@ class BenchmarkWorker:
-                         use_int8_w8a8,
-                         use_int8_w8a16,
-                         use_int4_w4a16,
-+                        per_channel_quant,
-                         topk_ids_list,
-                         block_shape,
-                         ep_size=ep_size,
-                         num_iters=100,
-                     )
--                except triton.runtime.autotuner.OutOfResources:
-+                except (triton.runtime.autotuner.OutOfResources, RuntimeError):
-                     # Some configurations may be invalid and fail to compile.
-                     continue
-                 trace0.update(
-@@ -574,6 +597,7 @@ class BenchmarkWorker:
+@@ -670,6 +691,7 @@ class BenchmarkWorker:
+                             use_int8_w8a8,
+                             use_int8_w8a16,
+                             use_int4_w4a16,
++                            per_channel_quant,
+                             topk_ids_list,
+                             block_shape,
+                             ep_size=ep_size,
+@@ -677,7 +699,7 @@ class BenchmarkWorker:
+                             enable_up_tma=False,
+                             tune_round="both",
+                         )
+-                    except triton.runtime.autotuner.OutOfResources:
++                    except (triton.runtime.autotuner.OutOfResources, RuntimeError):
+                         continue
+                     trace0.update(
+                         config,
+@@ -709,6 +731,7 @@ class BenchmarkWorker:
+                             use_int8_w8a8,
+                             use_int8_w8a16,
+                             use_int4_w4a16,
++                            per_channel_quant,
+                             topk_ids_list,
+                             block_shape,
+                             ep_size=ep_size,
+@@ -716,7 +739,7 @@ class BenchmarkWorker:
+                             enable_up_tma=True,
+                             tune_round="down",
+                         )
+-                    except triton.runtime.autotuner.OutOfResources:
++                    except (triton.runtime.autotuner.OutOfResources, RuntimeError):
+                         continue
+                     trace1.update(
+                         config,
+@@ -749,6 +772,7 @@ class BenchmarkWorker:
+                             use_int8_w8a8,
+                             use_int8_w8a16,
+                             use_int4_w4a16,
++                            per_channel_quant,
+                             topk_ids_list,
+                             block_shape,
+                             ep_size=ep_size,
+@@ -757,7 +781,7 @@ class BenchmarkWorker:
+                             tune_round="up",
+                             down_use_tma_map=down_use_tma_map,
+                         )
+-                    except triton.runtime.autotuner.OutOfResources:
++                    except (triton.runtime.autotuner.OutOfResources, RuntimeError):
+                         continue
+                     trace0.update(
+                         config,
+@@ -792,6 +816,7 @@ class BenchmarkWorker:
          use_int8_w8a8: bool,
          use_int8_w8a16: bool,
          use_int4_w4a16: bool,
@@ -429,7 +529,7 @@ index 0167bf7a08..c63ef9fc0d 100644
          block_shape: List[int],
          cmp_config_files: List[str],
          topk_ids_dir: str,
-@@ -610,6 +634,7 @@ class BenchmarkWorker:
+@@ -828,6 +853,7 @@ class BenchmarkWorker:
                          use_int8_w8a8,
                          use_int8_w8a16,
                          use_int4_w4a16,
@@ -437,7 +537,7 @@ index 0167bf7a08..c63ef9fc0d 100644
                          topk_ids_list,
                          block_shape,
                          ep_size=ep_size,
-@@ -631,23 +656,21 @@ def save_configs_sep(
+@@ -849,23 +875,21 @@ def save_configs_sep(
      use_int8_w8a8: bool,
      use_int8_w8a16: bool,
      use_int4_w4a16: bool,
@@ -472,7 +572,7 @@ index 0167bf7a08..c63ef9fc0d 100644
          block_shape,
          down_moe=down_moe,
      )
-@@ -684,6 +707,7 @@ def main(args: argparse.Namespace):
+@@ -902,6 +926,7 @@ def main(args: argparse.Namespace):
      use_int8_w8a8 = args.dtype == "int8_w8a8"
      use_int8_w8a16 = args.dtype == "int8_w8a16"
      use_int4_w4a16 = args.dtype == "int4_w4a16"
@@ -480,7 +580,7 @@ index 0167bf7a08..c63ef9fc0d 100644
  
      topk_ids_dir = args.topk_ids_dir
      if args.batch_size is None:
-@@ -705,6 +729,7 @@ def main(args: argparse.Namespace):
+@@ -923,6 +948,7 @@ def main(args: argparse.Namespace):
              use_int8_w8a8,
              use_int8_w8a16,
              use_int4_w4a16,
@@ -488,7 +588,7 @@ index 0167bf7a08..c63ef9fc0d 100644
              block_shape,
              args.cmp_configs,
              topk_ids_dir,
-@@ -716,7 +741,14 @@ def main(args: argparse.Namespace):
+@@ -934,7 +960,14 @@ def main(args: argparse.Namespace):
          worker = BenchmarkWorker(args.seed, server_args)
          if args.tune:
              search_space = get_configs_compute_bound()
@@ -504,7 +604,7 @@ index 0167bf7a08..c63ef9fc0d 100644
                  batch_sizes[0],
                  E,
                  shard_intermediate_size,
-@@ -727,11 +759,41 @@ def main(args: argparse.Namespace):
+@@ -945,12 +978,42 @@ def main(args: argparse.Namespace):
                  use_int8_w8a8,
                  use_int8_w8a16,
                  use_int4_w4a16,
@@ -513,6 +613,7 @@ index 0167bf7a08..c63ef9fc0d 100644
                  search_space,
                  topk_ids_dir,
                  args.ep_size,
+                 enable_up_tma=args.enable_tune_up_tma,
              )
 +            save_configs_sep(
 +                {batch_sizes[0]: sort_config(config0)},
@@ -546,7 +647,7 @@ index 0167bf7a08..c63ef9fc0d 100644
          else:
              cfg = {
                  "BLOCK_SIZE_M": args.configs[0],
-@@ -753,6 +815,7 @@ def main(args: argparse.Namespace):
+@@ -972,6 +1035,7 @@ def main(args: argparse.Namespace):
                  use_int8_w8a8,
                  use_int8_w8a16,
                  use_int4_w4a16,
@@ -554,7 +655,7 @@ index 0167bf7a08..c63ef9fc0d 100644
                  block_shape,
                  cfg,
                  topk_ids_dir,
-@@ -763,6 +826,11 @@ def main(args: argparse.Namespace):
+@@ -983,6 +1047,11 @@ def main(args: argparse.Namespace):
  
      assert args.tune
  
@@ -566,7 +667,7 @@ index 0167bf7a08..c63ef9fc0d 100644
      ray.init()
      num_gpus = int(ray.available_resources()["GPU"])
      workers = [
-@@ -797,7 +865,7 @@ def main(args: argparse.Namespace):
+@@ -1017,7 +1086,7 @@ def main(args: argparse.Namespace):
          use_int8_w8a8,
          use_int8_w8a16,
          use_int4_w4a16,
@@ -575,7 +676,7 @@ index 0167bf7a08..c63ef9fc0d 100644
          block_shape,
      )
      print(
-@@ -819,6 +887,7 @@ def main(args: argparse.Namespace):
+@@ -1039,6 +1108,7 @@ def main(args: argparse.Namespace):
                  use_int8_w8a8,
                  use_int8_w8a16,
                  use_int4_w4a16,
@@ -583,7 +684,7 @@ index 0167bf7a08..c63ef9fc0d 100644
                  block_shape,
                  search_space,
                  topk_ids_dir,
-@@ -848,6 +917,7 @@ def main(args: argparse.Namespace):
+@@ -1069,6 +1139,7 @@ def main(args: argparse.Namespace):
          use_int8_w8a8,
          use_int8_w8a16,
          use_int4_w4a16,
@@ -591,7 +692,7 @@ index 0167bf7a08..c63ef9fc0d 100644
          block_shape,
      )
  
-@@ -863,6 +933,7 @@ def main(args: argparse.Namespace):
+@@ -1084,6 +1155,7 @@ def main(args: argparse.Namespace):
          use_int8_w8a8,
          use_int8_w8a16,
          use_int4_w4a16,
@@ -599,7 +700,7 @@ index 0167bf7a08..c63ef9fc0d 100644
          block_shape,
          down_moe=True,
      )
-@@ -886,9 +957,18 @@ if __name__ == "__main__":
+@@ -1107,9 +1179,18 @@ if __name__ == "__main__":
      parser.add_argument("--seed", type=int, default=0)
      parser.add_argument("--batch-size", type=int, required=False)
      parser.add_argument("--tune", action="store_true")
@@ -617,11 +718,11 @@ index 0167bf7a08..c63ef9fc0d 100644
 +        ),
 +    )
      parser.add_argument("--cmp-configs", type=str, nargs="+", required=False)
-     args = parser.parse_args()
- 
+     parser.add_argument(
+         "--enable-tune-up-tma",
 diff --git a/test/registered/unit/test_fused_moe_tuner_common_utils.py b/test/registered/unit/test_fused_moe_tuner_common_utils.py
 new file mode 100644
-index 0000000000..1d55bfe0db
+index 00000000..1d55bfe0
 --- /dev/null
 +++ b/test/registered/unit/test_fused_moe_tuner_common_utils.py
 @@ -0,0 +1,262 @@
@@ -887,4 +988,3 @@ index 0000000000..1d55bfe0db
 +
 +if __name__ == "__main__":
 +    unittest.main()
-

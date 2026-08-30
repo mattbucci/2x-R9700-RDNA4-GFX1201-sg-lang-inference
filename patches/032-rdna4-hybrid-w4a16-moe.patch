@@ -1,337 +1,8 @@
-diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
-index 943d945..32de9e3 100644
---- a/python/sglang/srt/environ.py
-+++ b/python/sglang/srt/environ.py
-@@ -216,6 +216,21 @@ class Envs:
-     # must go through ServerArgs.override() (enabled by the test harness).
-     SGLANG_STRICT_CONFIG_MUTATION = EnvBool(False)
- 
-+    # MoE hybrid W4A16 kernel (HIP wvSplitK INT4 GEMM for decode + Triton for
-+    # prefill). Ported from mgehre-amd/vllm 0b992ff (2026-04-27). Enabled by
-+    # default on ROCm because the only known regression is build-time (kernel
-+    # must be built once per env via scripts/build_skinny_gemms_int4.sh) and
-+    # the Triton fallback path still works without the kernel. Disable by
-+    # setting SGLANG_MOE_HYBRID_W4A16=false if you want the legacy Triton-only
-+    # MoE for A/B benchmarking or debugging.
-+    SGLANG_MOE_HYBRID_W4A16 = EnvBool(True)
-+    # Threshold for HIP-vs-Triton dispatch in HybridW4A16MoEExperts: when
-+    # num_tokens <= MAX_SKINNY_BATCH_SIZE, dispatch through the HIP kernel
-+    # (decode-optimized); otherwise use Triton (prefill-optimized). Default
-+    # matches mgehre's vLLM tuning of 5; raise to favor HIP on borderline
-+    # batch sizes.
-+    SGLANG_MOE_HYBRID_W4A16_MAX_BATCH = EnvInt(5)
-+
-     # Model & File Download
-     SGLANG_USE_MODELSCOPE = EnvBool(False)
-     # Controls weight-file ordering for load-time I/O optimization.
-diff --git a/python/sglang/srt/layers/moe/hybrid_w4a16_moe.py b/python/sglang/srt/layers/moe/hybrid_w4a16_moe.py
+diff --git a/python/sglang/kernels/aot/csrc/quantization/awq/skinny_gemms_int4.cu b/python/sglang/kernels/aot/csrc/quantization/awq/skinny_gemms_int4.cu
 new file mode 100644
-index 0000000..f669d82
+index 00000000..a9ba68b1
 --- /dev/null
-+++ b/python/sglang/srt/layers/moe/hybrid_w4a16_moe.py
-@@ -0,0 +1,297 @@
-+"""Hybrid W4A16 MoE dispatch: HIP wvSplitK for decode (M<=5), Triton for prefill.
-+
-+Ported from mgehre-amd/vllm `matthias.awq_gemv` commit 0b992ff (2026-04-27).
-+
-+Both paths read the same weights in skinny layout `[E, N, K//8] int32`
-+(ExLlama-shuffle packed). The conversion from GPTQ/AWQ-on-disk layout to
-+skinny layout is done once at load time by :func:`reshuffle_to_skinny_w4`.
-+
-+This module is intentionally standalone — it exports a callable
-+:func:`hybrid_w4a16_moe_apply` that any SGLang MoE runner (or microbench)
-+can invoke. Wiring into SGLang's :class:`MoeRunnerCore` is a separate
-+follow-on step that uses this module as the back-end.
-+
-+Env vars (registered in :mod:`sglang.srt.environ`):
-+    SGLANG_MOE_HYBRID_W4A16          (bool, default True)  — gate the dispatch.
-+    SGLANG_MOE_HYBRID_W4A16_MAX_BATCH (int, default 5)     — HIP↔Triton cutoff.
-+
-+Performance vs the Triton-only baseline on Strix Halo with Qwen3-Omni-30B-A3B
-+AWQ (mgehre's numbers, RDNA 3.5):
-+    TPOT 14.51 ms → 13.73 ms (-5.4%)
-+    TTFT 996 ms → 841 ms (-15.6%)
-+
-+RDNA4 (gfx1201, R9700) expected similar or better on M=1 decode due to
-+higher compute-unit count. Validate via
-+:mod:`scripts.bench.bench_moe_hip_vs_triton`.
-+"""
-+
-+from __future__ import annotations
-+
-+import logging
-+from typing import Optional
-+
-+import torch
-+
-+logger = logging.getLogger(__name__)
-+
-+# Lazy-import the .so so this module can be imported on systems where the
-+# kernel hasn't been built yet (e.g. for type-checking, doc-build, CI).
-+_skinny_ext = None
-+
-+
-+def _get_skinny_ext():
-+    global _skinny_ext
-+    if _skinny_ext is None:
-+        try:
-+            import skinny_gemms_int4_ext  # type: ignore[import-not-found]
-+            _skinny_ext = skinny_gemms_int4_ext
-+        except ImportError as e:
-+            raise RuntimeError(
-+                "skinny_gemms_int4_ext not built. Run "
-+                "`scripts/build_skinny_gemms_int4.sh --env <name>` and retry."
-+            ) from e
-+    return _skinny_ext
-+
-+
-+# ============================================================================
-+# Weight format conversion: GPTQ/AWQ-on-disk → skinny ExLlama-shuffle packed.
-+# ============================================================================
-+
-+# Standard ExLlama shuffle order. When you pack 8 4-bit nibbles into one int32
-+# the natural order is (0,1,2,3,4,5,6,7); the AWQ on-disk format pre-shuffles
-+# these to (0,4,1,5,2,6,3,7) for fast dequant-with-fp16-multiply. The wvSplitK
-+# kernel expects this same shuffle order, just in a different tensor layout.
-+_AWQ_PACK_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
-+_REVERSE_AWQ_PACK_ORDER = [0, 2, 4, 6, 1, 3, 5, 7]
-+
-+
-+def reshuffle_to_skinny_w4(
-+    qweight: torch.Tensor,
-+    in_format: str = "awq",
-+) -> torch.Tensor:
-+    """Convert a packed INT4 MoE weight tensor to skinny ExLlama layout.
-+
-+    Args:
-+        qweight: shape depends on ``in_format``:
-+            - "awq":  [E, K, N//8] int32  (AWQ on-disk format)
-+            - "gptq": [E, K//8, N] int32  (GPTQ on-disk format)
-+        in_format: "awq" or "gptq".
-+
-+    Returns:
-+        Skinny-packed [E, N, K//8] int32 with ExLlama shuffle order.
-+    """
-+    if in_format not in ("awq", "gptq"):
-+        raise ValueError(f"in_format must be 'awq' or 'gptq', got {in_format!r}")
-+
-+    assert qweight.dtype == torch.int32 and qweight.dim() == 3, (
-+        f"qweight must be int32 [E, *, *], got {qweight.dtype} {tuple(qweight.shape)}"
-+    )
-+
-+    E = qweight.shape[0]
-+
-+    if in_format == "gptq":
-+        # GPTQ: [E, K//8, N] int32 → unpack to [E, K, N] uint8 nibbles
-+        K_8, N = qweight.shape[1], qweight.shape[2]
-+        K = K_8 * 8
-+        # Unpack along K axis: each int32 holds 8 sequential nibbles
-+        out = torch.empty(E, K, N, dtype=torch.uint8, device=qweight.device)
-+        for i in range(8):
-+            out[:, i::8, :] = ((qweight >> (i * 4)) & 0xF).to(torch.uint8)
-+    else:
-+        # AWQ: [E, K, N//8] int32 — int32 packs 8 nibbles along N with the
-+        # AWQ shuffle order. Unpack + un-shuffle.
-+        K, N_8 = qweight.shape[1], qweight.shape[2]
-+        N = N_8 * 8
-+        # Step 1: int32 → 8 nibbles → [E, K, N] uint8 (in AWQ-shuffled order)
-+        unpacked = torch.empty(E, K, N, dtype=torch.uint8, device=qweight.device)
-+        for i in range(8):
-+            unpacked[:, :, i::8] = ((qweight >> (i * 4)) & 0xF).to(torch.uint8)
-+        # Step 2: un-shuffle (AWQ → natural order along N)
-+        natural = torch.empty_like(unpacked)
-+        for src, dst in enumerate(_REVERSE_AWQ_PACK_ORDER):
-+            natural[:, :, dst::8] = unpacked[:, :, src::8]
-+        out = natural
-+
-+    # out is now [E, K, N] uint8 in natural order. Transpose to [E, N, K],
-+    # then re-pack along K with the same AWQ shuffle order (skinny convention).
-+    out = out.transpose(1, 2).contiguous()  # [E, N, K]
-+    E_, N_, K_ = out.shape
-+    assert K_ % 8 == 0, f"K={K_} must be divisible by 8 for INT4 pack"
-+
-+    # Re-shuffle along K: write nibbles in AWQ order so the kernel can
-+    # vectorize-load via tl.interleave / bit-shifts.
-+    shuffled = torch.empty_like(out)
-+    for src, dst in enumerate(_AWQ_PACK_ORDER):
-+        shuffled[:, :, dst::8] = out[:, :, src::8]
-+
-+    # Re-pack uint8 nibbles → int32 along K
-+    packed = torch.zeros(E_, N_, K_ // 8, dtype=torch.int32, device=out.device)
-+    for i in range(8):
-+        packed |= shuffled[:, :, i::8].to(torch.int32) << (i * 4)
-+    return packed
-+
-+
-+def reshuffle_scales_for_skinny(
-+    scales: torch.Tensor,
-+    in_format: str = "awq",
-+) -> torch.Tensor:
-+    """Convert per-group scales to the layout the wvSplitK kernel expects.
-+
-+    Args:
-+        scales: shape depends on ``in_format``:
-+            - "awq":  [E, K//G, N] fp16/bf16
-+            - "gptq": [E, K//G, N] fp16/bf16  (same as AWQ — both use
-+                      [num_groups, out_features] along the K axis)
-+        in_format: "awq" or "gptq".
-+
-+    Returns:
-+        [E, N, K//G] fp16/bf16 — transpose the inner dims so the kernel
-+        can fetch scales contiguously per output channel.
-+    """
-+    # AWQ and GPTQ both store scales as [E, num_groups, N]. The kernel wants
-+    # them as [E, N, num_groups]; a simple transpose suffices.
-+    return scales.transpose(1, 2).contiguous()
-+
-+
-+# ============================================================================
-+# Dispatch entry point.
-+# ============================================================================
-+
-+
-+def _get_cu_count(device: torch.device) -> int:
-+    """Best-effort compute-unit count lookup for the target device."""
-+    if device.type != "cuda":
-+        return 1
-+    try:
-+        props = torch.cuda.get_device_properties(device)
-+        # ROCm exposes this as multi_processor_count too; on gfx1201 the R9700
-+        # advertises 64 wave32 WGPs ≡ ~64 CU equivalents to the scheduler.
-+        return int(props.multi_processor_count)
-+    except Exception:
-+        return 64  # safe default for RDNA4 R9700
-+
-+
-+def hybrid_w4a16_moe_apply(
-+    activation: torch.Tensor,                # [num_tokens, K]   fp16/bf16
-+    w1: torch.Tensor,                        # [E, 2*N_inter, K//8] int32 (skinny gate+up)
-+    w2: torch.Tensor,                        # [E, K, N_inter//8]   int32 (skinny down)
-+    w1_scale: torch.Tensor,                  # [E, 2*N_inter, K//G] fp16/bf16
-+    w2_scale: torch.Tensor,                  # [E, K, N_inter//G]   fp16/bf16
-+    topk_weights: torch.Tensor,              # [num_tokens, top_k] fp32
-+    topk_ids: torch.Tensor,                  # [num_tokens, top_k] int32
-+    sorted_token_ids: torch.Tensor,          # [num_tokens*top_k] int32 (post moe_align)
-+    expert_ids: torch.Tensor,                # [num_blocks] int32
-+    num_tokens_post_padded: torch.Tensor,    # [1] int32
-+    block_size_m: int,
-+    group_size: int,
-+    activation_fn: str = "silu",
-+    w1_zp: Optional[torch.Tensor] = None,    # symmetric MoE: usually None
-+    w2_zp: Optional[torch.Tensor] = None,
-+    force_hip: Optional[bool] = None,
-+    force_triton: Optional[bool] = None,
-+) -> torch.Tensor:
-+    """Apply a hybrid W4A16 MoE forward pass: HIP wvSplitK (M<=cutoff) or
-+    Triton (M>cutoff).
-+
-+    Returns:
-+        [num_tokens, K] output (already top-k weighted and reduced across
-+        experts — the down_proj output is multiplied by the routed weight
-+        inside the down call).
-+
-+    Notes:
-+        * If ``force_hip`` is True (or ``force_triton`` is True) the dispatch
-+          is bypassed and the requested path is used unconditionally. Useful
-+          for A/B microbench. Otherwise the cutoff is read from
-+          ``sglang.srt.environ.envs.SGLANG_MOE_HYBRID_W4A16_MAX_BATCH``.
-+        * Activation: only "silu" is implemented in this initial port. GELU
-+          is on mgehre's TODO list but is rarely used in AWQ MoEs.
-+        * Weights must be in skinny [E, N, K//8] int32 layout. Use
-+          :func:`reshuffle_to_skinny_w4` at model load time.
-+    """
-+    assert activation_fn == "silu", (
-+        f"hybrid_w4a16_moe_apply currently supports silu only (got {activation_fn!r}). "
-+        "GELU port follow-on TODO."
-+    )
-+
-+    num_tokens = activation.shape[0]
-+    E = w1.shape[0]
-+    N_w13 = w1.shape[1]  # = 2 * N_inter
-+    K_hidden = activation.shape[1]
-+    N_inter = N_w13 // 2
-+    top_k = topk_ids.shape[1]
-+    device = activation.device
-+    dtype = activation.dtype
-+
-+    # Decide path
-+    use_hip = force_hip
-+    if use_hip is None and not force_triton:
-+        try:
-+            from sglang.srt.environ import envs
-+            cutoff = int(envs.SGLANG_MOE_HYBRID_W4A16_MAX_BATCH.value)
-+            enabled = bool(envs.SGLANG_MOE_HYBRID_W4A16.value)
-+            use_hip = enabled and (num_tokens <= cutoff)
-+        except Exception:
-+            # Fallback if environ not importable (CI / unit tests):
-+            use_hip = num_tokens <= 5
-+    elif force_triton:
-+        use_hip = False
-+
-+    cu_count = _get_cu_count(device)
-+
-+    if use_hip:
-+        ext = _get_skinny_ext()
-+        # Step 1: gate+up GEMM via HIP
-+        num_slots = sorted_token_ids.shape[0]
-+        gate_up = torch.empty(num_slots, N_w13, dtype=dtype, device=device)
-+        ext.fused_moe_wvSplitK_int4_gemm(
-+            activation, w1, w1_scale, gate_up, expert_ids,
-+            block_size_m, cu_count, group_size,
-+            w1_zp if w1_zp is not None else torch.empty(0, dtype=dtype, device=device),
-+            sorted_token_ids, top_k,
-+        )
-+        # Step 2: silu(gate) * up — apply in-place
-+        gate, up = gate_up.split(N_inter, dim=-1)
-+        torch.nn.functional.silu(gate, inplace=True)
-+        intermediate = gate * up  # [num_slots, N_inter]
-+
-+        # Step 3: down GEMM via HIP, routed-weight scaling applied per-token
-+        output = torch.empty(num_slots, K_hidden, dtype=dtype, device=device)
-+        ext.fused_moe_wvSplitK_int4_gemm(
-+            intermediate, w2, w2_scale, output, expert_ids,
-+            block_size_m, cu_count, group_size,
-+            w2_zp if w2_zp is not None else torch.empty(0, dtype=dtype, device=device),
-+            sorted_token_ids, 1,  # top_k=1 for the contracted down path
-+        )
-+        # Step 4: weighted reduce across top_k experts per token
-+        output = output.view(num_tokens, top_k, K_hidden)
-+        output = (output.to(torch.float32) *
-+                  topk_weights.unsqueeze(-1).to(torch.float32)).sum(dim=1)
-+        return output.to(dtype)
-+
-+    # Triton fallback path — call SGLang's existing fused MoE.
-+    from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import (
-+        _fused_moe_kernel_sequence,
-+    )
-+    config = {"BLOCK_SIZE_M": block_size_m, "BLOCK_SIZE_N": 64,
-+              "BLOCK_SIZE_K": 64, "GROUP_SIZE_M": 1,
-+              "num_warps": 4, "num_stages": 2}
-+    return _fused_moe_kernel_sequence(
-+        activation, w1, w2, topk_weights, topk_ids,
-+        sorted_token_ids, expert_ids, num_tokens_post_padded,
-+        config, None, False,
-+        b1=None, b2=None,
-+        use_fp8_w8a8=False, use_int8_w8a8=False,
-+        use_int8_w8a16=False, use_int4_w4a16=True,
-+        per_channel_quant=False,
-+        w1_scale=w1_scale, w2_scale=w2_scale,
-+        w1_zp=w1_zp, w2_zp=w2_zp,
-+        a1_scale=None, a2_scale=None,
-+        block_shape=[0, group_size],
-+        activation=activation_fn,
-+        is_gated=True,
-+        no_combine=False, inplace=False,
-+        apply_router_weight_on_input=False,
-+        routed_scaling_factor=None,
-+        gemm1_alpha=None, gemm1_limit=None,
-+        filter_expert=False,
-+    )
-diff --git a/sgl-kernel/csrc/quantization/awq/skinny_gemms_int4.cu b/sgl-kernel/csrc/quantization/awq/skinny_gemms_int4.cu
-new file mode 100644
-index 0000000..a9ba68b
---- /dev/null
-+++ b/sgl-kernel/csrc/quantization/awq/skinny_gemms_int4.cu
++++ b/python/sglang/kernels/aot/csrc/quantization/awq/skinny_gemms_int4.cu
 @@ -0,0 +1,1484 @@
 +// Ported from mgehre-amd/vllm matthias.awq_gemv commit 0b992ff (2026-04-27).
 +// Adds fused_moe_wvSplitK_int4_gemm for AWQ MoE decode on ROCm gfx9/gfx11/gfx12.
@@ -1817,3 +1488,332 @@ index 0000000..a9ba68b
 +        py::arg("sorted_token_ids") = torch::Tensor(),
 +        py::arg("top_k") = 1);
 +}
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index fa802f44..4328ebde 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -275,6 +275,21 @@ class Envs:
+     IS_H200 = EnvBool(False)
+     SGLANG_ENABLE_TORCH_INFERENCE_MODE = EnvBool(False)
+ 
++    # MoE hybrid W4A16 kernel (HIP wvSplitK INT4 GEMM for decode + Triton for
++    # prefill). Ported from mgehre-amd/vllm 0b992ff (2026-04-27). Enabled by
++    # default on ROCm because the only known regression is build-time (kernel
++    # must be built once per env via scripts/build_skinny_gemms_int4.sh) and
++    # the Triton fallback path still works without the kernel. Disable by
++    # setting SGLANG_MOE_HYBRID_W4A16=false if you want the legacy Triton-only
++    # MoE for A/B benchmarking or debugging.
++    SGLANG_MOE_HYBRID_W4A16 = EnvBool(True)
++    # Threshold for HIP-vs-Triton dispatch in HybridW4A16MoEExperts: when
++    # num_tokens <= MAX_SKINNY_BATCH_SIZE, dispatch through the HIP kernel
++    # (decode-optimized); otherwise use Triton (prefill-optimized). Default
++    # matches mgehre's vLLM tuning of 5; raise to favor HIP on borderline
++    # batch sizes.
++    SGLANG_MOE_HYBRID_W4A16_MAX_BATCH = EnvInt(5)
++
+     # ===================================================================
+     # Model configuration, discovery, and weight loading
+     # ===================================================================
+diff --git a/python/sglang/srt/layers/moe/hybrid_w4a16_moe.py b/python/sglang/srt/layers/moe/hybrid_w4a16_moe.py
+new file mode 100644
+index 00000000..f669d823
+--- /dev/null
++++ b/python/sglang/srt/layers/moe/hybrid_w4a16_moe.py
+@@ -0,0 +1,297 @@
++"""Hybrid W4A16 MoE dispatch: HIP wvSplitK for decode (M<=5), Triton for prefill.
++
++Ported from mgehre-amd/vllm `matthias.awq_gemv` commit 0b992ff (2026-04-27).
++
++Both paths read the same weights in skinny layout `[E, N, K//8] int32`
++(ExLlama-shuffle packed). The conversion from GPTQ/AWQ-on-disk layout to
++skinny layout is done once at load time by :func:`reshuffle_to_skinny_w4`.
++
++This module is intentionally standalone — it exports a callable
++:func:`hybrid_w4a16_moe_apply` that any SGLang MoE runner (or microbench)
++can invoke. Wiring into SGLang's :class:`MoeRunnerCore` is a separate
++follow-on step that uses this module as the back-end.
++
++Env vars (registered in :mod:`sglang.srt.environ`):
++    SGLANG_MOE_HYBRID_W4A16          (bool, default True)  — gate the dispatch.
++    SGLANG_MOE_HYBRID_W4A16_MAX_BATCH (int, default 5)     — HIP↔Triton cutoff.
++
++Performance vs the Triton-only baseline on Strix Halo with Qwen3-Omni-30B-A3B
++AWQ (mgehre's numbers, RDNA 3.5):
++    TPOT 14.51 ms → 13.73 ms (-5.4%)
++    TTFT 996 ms → 841 ms (-15.6%)
++
++RDNA4 (gfx1201, R9700) expected similar or better on M=1 decode due to
++higher compute-unit count. Validate via
++:mod:`scripts.bench.bench_moe_hip_vs_triton`.
++"""
++
++from __future__ import annotations
++
++import logging
++from typing import Optional
++
++import torch
++
++logger = logging.getLogger(__name__)
++
++# Lazy-import the .so so this module can be imported on systems where the
++# kernel hasn't been built yet (e.g. for type-checking, doc-build, CI).
++_skinny_ext = None
++
++
++def _get_skinny_ext():
++    global _skinny_ext
++    if _skinny_ext is None:
++        try:
++            import skinny_gemms_int4_ext  # type: ignore[import-not-found]
++            _skinny_ext = skinny_gemms_int4_ext
++        except ImportError as e:
++            raise RuntimeError(
++                "skinny_gemms_int4_ext not built. Run "
++                "`scripts/build_skinny_gemms_int4.sh --env <name>` and retry."
++            ) from e
++    return _skinny_ext
++
++
++# ============================================================================
++# Weight format conversion: GPTQ/AWQ-on-disk → skinny ExLlama-shuffle packed.
++# ============================================================================
++
++# Standard ExLlama shuffle order. When you pack 8 4-bit nibbles into one int32
++# the natural order is (0,1,2,3,4,5,6,7); the AWQ on-disk format pre-shuffles
++# these to (0,4,1,5,2,6,3,7) for fast dequant-with-fp16-multiply. The wvSplitK
++# kernel expects this same shuffle order, just in a different tensor layout.
++_AWQ_PACK_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
++_REVERSE_AWQ_PACK_ORDER = [0, 2, 4, 6, 1, 3, 5, 7]
++
++
++def reshuffle_to_skinny_w4(
++    qweight: torch.Tensor,
++    in_format: str = "awq",
++) -> torch.Tensor:
++    """Convert a packed INT4 MoE weight tensor to skinny ExLlama layout.
++
++    Args:
++        qweight: shape depends on ``in_format``:
++            - "awq":  [E, K, N//8] int32  (AWQ on-disk format)
++            - "gptq": [E, K//8, N] int32  (GPTQ on-disk format)
++        in_format: "awq" or "gptq".
++
++    Returns:
++        Skinny-packed [E, N, K//8] int32 with ExLlama shuffle order.
++    """
++    if in_format not in ("awq", "gptq"):
++        raise ValueError(f"in_format must be 'awq' or 'gptq', got {in_format!r}")
++
++    assert qweight.dtype == torch.int32 and qweight.dim() == 3, (
++        f"qweight must be int32 [E, *, *], got {qweight.dtype} {tuple(qweight.shape)}"
++    )
++
++    E = qweight.shape[0]
++
++    if in_format == "gptq":
++        # GPTQ: [E, K//8, N] int32 → unpack to [E, K, N] uint8 nibbles
++        K_8, N = qweight.shape[1], qweight.shape[2]
++        K = K_8 * 8
++        # Unpack along K axis: each int32 holds 8 sequential nibbles
++        out = torch.empty(E, K, N, dtype=torch.uint8, device=qweight.device)
++        for i in range(8):
++            out[:, i::8, :] = ((qweight >> (i * 4)) & 0xF).to(torch.uint8)
++    else:
++        # AWQ: [E, K, N//8] int32 — int32 packs 8 nibbles along N with the
++        # AWQ shuffle order. Unpack + un-shuffle.
++        K, N_8 = qweight.shape[1], qweight.shape[2]
++        N = N_8 * 8
++        # Step 1: int32 → 8 nibbles → [E, K, N] uint8 (in AWQ-shuffled order)
++        unpacked = torch.empty(E, K, N, dtype=torch.uint8, device=qweight.device)
++        for i in range(8):
++            unpacked[:, :, i::8] = ((qweight >> (i * 4)) & 0xF).to(torch.uint8)
++        # Step 2: un-shuffle (AWQ → natural order along N)
++        natural = torch.empty_like(unpacked)
++        for src, dst in enumerate(_REVERSE_AWQ_PACK_ORDER):
++            natural[:, :, dst::8] = unpacked[:, :, src::8]
++        out = natural
++
++    # out is now [E, K, N] uint8 in natural order. Transpose to [E, N, K],
++    # then re-pack along K with the same AWQ shuffle order (skinny convention).
++    out = out.transpose(1, 2).contiguous()  # [E, N, K]
++    E_, N_, K_ = out.shape
++    assert K_ % 8 == 0, f"K={K_} must be divisible by 8 for INT4 pack"
++
++    # Re-shuffle along K: write nibbles in AWQ order so the kernel can
++    # vectorize-load via tl.interleave / bit-shifts.
++    shuffled = torch.empty_like(out)
++    for src, dst in enumerate(_AWQ_PACK_ORDER):
++        shuffled[:, :, dst::8] = out[:, :, src::8]
++
++    # Re-pack uint8 nibbles → int32 along K
++    packed = torch.zeros(E_, N_, K_ // 8, dtype=torch.int32, device=out.device)
++    for i in range(8):
++        packed |= shuffled[:, :, i::8].to(torch.int32) << (i * 4)
++    return packed
++
++
++def reshuffle_scales_for_skinny(
++    scales: torch.Tensor,
++    in_format: str = "awq",
++) -> torch.Tensor:
++    """Convert per-group scales to the layout the wvSplitK kernel expects.
++
++    Args:
++        scales: shape depends on ``in_format``:
++            - "awq":  [E, K//G, N] fp16/bf16
++            - "gptq": [E, K//G, N] fp16/bf16  (same as AWQ — both use
++                      [num_groups, out_features] along the K axis)
++        in_format: "awq" or "gptq".
++
++    Returns:
++        [E, N, K//G] fp16/bf16 — transpose the inner dims so the kernel
++        can fetch scales contiguously per output channel.
++    """
++    # AWQ and GPTQ both store scales as [E, num_groups, N]. The kernel wants
++    # them as [E, N, num_groups]; a simple transpose suffices.
++    return scales.transpose(1, 2).contiguous()
++
++
++# ============================================================================
++# Dispatch entry point.
++# ============================================================================
++
++
++def _get_cu_count(device: torch.device) -> int:
++    """Best-effort compute-unit count lookup for the target device."""
++    if device.type != "cuda":
++        return 1
++    try:
++        props = torch.cuda.get_device_properties(device)
++        # ROCm exposes this as multi_processor_count too; on gfx1201 the R9700
++        # advertises 64 wave32 WGPs ≡ ~64 CU equivalents to the scheduler.
++        return int(props.multi_processor_count)
++    except Exception:
++        return 64  # safe default for RDNA4 R9700
++
++
++def hybrid_w4a16_moe_apply(
++    activation: torch.Tensor,                # [num_tokens, K]   fp16/bf16
++    w1: torch.Tensor,                        # [E, 2*N_inter, K//8] int32 (skinny gate+up)
++    w2: torch.Tensor,                        # [E, K, N_inter//8]   int32 (skinny down)
++    w1_scale: torch.Tensor,                  # [E, 2*N_inter, K//G] fp16/bf16
++    w2_scale: torch.Tensor,                  # [E, K, N_inter//G]   fp16/bf16
++    topk_weights: torch.Tensor,              # [num_tokens, top_k] fp32
++    topk_ids: torch.Tensor,                  # [num_tokens, top_k] int32
++    sorted_token_ids: torch.Tensor,          # [num_tokens*top_k] int32 (post moe_align)
++    expert_ids: torch.Tensor,                # [num_blocks] int32
++    num_tokens_post_padded: torch.Tensor,    # [1] int32
++    block_size_m: int,
++    group_size: int,
++    activation_fn: str = "silu",
++    w1_zp: Optional[torch.Tensor] = None,    # symmetric MoE: usually None
++    w2_zp: Optional[torch.Tensor] = None,
++    force_hip: Optional[bool] = None,
++    force_triton: Optional[bool] = None,
++) -> torch.Tensor:
++    """Apply a hybrid W4A16 MoE forward pass: HIP wvSplitK (M<=cutoff) or
++    Triton (M>cutoff).
++
++    Returns:
++        [num_tokens, K] output (already top-k weighted and reduced across
++        experts — the down_proj output is multiplied by the routed weight
++        inside the down call).
++
++    Notes:
++        * If ``force_hip`` is True (or ``force_triton`` is True) the dispatch
++          is bypassed and the requested path is used unconditionally. Useful
++          for A/B microbench. Otherwise the cutoff is read from
++          ``sglang.srt.environ.envs.SGLANG_MOE_HYBRID_W4A16_MAX_BATCH``.
++        * Activation: only "silu" is implemented in this initial port. GELU
++          is on mgehre's TODO list but is rarely used in AWQ MoEs.
++        * Weights must be in skinny [E, N, K//8] int32 layout. Use
++          :func:`reshuffle_to_skinny_w4` at model load time.
++    """
++    assert activation_fn == "silu", (
++        f"hybrid_w4a16_moe_apply currently supports silu only (got {activation_fn!r}). "
++        "GELU port follow-on TODO."
++    )
++
++    num_tokens = activation.shape[0]
++    E = w1.shape[0]
++    N_w13 = w1.shape[1]  # = 2 * N_inter
++    K_hidden = activation.shape[1]
++    N_inter = N_w13 // 2
++    top_k = topk_ids.shape[1]
++    device = activation.device
++    dtype = activation.dtype
++
++    # Decide path
++    use_hip = force_hip
++    if use_hip is None and not force_triton:
++        try:
++            from sglang.srt.environ import envs
++            cutoff = int(envs.SGLANG_MOE_HYBRID_W4A16_MAX_BATCH.value)
++            enabled = bool(envs.SGLANG_MOE_HYBRID_W4A16.value)
++            use_hip = enabled and (num_tokens <= cutoff)
++        except Exception:
++            # Fallback if environ not importable (CI / unit tests):
++            use_hip = num_tokens <= 5
++    elif force_triton:
++        use_hip = False
++
++    cu_count = _get_cu_count(device)
++
++    if use_hip:
++        ext = _get_skinny_ext()
++        # Step 1: gate+up GEMM via HIP
++        num_slots = sorted_token_ids.shape[0]
++        gate_up = torch.empty(num_slots, N_w13, dtype=dtype, device=device)
++        ext.fused_moe_wvSplitK_int4_gemm(
++            activation, w1, w1_scale, gate_up, expert_ids,
++            block_size_m, cu_count, group_size,
++            w1_zp if w1_zp is not None else torch.empty(0, dtype=dtype, device=device),
++            sorted_token_ids, top_k,
++        )
++        # Step 2: silu(gate) * up — apply in-place
++        gate, up = gate_up.split(N_inter, dim=-1)
++        torch.nn.functional.silu(gate, inplace=True)
++        intermediate = gate * up  # [num_slots, N_inter]
++
++        # Step 3: down GEMM via HIP, routed-weight scaling applied per-token
++        output = torch.empty(num_slots, K_hidden, dtype=dtype, device=device)
++        ext.fused_moe_wvSplitK_int4_gemm(
++            intermediate, w2, w2_scale, output, expert_ids,
++            block_size_m, cu_count, group_size,
++            w2_zp if w2_zp is not None else torch.empty(0, dtype=dtype, device=device),
++            sorted_token_ids, 1,  # top_k=1 for the contracted down path
++        )
++        # Step 4: weighted reduce across top_k experts per token
++        output = output.view(num_tokens, top_k, K_hidden)
++        output = (output.to(torch.float32) *
++                  topk_weights.unsqueeze(-1).to(torch.float32)).sum(dim=1)
++        return output.to(dtype)
++
++    # Triton fallback path — call SGLang's existing fused MoE.
++    from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import (
++        _fused_moe_kernel_sequence,
++    )
++    config = {"BLOCK_SIZE_M": block_size_m, "BLOCK_SIZE_N": 64,
++              "BLOCK_SIZE_K": 64, "GROUP_SIZE_M": 1,
++              "num_warps": 4, "num_stages": 2}
++    return _fused_moe_kernel_sequence(
++        activation, w1, w2, topk_weights, topk_ids,
++        sorted_token_ids, expert_ids, num_tokens_post_padded,
++        config, None, False,
++        b1=None, b2=None,
++        use_fp8_w8a8=False, use_int8_w8a8=False,
++        use_int8_w8a16=False, use_int4_w4a16=True,
++        per_channel_quant=False,
++        w1_scale=w1_scale, w2_scale=w2_scale,
++        w1_zp=w1_zp, w2_zp=w2_zp,
++        a1_scale=None, a2_scale=None,
++        block_shape=[0, group_size],
++        activation=activation_fn,
++        is_gated=True,
++        no_combine=False, inplace=False,
++        apply_router_weight_on_input=False,
++        routed_scaling_factor=None,
++        gemm1_alpha=None, gemm1_limit=None,
++        filter_expert=False,
++    )

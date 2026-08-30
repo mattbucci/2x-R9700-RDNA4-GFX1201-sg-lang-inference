@@ -1,23 +1,26 @@
 diff --git a/python/sglang/srt/layers/attention/triton_backend.py b/python/sglang/srt/layers/attention/triton_backend.py
-index e71f4f5..7a84ea5 100644
+index f3d0d71b..766cb500 100644
 --- a/python/sglang/srt/layers/attention/triton_backend.py
 +++ b/python/sglang/srt/layers/attention/triton_backend.py
-@@ -190,8 +190,17 @@ class TritonAttnBackend(AttentionBackend):
-             hybrid_gdn_config(model_runner.model_config) is not None
-             or kimi_linear_config(model_runner.model_config) is not None
-             or linear_attn_model_spec(model_runner.model_config) is not None
-+            or hasattr(model_runner.token_to_kv_pool, "get_v_head_dim")
-         ):
--            # For hybrid linear models, layer_id = 0 may not be full attention
-+            # For hybrid linear/Mamba models, layer_id = 0 may not be full attention
-+            # (e.g. NemotronH Mamba2 hybrids: full-attn layers live at sparse indices
-+            # like [5,12,19,26,33,42], layer 0 is a Mamba layer with NO full-attn KV
-+            # buffer). The config-property checks above miss the Nano-Omni config class
-+            # (loaded via trust-remote-code, not recognized by mamba2_config), so also
+@@ -224,12 +224,20 @@ class TritonAttnBackend(AttentionBackend):
+         if self.sliding_window_size is not None and swa_v_head_dim != full_v_head_dim:
+             self.v_head_dim = full_v_head_dim
+             self.swa_v_head_dim = swa_v_head_dim
+-        elif mambaish_config(model_runner.model_config) is not None:
++        elif mambaish_config(model_runner.model_config) is not None or hasattr(
++            model_runner.token_to_kv_pool, "get_v_head_dim"
++        ):
+             # For hybrid linear models, layer_id = 0 may not be full attention
+             # (e.g. NemotronH's full-attn layers are [5,12,19,...]). mambaish_config
+             # unions mamba2 (NemotronH/FalconH1/...), hybrid-GDN, kimi-linear, and
+             # linear-attn specs, so we ask get_v_head_dim() instead of indexing
+             # layer 0, which is not guaranteed to be a full-attention layer.
++            # The config-class checks miss the Nano-Omni config class (loaded via
++            # trust-remote-code, not an isinstance match in mamba2_config), so also
 +            # duck-type on the pool: a HybridLinearKVPool exposes get_v_head_dim(),
-+            # which samples the full_kv_pool's first full-attention layer. Without this,
-+            # get_value_buffer(0) below raises 'layer_id=0 not in full attention layers'
-+            # and triton attention can't init for these hybrids.  (RDNA4 patch)
++            # which samples the full_kv_pool's first full-attention layer. Without
++            # this, get_value_buffer(start_layer) below raises 'layer_id=0 not in
++            # full attention layers' and triton attention can't init.  (RDNA4 patch)
              self.v_head_dim = model_runner.token_to_kv_pool.get_v_head_dim()
              self.swa_v_head_dim = None
          else:

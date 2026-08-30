@@ -1,5 +1,5 @@
 diff --git a/python/sglang/kernels/ops/moe/fused_moe_triton_kernels.py b/python/sglang/kernels/ops/moe/fused_moe_triton_kernels.py
-index 54b38f5..99ed97c 100644
+index 8c165252..607873f0 100644
 --- a/python/sglang/kernels/ops/moe/fused_moe_triton_kernels.py
 +++ b/python/sglang/kernels/ops/moe/fused_moe_triton_kernels.py
 @@ -42,6 +42,26 @@ _is_cpu_amx_available = cpu_has_amx_support()
@@ -135,7 +135,7 @@ index 54b38f5..99ed97c 100644
  @triton.jit
  def fused_moe_kernel(
      # Pointers to matrices
-@@ -495,10 +614,7 @@ def fused_moe_kernel(
+@@ -502,10 +621,7 @@ def fused_moe_kernel(
                  a_scale_ptrs = a_scale_ptr + offs_token_id * stride_asm
              else:
                  a_scale_ptrs = a_scale_ptr + (offs_token // top_k) * stride_asm
@@ -147,7 +147,7 @@ index 54b38f5..99ed97c 100644
              b_scale_ptrs = (
                  b_scale_ptr + off_experts * stride_bse + offs_bsn * stride_bsn
              )
-@@ -550,8 +666,6 @@ def fused_moe_kernel(
+@@ -557,8 +673,6 @@ def fused_moe_kernel(
                  .reshape(BLOCK_SIZE_N, BLOCK_SIZE_K)
                  .T
              )
@@ -156,7 +156,7 @@ index 54b38f5..99ed97c 100644
          else:
              b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k_start, other=0.0)
  
-@@ -560,18 +674,17 @@ def fused_moe_kernel(
+@@ -567,18 +681,17 @@ def fused_moe_kernel(
              accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
          elif use_fp8_w8a8 or use_int8_w8a8:
              if group_k > 0 and group_n > 0:
@@ -181,7 +181,7 @@ index 54b38f5..99ed97c 100644
              else:
                  if use_fp8_w8a8:
                      if swap_ab:
-@@ -711,6 +824,103 @@ def _get_b_tma_desc_cached(B: torch.Tensor, block_n: int, block_k: int):
+@@ -768,6 +881,103 @@ def _get_b_tma_desc_cached(B: torch.Tensor, block_n: int, block_k: int):
      return desc
  
  
@@ -285,9 +285,9 @@ index 54b38f5..99ed97c 100644
  def invoke_fused_moe_kernel(
      A: torch.Tensor,
      B: torch.Tensor,
-@@ -749,6 +959,18 @@ def invoke_fused_moe_kernel(
-     assert topk_weights.stride(1) == 1
-     assert sorted_token_ids.stride(0) == 1
+@@ -819,6 +1029,18 @@ def invoke_fused_moe_kernel(
+         assert not lora_preserve_base
+         assert compute_type == tl.bfloat16
  
 +    # RDNA4: skip FP8 activation quantization entirely — our torch MoE works with BF16 inputs
 +    # and dequantizes FP8 weights internally. This avoids Triton quant kernel compilation
@@ -304,7 +304,7 @@ index 54b38f5..99ed97c 100644
      if use_fp8_w8a8:
          swap_ab = should_enable_swap_ab(config["BLOCK_SIZE_M"], config["BLOCK_SIZE_N"])
      else:
-@@ -806,12 +1028,24 @@ def invoke_fused_moe_kernel(
+@@ -882,12 +1104,24 @@ def invoke_fused_moe_kernel(
          * triton.cdiv(B.shape[1], META["BLOCK_SIZE_N"]),
      )
  
@@ -330,7 +330,7 @@ index 54b38f5..99ed97c 100644
          assert not c_sorted, "fuse_sum_all_reduce only supports c_sorted=False"
      if fuse_add_to_output:
 diff --git a/python/sglang/srt/layers/moe/fused_moe_triton/layer.py b/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
-index 87cd13a..05dab97 100644
+index a8feead4..6c10fa0b 100644
 --- a/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
 +++ b/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
 @@ -38,7 +38,10 @@ from sglang.srt.layers.moe.token_dispatcher.ascend_tp import (
@@ -347,7 +347,7 @@ index 87cd13a..05dab97 100644
  )
 diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=1536,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=1536,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json
 new file mode 100644
-index 0000000..d788814
+index 00000000..d7888148
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=1536,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json	
 @@ -0,0 +1,74 @@
@@ -427,7 +427,7 @@ index 0000000..d788814
 +}
 diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=1536,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=1536,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json
 new file mode 100644
-index 0000000..d788814
+index 00000000..d7888148
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=1536,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json	
 @@ -0,0 +1,74 @@
@@ -507,7 +507,7 @@ index 0000000..d788814
 +}
 diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=2048,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=2048,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json
 new file mode 100644
-index 0000000..d788814
+index 00000000..d7888148
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=2048,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json	
 @@ -0,0 +1,74 @@
@@ -587,7 +587,7 @@ index 0000000..d788814
 +}
 diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=2048,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=2048,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json
 new file mode 100644
-index 0000000..d788814
+index 00000000..d7888148
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=2048,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json	
 @@ -0,0 +1,74 @@
@@ -667,7 +667,7 @@ index 0000000..d788814
 +}
 diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=384,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=384,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json
 new file mode 100644
-index 0000000..ac815ea
+index 00000000..ac815ea8
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=384,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json	
 @@ -0,0 +1,106 @@
@@ -779,7 +779,7 @@ index 0000000..ac815ea
 +}
 diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=384,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=384,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json
 new file mode 100644
-index 0000000..ac815ea
+index 00000000..ac815ea8
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=384,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json	
 @@ -0,0 +1,106 @@
@@ -891,7 +891,7 @@ index 0000000..ac815ea
 +}
 diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=768,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=768,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json
 new file mode 100644
-index 0000000..d788814
+index 00000000..d7888148
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=768,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128].json	
 @@ -0,0 +1,74 @@
@@ -971,7 +971,7 @@ index 0000000..d788814
 +}
 diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=768,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=768,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json
 new file mode 100644
-index 0000000..d788814
+index 00000000..d7888148
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_6_0/E=128,N=768,device_name=AMD_Radeon_AI_PRO_R9700,dtype=fp8_w8a8,block_shape=[128, 128]_down.json	
 @@ -0,0 +1,74 @@
@@ -1051,14 +1051,14 @@ index 0000000..d788814
 +}
 diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_7_0 b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_7_0
 new file mode 120000
-index 0000000..fd7c245
+index 00000000..fd7c245f
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/configs/triton_3_7_0
 @@ -0,0 +1 @@
 +triton_3_6_0
 \ No newline at end of file
 diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py b/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py
-index 6b1f011..b880aba 100644
+index f503fd1b..eb44f8f1 100644
 --- a/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py
 +++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py
 @@ -64,7 +64,17 @@ if _is_cuda:
@@ -1080,7 +1080,7 @@ index 6b1f011..b880aba 100644
  
      if _use_aiter:
          try:
-@@ -322,13 +332,13 @@ def fused_experts(
+@@ -338,13 +348,13 @@ def fused_experts(
          )
  
  
@@ -1096,7 +1096,7 @@ index 6b1f011..b880aba 100644
  def _swiglu_silu_clamp_mul(x, gemm1_limit):
      gate, up = x.chunk(2, dim=-1)
      gate = F.silu(gate)
-@@ -337,7 +347,6 @@ def _swiglu_silu_clamp_mul(x, gemm1_limit):
+@@ -353,7 +363,6 @@ def _swiglu_silu_clamp_mul(x, gemm1_limit):
      return gate * up
  
  
@@ -1105,7 +1105,7 @@ index 6b1f011..b880aba 100644
      # NOTE: This variant uses gemm1_alpha, unlike _swiglu_silu_clamp_mul.
      # At present, only GPT-OSS uses this variant.
 diff --git a/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_config.py b/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_config.py
-index 210247f..915edc2 100644
+index c4ad7d49..7d61bd55 100644
 --- a/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_config.py
 +++ b/python/sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe_triton_config.py
 @@ -32,6 +32,19 @@ def _use_low_smem_fp8_default() -> bool:
@@ -1145,7 +1145,7 @@ index 210247f..915edc2 100644
      else:
          config = {
 diff --git a/python/sglang/srt/layers/moe/token_dispatcher/__init__.py b/python/sglang/srt/layers/moe/token_dispatcher/__init__.py
-index b605f74..924fa94 100644
+index 7f2c0942..1ab7c0b7 100644
 --- a/python/sglang/srt/layers/moe/token_dispatcher/__init__.py
 +++ b/python/sglang/srt/layers/moe/token_dispatcher/__init__.py
 @@ -21,10 +21,14 @@ from sglang.srt.layers.moe.token_dispatcher.deepep import (
@@ -1168,10 +1168,10 @@ index b605f74..924fa94 100644
      MooncakeCombineInput,
      MooncakeDispatchOutput,
 diff --git a/python/sglang/srt/layers/moe/topk.py b/python/sglang/srt/layers/moe/topk.py
-index 9c47af7..b255fd8 100644
+index 452d6b8d..e63bf9f4 100644
 --- a/python/sglang/srt/layers/moe/topk.py
 +++ b/python/sglang/srt/layers/moe/topk.py
-@@ -850,6 +850,14 @@ def fused_topk(
+@@ -893,6 +893,14 @@ def fused_topk(
                  scoring_func="softmax",
                  renormalize=renormalize,
              )
@@ -1186,7 +1186,7 @@ index 9c47af7..b255fd8 100644
          else:
              topk_softmax(
                  topk_weights,
-@@ -925,7 +933,7 @@ def fused_topk(
+@@ -968,7 +976,7 @@ def fused_topk(
  
  
  # This is used by the Deepseek V2/V3/R1 series models
@@ -1195,7 +1195,7 @@ index 9c47af7..b255fd8 100644
  def grouped_topk_gpu(
      hidden_states: torch.Tensor,
      gating_output: torch.Tensor,
-@@ -1080,7 +1088,7 @@ def grouped_topk_xpu(
+@@ -1126,7 +1134,7 @@ def grouped_topk_xpu(
      )
  
  
@@ -1204,7 +1204,7 @@ index 9c47af7..b255fd8 100644
  def kimi_k2_biased_topk_impl(
      hidden_states: torch.Tensor,
      gating_output: torch.Tensor,
-@@ -1235,7 +1243,7 @@ def biased_topk_jit_kernel_impl(
+@@ -1287,7 +1295,7 @@ def biased_topk_jit_kernel_impl(
          return topk_weights, topk_ids
  
  

@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/model_executor/model_runner_components/load_model_utils.py b/python/sglang/srt/model_executor/model_runner_components/load_model_utils.py
-index c55ba80..6ffa0fa 100644
+index 86ac470a..24296897 100644
 --- a/python/sglang/srt/model_executor/model_runner_components/load_model_utils.py
 +++ b/python/sglang/srt/model_executor/model_runner_components/load_model_utils.py
-@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
+@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
  _is_npu = is_npu()
  
  
@@ -10,4 +10,4 @@ index c55ba80..6ffa0fa 100644
 +UNBALANCED_MODEL_LOADING_TIMEOUT_S = 1800  # leave more time for post data processing (R9700: big TP2 models on cold page cache skew >480s between ranks)
  
  
- class LoadedModel(msgspec.Struct, frozen=True, kw_only=True):
+ def maybe_precompile_model_kernels_after_loading(model, device: str) -> None:

@@ -20,8 +20,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
-SGL_KERNEL_DIR="${SGL_KERNEL_DIR:-$REPO_DIR/components/sglang/sgl-kernel}"  # overridable for version rebases
-SRC_FILE="$SGL_KERNEL_DIR/csrc/quantization/awq/skinny_gemms_int4.cu"
+SGL_KERNEL_DIR="${SGL_KERNEL_DIR:-}"  # resolved after common.sh (version-aware default)
 
 TARGET_ENV=""
 while [[ $# -gt 0 ]]; do
@@ -34,6 +33,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 source "$SCRIPT_DIR/common.sh"
+SGL_KERNEL_DIR="${SGL_KERNEL_DIR:-$(default_sgl_kernel_dir)}"
+SRC_FILE="$SGL_KERNEL_DIR/csrc/quantization/awq/skinny_gemms_int4.cu"
 init_conda
 
 if [ -n "$TARGET_ENV" ]; then
