@@ -142,7 +142,7 @@ can be proposed upstream. `Partial` requires a fresh comparison with upstream be
 | 025 | `gemma4-vision-pooler-padding-fp32` | Carry | Performs vision-pooler padding in FP32 to avoid overflow. |
 | 026 | `gemma4-mm-video-per-frame-batching` | Carry | Processes image and video frames individually through the vision tower to avoid invalid batched pooler shapes and the all-frames position one-hot (~1.15 GiB for 12 frames) that OOMs a 128K dense server. |
 | 061 | `gemma4-mm-pp-wrap-restore` | Carry | Restores correct pipeline-parallel wrapping for Gemma multimodal towers. |
-| 098 | `gemma4-unified-native-config` | Candidate | Registers transformers' native `Gemma4UnifiedConfig` for `model_type=gemma4_unified` (alias onto `Gemma4Config` only as the fallback for older transformers), so the encoder-free 12B gets `vision_config.model_patch_size`. |
+| 098 | `gemma4-unified-native-config` | Candidate | Registers transformers' native `Gemma4UnifiedConfig` for `model_type=gemma4_unified` (alias onto `Gemma4Config` only as the fallback for older transformers), so the encoder-free 12B gets `vision_config.model_patch_size`; also sets `lm_head_is_tied` in the unified `__init__`, which the shared v0.5.18 `Gemma4ForConditionalGeneration.forward` reads. |
 
 ### Model, parser, and speculative-decode plumbing
 
