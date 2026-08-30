@@ -51,6 +51,31 @@ def _read_secret_file(env_name: str) -> str:
     return value
 
 
+def _resolve_server_args(server_args, **fields):
+    """Set policy/credential fields on the parsed ServerArgs.
+
+    SGLang v0.5.17+ makes the resolved ServerArgs read-only (plain attribute
+    assignment raises AttributeError once the declarations are materialized);
+    the sanctioned pre-publish mutation point is ``_late_resolution(source,
+    **fields)`` (v0.5.18) / ``override(source, **fields)`` (v0.5.17), which
+    writes in place so every holder of the instance sees the value. Older
+    releases have neither and accept plain assignment.
+    """
+    for method in ("_late_resolution", "override"):
+        resolver = getattr(server_args, method, None)
+        if callable(resolver):
+            try:
+                resolver("secure-launch", **fields)
+            except TypeError:
+                continue
+            for name, value in fields.items():
+                if getattr(server_args, name) != value:
+                    _fail(f"secure launcher could not set server_args.{name}")
+            return
+    for name, value in fields.items():
+        setattr(server_args, name, value)
+
+
 def main() -> None:
     if os.environ.get("SGLANG_API_KEY") or os.environ.get("SGLANG_ADMIN_API_KEY"):
         _fail("direct credential environment variables are disabled")
@@ -219,12 +244,15 @@ def main() -> None:
             + ", ".join(enabled_unsafe_modes)
         )
 
-    server_args.api_key = api_key
-    server_args.admin_api_key = admin_api_key
-    server_args.trust_remote_code = trust_remote_code == "1"
-    server_args.enable_metrics = enable_metrics == "1"
-    server_args.max_queued_requests = int(max_queued_requests)
-    server_args.enable_custom_logit_processor = False
+    _resolve_server_args(
+        server_args,
+        api_key=api_key,
+        admin_api_key=admin_api_key,
+        trust_remote_code=trust_remote_code == "1",
+        enable_metrics=enable_metrics == "1",
+        max_queued_requests=int(max_queued_requests),
+        enable_custom_logit_processor=False,
+    )
     try:
         run_server(server_args)
     finally:
