@@ -61,7 +61,7 @@ def parse_args():
                    help="Skip pre-rollout venv setup — agent runs read-edit-pray "
                         "without a working test loop. Compatible with v1 runs.")
     p.add_argument("--scaffold", default="opencode",
-                   choices=["opencode", "little-coder", "claw-code"],  # claw-code deprecated (unmaintained; kept for reproducing historical cells)
+                   choices=["opencode", "little-coder", "claw-code", "omp"],  # claw-code deprecated (unmaintained; kept for reproducing historical cells)
                    help="Coding-agent scaffold to drive (host-side, no docker)")
     p.add_argument("--shard", default=None,
                    help="K/N: process only instances where index%%N==K (for concurrent "
@@ -304,6 +304,52 @@ def run_claw(served: str, claw_bin: str, repo_dir: Path, prompt: str, timeout: i
     return _popen_agent(cmd, str(repo_dir), env, timeout, log_path)
 
 
+OMP_PROFILE_DIR = ".omp-swebench"  # relative to $HOME (PI_CONFIG_DIR semantics)
+
+
+def _ensure_omp_profile(served: str, server_url: str) -> None:
+    """Write the harness-owned omp profile (oh-my-pi). omp validates the model
+    against its registry before sending, so the local SGLang endpoint is
+    declared as a custom `sglang` provider with one model id = the served
+    name. Kept out of ~/.omp so the user's own omp config is untouched.
+    Verified 2026-08-30 with omp/18.0.11 (headless -p + --yolo)."""
+    agent_dir = Path.home() / OMP_PROFILE_DIR / "agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "models.yml").write_text(f"""providers:
+  sglang:
+    name: SGLang local
+    api: openai-completions
+    baseUrl: {server_url.rstrip('/')}/v1
+    apiKey: noop
+    models:
+      - id: {served}
+        name: {served} (SGLang local)
+        api: openai-completions
+        reasoning: true
+        input: [text]
+        cost:
+          input: 0
+          output: 0
+          cacheRead: 0
+          cacheWrite: 0
+        contextWindow: 262144
+        maxTokens: 16384
+""")
+
+
+def run_omp(served: str, repo_dir: Path, prompt: str, timeout: int, log_path: Path,
+            extra_env: dict[str, str] | None = None,
+            server_url: str = "http://127.0.0.1:23334") -> tuple[int, str, str]:
+    # oh-my-pi headless: -p processes the prompt and exits; --yolo auto-approves
+    # tool calls (edits/bash) which headless runs need. Model routing via the
+    # harness-owned profile written by _ensure_omp_profile.
+    _ensure_omp_profile(served, server_url)
+    cmd = [str(Path.home() / ".local/bin/omp"), "--model", f"sglang/{served}",
+           "--yolo", "-p", prompt]
+    env = _base_env(extra_env, {"PI_CONFIG_DIR": OMP_PROFILE_DIR})
+    return _popen_agent(cmd, str(repo_dir), env, timeout, log_path)
+
+
 def capture_diff(repo_dir: Path) -> str:
     # Stage everything modified, untracked, deleted; capture diff against HEAD.
     subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True,
@@ -446,6 +492,10 @@ def main():
                     rc, _stdout, _stderr = run_little_coder(served, inst_dir, prompt, args.timeout,
                                                             log_path, extra_env=extra_env,
                                                             server_url=args.server_url)
+                elif args.scaffold == "omp":
+                    rc, _stdout, _stderr = run_omp(served, inst_dir, prompt, args.timeout,
+                                                   log_path, extra_env=extra_env,
+                                                   server_url=args.server_url)
                 else:  # claw-code
                     rc, _stdout, _stderr = run_claw(served, args.claw_bin, inst_dir, prompt, args.timeout,
                                                     log_path, extra_env=extra_env,
@@ -454,7 +504,8 @@ def main():
                 subprocess.run(["rm", "-rf",
                                 str(inst_dir / ".claw"), str(inst_dir / ".opencode"),
                                 str(inst_dir / ".sandbox-tmp"), str(inst_dir / ".sandbox-home"),
-                                str(inst_dir / ".cache"), str(inst_dir / ".pi")], check=False)
+                                str(inst_dir / ".cache"), str(inst_dir / ".pi"),
+                                str(inst_dir / ".omp")], check=False)
                 diff = capture_diff(inst_dir)
                 (out / "predictions" / f"{iid}.diff").write_text(diff)
 
