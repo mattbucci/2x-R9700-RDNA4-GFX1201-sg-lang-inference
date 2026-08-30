@@ -136,9 +136,9 @@ def write_cell_json(preset: str, scaffold: str, run_dir: Path,
 
 # claw-code retired 2026-08-30 (unmaintained): dropped from new tables; the run-dir
 # regexes below still recognize historical claw cells on disk.
-SCAFFOLDS = ("opencode", "opencode-dcp", "little-coder", "omp", "prime", "dcode")
-LEGACY_RUN_RE = re.compile(r"^(.*)-(opencode-dcp|opencode|little-coder|claw-code|omp|prime|dcode)-v2$")
-EXTERNAL_RUN_RE = re.compile(r"^(.*)-(opencode-dcp|opencode|little-coder|claw-code|omp|prime|dcode)$")
+SCAFFOLDS = ("opencode", "opencode-dcp", "little-coder", "little-coder-rtk", "omp", "prime", "dcode")
+LEGACY_RUN_RE = re.compile(r"^(.*)-(opencode-dcp|opencode|little-coder-rtk|little-coder|claw-code|omp|prime|dcode)-v2$")
+EXTERNAL_RUN_RE = re.compile(r"^(.*)-(opencode-dcp|opencode|little-coder-rtk|little-coder|claw-code|omp|prime|dcode)$")
 
 
 def _read_summary(path: Path) -> dict | None:

@@ -22,7 +22,7 @@
 #   the preset to a different id under the sglang provider.
 #
 # Environment overrides:
-#   SCAFFOLDS       space-separated list (default: "opencode opencode-dcp little-coder omp prime dcode")
+#   SCAFFOLDS       space-separated list (default: "opencode opencode-dcp little-coder little-coder-rtk omp prime dcode")
 #   INSTANCES       per-scaffold instance count (default: 0 = full 300)
 #   TIMEOUT         per-instance rollout timeout in seconds (default: 1800)
 #   LOG_DIR         where to write per-phase logs (default: /tmp/run-model-cycle-logs/<preset>)
@@ -42,7 +42,7 @@ if [ -z "$PRESET" ]; then
   exit 1
 fi
 
-SCAFFOLDS="${SCAFFOLDS:-opencode opencode-dcp little-coder omp prime dcode}"  # claw-code retired 2026-08-30; omp/prime/dcode/opencode-dcp added 2026-08-30
+SCAFFOLDS="${SCAFFOLDS:-opencode opencode-dcp little-coder little-coder-rtk omp prime dcode}"  # claw retired, omp/prime/dcode/opencode-dcp/little-coder-rtk added 2026-08-30
 INSTANCES="${INSTANCES:-0}"
 TIMEOUT="${TIMEOUT:-1800}"
 SERVER_TIMEOUT="${SERVER_TIMEOUT:-720}"

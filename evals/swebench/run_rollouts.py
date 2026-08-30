@@ -28,6 +28,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -61,7 +62,7 @@ def parse_args():
                    help="Skip pre-rollout venv setup — agent runs read-edit-pray "
                         "without a working test loop. Compatible with v1 runs.")
     p.add_argument("--scaffold", default="opencode",
-                   choices=["opencode", "opencode-dcp", "little-coder", "claw-code", "omp", "prime", "dcode"],  # claw-code deprecated (unmaintained; kept for reproducing historical cells)
+                   choices=["opencode", "opencode-dcp", "little-coder", "little-coder-rtk", "claw-code", "omp", "prime", "dcode"],  # claw-code deprecated (unmaintained; kept for reproducing historical cells)
                    help="Coding-agent scaffold to drive (host-side, no docker)")
     p.add_argument("--shard", default=None,
                    help="K/N: process only instances where index%%N==K (for concurrent "
@@ -284,9 +285,30 @@ def run_opencode(model: str, repo_dir: Path, prompt: str, timeout: int, log_path
     return _popen_agent(cmd, None, _base_env(extra_env, scaffold_env), timeout, log_path)
 
 
+RTK_EXT_DIR = Path.home() / ".config" / "little-coder-rtk"
+
+
+def _ensure_rtk_extension() -> Path:
+    """Regenerate the harness-owned rtk Pi extension (~/.config/little-coder-rtk/rtk.ts)
+    from the installed rtk binary so extension and binary never version-skew.
+    `rtk init -g --agent pi` writes $HOME/.pi/agent/extensions/rtk.ts; run it against a
+    throwaway HOME and copy the result out. Verified 2026-08-30 with rtk 0.46.0 +
+    little-coder 1.19.0 (--extension <path> loads it; `rtk gain -H` records rewrites)."""
+    ext = RTK_EXT_DIR / "rtk.ts"
+    with tempfile.TemporaryDirectory() as td:
+        subprocess.run(["rtk", "init", "-g", "--agent", "pi"],
+                       env={**os.environ, "HOME": td},
+                       check=True, capture_output=True, timeout=60)
+        src = Path(td) / ".pi" / "agent" / "extensions" / "rtk.ts"
+        RTK_EXT_DIR.mkdir(parents=True, exist_ok=True)
+        ext.write_text(src.read_text())
+    return ext
+
+
 def run_little_coder(served: str, repo_dir: Path, prompt: str, timeout: int, log_path: Path,
                      extra_env: dict[str, str] | None = None,
-                     server_url: str = "http://127.0.0.1:23334") -> tuple[int, str, str]:
+                     server_url: str = "http://127.0.0.1:23334",
+                     rtk: bool = False) -> tuple[int, str, str]:
     # little-coder wraps pi-ai; the packaged `llamacpp` provider baseUrl is overridden
     # by LLAMACPP_BASE_URL (config.ts LEGACY_BASE_URL_ENV). model id `llamacpp/<served>`
     # routes there; pi warns "custom model id" for unknown ids but still sends the request.
@@ -297,6 +319,12 @@ def run_little_coder(served: str, repo_dir: Path, prompt: str, timeout: int, log
         "LLAMACPP_BASE_URL": f"{server_url.rstrip('/')}/v1",
         "LLAMACPP_API_KEY": "noop",
     })
+    if rtk:
+        # little-coder-rtk lane: load the rtk Pi extension so bash tool calls are
+        # rewritten to `rtk <cmd>` (compressed output; rtk gain tracks savings).
+        # Fail-open by design: extension disables itself if rtk is missing/old.
+        cmd[1:1] = ["--extension", str(_ensure_rtk_extension())]
+        env["PATH"] = f"{Path.home()}/.local/bin:" + env["PATH"]  # rtk binary lives here
     return _popen_agent(cmd, str(repo_dir), env, timeout, log_path)
 
 
@@ -548,10 +576,11 @@ def main():
                     rc, _stdout, _stderr = run_opencode(args.model, inst_dir, prompt, args.timeout,
                                                         log_path, extra_env=extra_env,
                                                         dcp=(args.scaffold == "opencode-dcp"))
-                elif args.scaffold == "little-coder":
+                elif args.scaffold in ("little-coder", "little-coder-rtk"):
                     rc, _stdout, _stderr = run_little_coder(served, inst_dir, prompt, args.timeout,
                                                             log_path, extra_env=extra_env,
-                                                            server_url=args.server_url)
+                                                            server_url=args.server_url,
+                                                            rtk=(args.scaffold == "little-coder-rtk"))
                 elif args.scaffold == "omp":
                     rc, _stdout, _stderr = run_omp(served, inst_dir, prompt, args.timeout,
                                                    log_path, extra_env=extra_env,
