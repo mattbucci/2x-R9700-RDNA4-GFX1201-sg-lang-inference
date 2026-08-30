@@ -61,7 +61,7 @@ def parse_args():
                    help="Skip pre-rollout venv setup — agent runs read-edit-pray "
                         "without a working test loop. Compatible with v1 runs.")
     p.add_argument("--scaffold", default="opencode",
-                   choices=["opencode", "little-coder", "claw-code", "omp"],  # claw-code deprecated (unmaintained; kept for reproducing historical cells)
+                   choices=["opencode", "little-coder", "claw-code", "omp", "prime", "dcode"],  # claw-code deprecated (unmaintained; kept for reproducing historical cells)
                    help="Coding-agent scaffold to drive (host-side, no docker)")
     p.add_argument("--shard", default=None,
                    help="K/N: process only instances where index%%N==K (for concurrent "
@@ -350,6 +350,56 @@ def run_omp(served: str, repo_dir: Path, prompt: str, timeout: int, log_path: Pa
     return _popen_agent(cmd, str(repo_dir), env, timeout, log_path)
 
 
+def _ensure_prime_profile(served: str, server_url: str) -> None:
+    """prime-agent reads custom providers from ~/.prime/agent/models.json (no
+    config-dir override exists as of 0.8.1, so the user-level file is written
+    idempotently). compat flags follow the doc's SGLang guidance. Verified
+    2026-08-30 with prime-agent 0.8.1 (headless -p auto-runs tools)."""
+    d = Path.home() / ".prime" / "agent"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "models.json").write_text(json.dumps({
+        "providers": {"sglang": {
+            "name": "SGLang local",
+            "baseUrl": f"{server_url.rstrip('/')}/v1",
+            "api": "openai-completions",
+            "apiKey": "noop",
+            "compat": {"supportsDeveloperRole": False,
+                       "supportsReasoningEffort": False},
+            "models": [{"id": served}],
+        }}}, indent=2))
+
+
+def run_prime(served: str, repo_dir: Path, prompt: str, timeout: int, log_path: Path,
+              extra_env: dict[str, str] | None = None,
+              server_url: str = "http://127.0.0.1:23334") -> tuple[int, str, str]:
+    _ensure_prime_profile(served, server_url)
+    cmd = [str(Path.home() / ".npm-global/bin/prime-agent"),
+           "--model", f"sglang/{served}", "-p", prompt]
+    # DO_NOT_TRACK: prime sends pseudonymous usage metrics by default; eval
+    # rollouts should not phone home.
+    env = _base_env(extra_env, {"DO_NOT_TRACK": "1"})
+    return _popen_agent(cmd, str(repo_dir), env, timeout, log_path)
+
+
+def run_dcode(served: str, repo_dir: Path, prompt: str, timeout: int, log_path: Path,
+              extra_env: dict[str, str] | None = None,
+              server_url: str = "http://127.0.0.1:23334") -> tuple[int, str, str]:
+    # deepagents-code headless: -n runs a single task and exits (-q for clean
+    # output); tools auto-run in headless mode. Model routing is plain
+    # LangChain/openai-SDK env: OPENAI_BASE_URL + `openai:<id>`; SGLang ignores
+    # the id. Inner --timeout stays under the outer SIGKILL window so dcode
+    # exits 124 on its own. Verified 2026-08-30 with deepagents-code 0.1.65.
+    cmd = [str(Path.home() / ".local/bin/dcode"),
+           "-M", f"openai:{served}", "-n", prompt, "-q",
+           "--max-turns", "60", "-S", "all", "--allow-fs-tools", "all",
+           "--timeout", str(max(60, timeout - 60))]
+    env = _base_env(extra_env, {
+        "OPENAI_BASE_URL": f"{server_url.rstrip('/')}/v1",
+        "OPENAI_API_KEY": "noop",
+    })
+    return _popen_agent(cmd, str(repo_dir), env, timeout, log_path)
+
+
 def capture_diff(repo_dir: Path) -> str:
     # Stage everything modified, untracked, deleted; capture diff against HEAD.
     subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True,
@@ -496,6 +546,14 @@ def main():
                     rc, _stdout, _stderr = run_omp(served, inst_dir, prompt, args.timeout,
                                                    log_path, extra_env=extra_env,
                                                    server_url=args.server_url)
+                elif args.scaffold == "prime":
+                    rc, _stdout, _stderr = run_prime(served, inst_dir, prompt, args.timeout,
+                                                     log_path, extra_env=extra_env,
+                                                     server_url=args.server_url)
+                elif args.scaffold == "dcode":
+                    rc, _stdout, _stderr = run_dcode(served, inst_dir, prompt, args.timeout,
+                                                     log_path, extra_env=extra_env,
+                                                     server_url=args.server_url)
                 else:  # claw-code
                     rc, _stdout, _stderr = run_claw(served, args.claw_bin, inst_dir, prompt, args.timeout,
                                                     log_path, extra_env=extra_env,
@@ -505,7 +563,8 @@ def main():
                                 str(inst_dir / ".claw"), str(inst_dir / ".opencode"),
                                 str(inst_dir / ".sandbox-tmp"), str(inst_dir / ".sandbox-home"),
                                 str(inst_dir / ".cache"), str(inst_dir / ".pi"),
-                                str(inst_dir / ".omp")], check=False)
+                                str(inst_dir / ".omp"), str(inst_dir / ".prime"),
+                                str(inst_dir / ".deepagents")], check=False)
                 diff = capture_diff(inst_dir)
                 (out / "predictions" / f"{iid}.diff").write_text(diff)
 
