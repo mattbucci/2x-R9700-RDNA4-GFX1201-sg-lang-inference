@@ -61,7 +61,7 @@ def parse_args():
                    help="Skip pre-rollout venv setup — agent runs read-edit-pray "
                         "without a working test loop. Compatible with v1 runs.")
     p.add_argument("--scaffold", default="opencode",
-                   choices=["opencode", "little-coder", "claw-code", "omp", "prime", "dcode"],  # claw-code deprecated (unmaintained; kept for reproducing historical cells)
+                   choices=["opencode", "opencode-dcp", "little-coder", "claw-code", "omp", "prime", "dcode"],  # claw-code deprecated (unmaintained; kept for reproducing historical cells)
                    help="Coding-agent scaffold to drive (host-side, no docker)")
     p.add_argument("--shard", default=None,
                    help="K/N: process only instances where index%%N==K (for concurrent "
@@ -266,13 +266,22 @@ def _popen_agent(cmd: list, cwd, env: dict, timeout: int, log_path: Path) -> tup
 
 
 def run_opencode(model: str, repo_dir: Path, prompt: str, timeout: int, log_path: Path,
-                 extra_env: dict[str, str] | None = None) -> tuple[int, str, str]:
+                 extra_env: dict[str, str] | None = None,
+                 dcp: bool = False) -> tuple[int, str, str]:
     # NB: no `--format json` — it deadlocks on long multi-turn sessions under the
     # subprocess pipe (simple tasks are fine, real SWE-bench rollouts hang >900s with
     # no edits). The diff is captured from git, not opencode stdout, so plain mode is fine.
     cmd = ["opencode", "run", "--dir", str(repo_dir), "--model", model,
            "--dangerously-skip-permissions", prompt]
-    return _popen_agent(cmd, None, _base_env(extra_env), timeout, log_path)
+    scaffold_env = None
+    if dcp:
+        # opencode-dcp lane: same opencode binary, but OPENCODE_CONFIG_DIR points
+        # at a lane-owned config (provider copy + the @tarquinen/opencode-dcp
+        # plugin installed 2026-08-30, v3.1.15) so dynamic context pruning is
+        # active only in this lane and the plain-opencode cell stays untouched.
+        scaffold_env = {"OPENCODE_CONFIG_DIR":
+                        str(Path.home() / ".config/opencode-dcp-lane/opencode")}
+    return _popen_agent(cmd, None, _base_env(extra_env, scaffold_env), timeout, log_path)
 
 
 def run_little_coder(served: str, repo_dir: Path, prompt: str, timeout: int, log_path: Path,
@@ -535,9 +544,10 @@ def main():
                 if not _wait_server_healthy(args.server_url):
                     print(f"  SERVER DOWN >20min — skip {iid} (no prediction; retry on resume)", flush=True)
                     continue
-                if args.scaffold == "opencode":
+                if args.scaffold in ("opencode", "opencode-dcp"):
                     rc, _stdout, _stderr = run_opencode(args.model, inst_dir, prompt, args.timeout,
-                                                        log_path, extra_env=extra_env)
+                                                        log_path, extra_env=extra_env,
+                                                        dcp=(args.scaffold == "opencode-dcp"))
                 elif args.scaffold == "little-coder":
                     rc, _stdout, _stderr = run_little_coder(served, inst_dir, prompt, args.timeout,
                                                             log_path, extra_env=extra_env,
