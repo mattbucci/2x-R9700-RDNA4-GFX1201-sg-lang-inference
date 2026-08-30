@@ -126,7 +126,7 @@ for SCAFFOLD in $SCAFFOLDS; do
   [ "$INSTANCES" -gt 0 ] && N_FLAG=(--instances "$INSTANCES")
 
   log "rollout $SCAFFOLD (out=$OUT instances=${INSTANCES:-300} timeout=$TIMEOUT)"
-  python "$REPO_DIR/evals/swebench/docker_rollout.py" \
+  python "$REPO_DIR/evals/swebench/run_rollouts.py" \
     --model "sglang/$PRESET" \
     --served-name "$SERVED" \
     --scaffold "$SCAFFOLD" \

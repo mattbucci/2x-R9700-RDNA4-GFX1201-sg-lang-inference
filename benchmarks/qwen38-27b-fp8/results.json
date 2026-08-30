@@ -1,0 +1,8 @@
+{
+  "model": "Qwen3.8-27B official FP8 (dense DeltaNet VL+video)",
+  "engine": "SGLang",
+  "method": "streaming-TPOT median (decode_ab, 3-run)",
+  "hardware": "2x R9700 TP=2",
+  "timestamp": "2026-08-30 v0.5.18+70p",
+  "output_tokens": 80
+}

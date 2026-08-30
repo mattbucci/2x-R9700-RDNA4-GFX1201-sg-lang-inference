@@ -555,7 +555,11 @@ PYEOF
             # qwen36-27b measurement 2026-06-14); family graph policy applies.
             CUDA_GRAPH="--disable-cuda-graph"
             MAMBA_CACHE="--max-mamba-cache-size 8"
-            # Stock ship chat template (thinking + image + video); no override.
+            # Devrole remap template (ship template + developer->system remap
+            # preamble, same technique as qwen36-27b): pi/little-coder and the
+            # swebench scaffolds send a `developer` role the stock template
+            # rejects ("Unexpected message role" -> 400).
+            CHAT_TEMPLATE="--chat-template $SCRIPT_DIR/qwen3.8_devrole_chat_template.jinja"
             REASONING="--reasoning-parser qwen3"
             TOOL_CALL_PARSER="qwen3_coder"
             OVERLAP=""

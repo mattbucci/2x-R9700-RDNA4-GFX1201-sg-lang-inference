@@ -109,7 +109,7 @@ def main():
     # 3. Re-roll just the infra IDs
     repo_root = Path(__file__).resolve().parents[2]
     cmd = [
-        sys.executable, str(repo_root / "evals/swebench/docker_rollout.py"),
+        sys.executable, str(repo_root / "evals/swebench/run_rollouts.py"),
         "--model", args.model,
         "--served-name", args.served_name,
         "--scaffold", args.scaffold,
