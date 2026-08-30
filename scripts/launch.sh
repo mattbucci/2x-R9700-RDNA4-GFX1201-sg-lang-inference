@@ -527,6 +527,39 @@ PYEOF
             # family, same dispatch-bound M=1 decode → cuda-graph ~2.3x (see coder-30b).
             CUDA_GRAPH=""
             ;;
+        qwen38|qwen38-27b)
+            # Qwen3.8-27B official FP8 (Qwen/Qwen3.8-27B-FP8, released 2026-08).
+            # Dense DeltaNet+attn hybrid VL with native VIDEO and in-checkpoint
+            # MTP; declares Qwen3_5ForConditionalGeneration / model_type
+            # qwen3_5 — Qwen3.5-family, existing patch set applies (donor:
+            # qwen36-27b). Gated attention (attn_output_gate, swish) is handled
+            # by qwen3_5.py (q_proj is 2x wide). Vendor FP8: quant_method=fp8,
+            # dynamic e4m3 activations; vision tower / DeltaNet state
+            # projections / lm_head+embeddings stay BF16 via
+            # modules_to_not_convert.
+            #
+            # MAX_RUNNING=1 is LOAD-BEARING (3090 measurement 2026-08-18,
+            # reproduced here): 48/64 layers replicate DeltaNet recurrent state
+            # per slot and the untied 248,320-vocab head is BF16 —
+            # MAX_RUNNING=8 collapses max_total_num_tokens to ~32K against the
+            # 262144 claim; at 1 the pool is ~2.7x the full context. Read
+            # max_total_num_tokens from /get_server_info instead of trusting
+            # the context flag when raising it.
+            MODEL="${MODEL:-/data/models/Qwen3.8-27B-FP8}"
+            QUANT="fp8"
+            # bf16 required for Qwen3.5-arch decode kernels (same rule as
+            # qwen36-27b / qwen36-moe).
+            DTYPE="bfloat16"
+            CTX=262144; MEM=0.85; MAX_RUNNING=1; CHUNKED=8192; DECODE_STEPS=8
+            # cuda-graph OFF: dense DeltaNet is GPU-compute-bound at M=1 (see
+            # qwen36-27b measurement 2026-06-14); family graph policy applies.
+            CUDA_GRAPH="--disable-cuda-graph"
+            MAMBA_CACHE="--max-mamba-cache-size 8"
+            # Stock ship chat template (thinking + image + video); no override.
+            REASONING="--reasoning-parser qwen3"
+            TOOL_CALL_PARSER="qwen3_coder"
+            OVERLAP=""
+            ;;
         qwen36-27b)
             # Qwen3.6-27B (2026-04-21 release): DeltaNet+attn hybrid VL (3:1
             # linear/full pattern across 64 layers — same family as Qwen3.5-27B

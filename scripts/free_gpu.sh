@@ -33,6 +33,14 @@ _kill_matches(){
 _kill_matches 'sglang.launch_server'
 sleep 4
 _kill_matches 'AI/models/'
+# The TP workers' argv is just 'sglang::scheduler_TP<n>' / 'sglang::detokenizer'
+# (no script path, no model path), so neither pattern above matches them. If the
+# launcher dies without propagating TERM (observed 2026-08-30: setsid-wrapped
+# launch left both schedulers holding 32 GB VRAM through two free_gpu runs),
+# they must be addressed directly. The [:] classes keep the pattern from
+# matching this script's own caller.
+_kill_matches 'sglang[:][:]scheduler'
+_kill_matches 'sglang[:][:]detokenizer'
 
 echo "[free_gpu] waiting for VRAM to drain"
 for i in $(seq 1 30); do
@@ -41,6 +49,17 @@ for i in $(seq 1 30); do
   sleep 3
 done
 
+# Escalate: anything still matching after the graceful pass + drain window is
+# wedged (TERM ignored mid-collective) and keeps its VRAM until SIGKILL.
+_kill9_matches(){
+  for p in $(pgrep -f "$1" 2>/dev/null); do
+    case "$_prot" in *" $p "*) continue;; esac
+    kill -9 "$p" 2>/dev/null && echo "[free_gpu] SIGKILL leftover pid $p ($1)"
+  done
+}
+_kill9_matches 'sglang.launch_server'
+_kill9_matches 'sglang[:][:]scheduler'
+_kill9_matches 'sglang[:][:]detokenizer'
 # Prune leaked IPC segments — ONLY those no process currently holds open.
 pruned=0
 if command -v fuser >/dev/null 2>&1; then

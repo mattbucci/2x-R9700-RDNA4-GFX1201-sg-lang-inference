@@ -115,7 +115,7 @@ can be proposed upstream. `Partial` requires a fresh comparison with upstream be
 
 | # | Patch | Upstream | Current purpose |
 |---:|---|---|---|
-| 005 | `rdna4-fp8-fallbacks` | Carry | Adds gfx1201 FP8 quantization fallbacks and guards unsupported Quark paths. |
+| 005 | `rdna4-fp8-fallbacks` | Carry | Adds gfx1201 FP8 quantization fallbacks and guards unsupported Quark paths. Since 2026-08-30 the dense block-FP8 dispatch uses the Triton W8A8 GEMM (the historical gfx1201 ISA crash no longer reproduces on Triton 3.6/ROCm 7.2.3; 18-26x faster than the torch dequant fallback at M=1, which `SGLANG_RDNA4_TORCH_FP8_LINEAR=1` still forces for A/B). |
 | 039 | `rdna4-fp8-pertoken-padding-fix` | Carry | Corrects padding in native dynamic per-token FP8 activation quantization. |
 | 042 | `rdna4-reclaim-fp8-load-transients` | Carry | Reclaims temporary FP8 load allocations before KV-pool sizing. |
 | 044 | `rdna4-modelopt-fp8-rocm-allowlist` | Candidate | Enables ModelOpt FP8 checkpoints on the ROCm backends they already support. |

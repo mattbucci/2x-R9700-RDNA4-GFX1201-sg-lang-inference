@@ -106,7 +106,7 @@ index 2c0f5b36..1ad81104 100644
  
  @triton.jit
 diff --git a/python/sglang/srt/layers/quantization/fp8_utils.py b/python/sglang/srt/layers/quantization/fp8_utils.py
-index 4e1060fd..585f9796 100755
+index 4e1060fd..0db0a407 100755
 --- a/python/sglang/srt/layers/quantization/fp8_utils.py
 +++ b/python/sglang/srt/layers/quantization/fp8_utils.py
 @@ -136,6 +136,17 @@ def materialize_bpreshuffle_fp8_scale_tuple(
@@ -154,17 +154,27 @@ index 4e1060fd..585f9796 100755
  
      if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM:
          return deepgemm_w8a8_block_fp8_linear_with_fallback
-@@ -755,6 +775,9 @@ def _dispatch_auto_backend() -> Callable:
+@@ -755,6 +775,19 @@ def _dispatch_auto_backend() -> Callable:
          return cutlass_w8a8_block_fp8_linear_with_fallback
      elif _use_aiter:
          return aiter_w8a8_block_fp8_linear
 +    elif _is_hip and _is_rdna4_device():
-+        import sys; print("[RDNA4] Using torch_w8a8_block_fp8_linear for dense FP8", file=sys.stderr, flush=True)
-+        return torch_w8a8_block_fp8_linear
++        # Re-measured 2026-08-30 on Triton 3.6 / ROCm 7.2.3 (Qwen3.8-27B-FP8
++        # bring-up): the Triton block-FP8 GEMM is correct on gfx1201 and 18-26x
++        # faster than the torch dequant fallback at M=1 (0.33 ms vs 6.1 ms at
++        # N=17408 K=5120) — the historical "invalid gfx1201 ISA" crash no
++        # longer reproduces. The dequant fallback made every dense-FP8 linear
++        # dequantize per forward (1.6 tok/s on a fully-FP8 27B). Keep the torch
++        # path reachable for A/B via SGLANG_RDNA4_TORCH_FP8_LINEAR=1.
++        if get_bool_env_var("SGLANG_RDNA4_TORCH_FP8_LINEAR"):
++            import sys; print("[RDNA4] Using torch_w8a8_block_fp8_linear for dense FP8 (env-forced)", file=sys.stderr, flush=True)
++            return torch_w8a8_block_fp8_linear
++        import sys; print("[RDNA4] Using triton_w8a8_block_fp8_linear for dense FP8", file=sys.stderr, flush=True)
++        return triton_w8a8_block_fp8_linear
      else:
          return triton_w8a8_block_fp8_linear
  
-@@ -1220,6 +1243,31 @@ def triton_w8a8_block_fp8_linear(
+@@ -1220,6 +1253,31 @@ def triton_w8a8_block_fp8_linear(
      return output.to(dtype=input_2d.dtype).view(*output_shape)
  
  

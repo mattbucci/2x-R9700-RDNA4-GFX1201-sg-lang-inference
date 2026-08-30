@@ -270,6 +270,7 @@ python tests/test_secure_launch.py
 | `qwen35` | Qwen3.5-27B | AWQ/FP8 DeltaNet | 256K |
 | `qwen35-moe` | Qwen3.5-35B-A3B | AWQ MoE + DeltaNet | 256K |
 | `qwen36-27b` | Qwen3.6-27B | AWQ/FP8 DeltaNet + vision | 256K |
+| `qwen38` | Qwen3.8-27B | official FP8 (block) DeltaNet + vision + video | 256K |
 | `qwen36-moe` | Qwen3.6-35B-A3B | AWQ/FP8 MoE + DeltaNet | 256K |
 | `qwen3vl-32b` | Qwen3-VL-32B | AWQ dense + vision | 256K override |
 | `gemma4` | Gemma 4 26B-A4B | AWQ/FP8 MoE + vision | 256K |
@@ -304,6 +305,7 @@ tokens (five runs, decode-only). Every row reports actual input-token counts. "S
 | Devstral-Small-2-24B | AWQ dense + vision | 52.7 (15) | 17.0 (198K) |
 | Qwen3.5-27B | AWQ dense + DeltaNet | 24.5 (22) | 11.2 (197K) |
 | Qwen3.6-27B | AWQ dense + vision | 24.9 (22) | 11.5 (197K) |
+| Qwen3.8-27B (2026-08-30, decode_ab) | official FP8 dense + DeltaNet (VL+video) | 16.6 (24) | **16.3 (175K)** |
 | Qwen3-VL-32B | AWQ dense + vision | 23.4 (20) | 16.5 (27K) |
 | Gemma 4 31B | AWQ dense + SWA | 29.4 (25) | 10.5 (110K) |
 | Gemma 4 12B | AWQ omni + SWA | 38.6 (25) | 10.9 (198K) |

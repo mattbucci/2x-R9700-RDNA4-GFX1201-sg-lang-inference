@@ -1,0 +1,67 @@
+{
+  "label": "qwen38-27b-fp8-triton",
+  "tag": "qwen38-27b-fp8",
+  "note": "",
+  "port": 23334,
+  "maxtok": 80,
+  "runs": 3,
+  "points": [
+    {
+      "context": 128,
+      "input_len": 24,
+      "runs_tps": [
+        16.44,
+        16.66,
+        16.63
+      ],
+      "median_tps": 16.633,
+      "min_tps": 16.443,
+      "max_tps": 16.661,
+      "runs_completion_tokens": [
+        80,
+        80,
+        80
+      ],
+      "median_tpot_ms": 60.12,
+      "sample": "# The Memory Wall: A Deep Dive into GPU Memory Hierarchy and"
+    },
+    {
+      "context": 65536,
+      "input_len": 58483,
+      "runs_tps": [
+        16.28,
+        15.36,
+        16.15
+      ],
+      "median_tps": 16.15,
+      "min_tps": 15.36,
+      "max_tps": 16.278,
+      "runs_completion_tokens": [
+        33,
+        33,
+        33
+      ],
+      "median_tpot_ms": 61.92,
+      "sample": "The provided text consists of the pangram \"The quick brown f"
+    },
+    {
+      "context": 196608,
+      "input_len": 175403,
+      "runs_tps": [
+        16.56,
+        16.3,
+        16.3
+      ],
+      "median_tps": 16.298,
+      "min_tps": 16.297,
+      "max_tps": 16.562,
+      "runs_completion_tokens": [
+        46,
+        46,
+        46
+      ],
+      "median_tpot_ms": 61.36,
+      "sample": "The provided text consists of the pangram \"The quick brown f"
+    }
+  ]
+}

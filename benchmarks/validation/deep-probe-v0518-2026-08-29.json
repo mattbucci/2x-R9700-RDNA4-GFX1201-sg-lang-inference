@@ -253,5 +253,20 @@
     "elapsed_sec": 147.6,
     "sample": "MID=MELON-7734 LATE= The user asks: \"One labeled MID and one labeled LATE. Reply with EXACTLY two lines and nothing else: MID=<value> LATE=<value>\"  We need to provide values. However, there is no con",
     "timestamp": "2026-08-30 02:43"
+  },
+  "qwen38-27b-fp8": {
+    "slug": "qwen38-27b-fp8",
+    "model": "/data/models/Qwen3.8-27B-FP8",
+    "requested_tokens": 221184,
+    "actual_prompt_tokens": 197410,
+    "full_attn": true,
+    "late_recall": true,
+    "mid_recall": true,
+    "coherent": true,
+    "finish_reason": "stop",
+    "truncated_inconclusive": false,
+    "elapsed_sec": 516.1,
+    "sample": "MID=COBALT-2291 LATE=MELON-7734 ",
+    "timestamp": "2026-08-30 13:31"
   }
 }

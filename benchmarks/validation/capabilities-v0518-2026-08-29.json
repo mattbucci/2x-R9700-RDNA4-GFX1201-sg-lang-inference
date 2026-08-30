@@ -466,5 +466,37 @@
       "passed": 5,
       "total": 5
     }
+  },
+  "qwen38-27b-fp8": {
+    "tag": "qwen38-27b-fp8",
+    "model": "/data/models/Qwen3.8-27B-FP8",
+    "timestamp": "2026-08-30 13:23",
+    "elapsed_sec": 18.6,
+    "checks": {
+      "basic": {
+        "passed": true,
+        "message": "finish=stop answer='paris'"
+      },
+      "tool_call": {
+        "passed": true,
+        "message": "finish=tool_calls name='get_weather' args='{\"location\": \"Paris\"}'"
+      },
+      "thinking": {
+        "passed": true,
+        "message": "reasoning_seen terminated answer_ok (158 tok, finish=stop)"
+      },
+      "vision": {
+        "passed": true,
+        "message": "saw=['red', 'circle']  response='a red circle is shown in the image.'"
+      },
+      "video": {
+        "passed": true,
+        "message": "saw=['move', 'right', 'across', 'circle', 'red']  response='\\n\\na red circle moves from the left side of the screen to the right side.'"
+      }
+    },
+    "summary": {
+      "passed": 5,
+      "total": 5
+    }
   }
 }
