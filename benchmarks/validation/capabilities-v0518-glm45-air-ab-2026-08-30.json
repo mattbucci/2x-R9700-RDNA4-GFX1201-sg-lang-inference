@@ -1,0 +1,50 @@
+{
+  "glm45-air-v0516": {
+    "tag": "glm45-air-v0516",
+    "model": "/home/letsrtfm/AI/models/GLM-4.5-Air-REAP-AWQ-native",
+    "timestamp": "2026-08-30 00:56",
+    "elapsed_sec": 130.4,
+    "checks": {
+      "basic": {
+        "passed": true,
+        "message": "finish=stop answer='</think>paris'"
+      },
+      "tool_call": {
+        "passed": false,
+        "message": "no tool_calls finish=stop content=\"<think>I'll use the get_weather tool with the location param\""
+      },
+      "thinking": {
+        "passed": true,
+        "message": "reasoning_seen terminated answer_ok TRUNCATED (2048 tok, finish=length)"
+      }
+    },
+    "summary": {
+      "passed": 2,
+      "total": 3
+    }
+  },
+  "glm45-air-v0518": {
+    "tag": "glm45-air-v0518",
+    "model": "/home/letsrtfm/AI/models/GLM-4.5-Air-REAP-AWQ-native",
+    "timestamp": "2026-08-30 01:20",
+    "elapsed_sec": 238.4,
+    "checks": {
+      "basic": {
+        "passed": true,
+        "message": "finish=stop answer='</think>paris'"
+      },
+      "tool_call": {
+        "passed": false,
+        "message": "no tool_calls finish=stop content='The user is asking for the current weather in Paris and spec'"
+      },
+      "thinking": {
+        "passed": true,
+        "message": "reasoning_seen terminated answer_ok (715 tok, finish=stop)"
+      }
+    },
+    "summary": {
+      "passed": 2,
+      "total": 3
+    }
+  }
+}

@@ -1,0 +1,134 @@
+{
+ "v0516-r1": {
+  "tag": "v0516-r1",
+  "model": "/home/letsrtfm/AI/models/GLM-4.5-Air-REAP-AWQ-native",
+  "factual": 3,
+  "tool_call": false,
+  "detail": {
+   "What is the capital of France? Answer with one word.": {
+    "answer": "</think>Paris",
+    "ok": true
+   },
+   "What is 17 * 23? Answer with just the number.": {
+    "answer": "390",
+    "ok": false
+   },
+   "Which planet is known as the Red Planet? One word.": {
+    "answer": "Okay, the user is asking which planet is known as the Red Planet and wants a one-word answer. Let me think about this.\n\nFirst, I recall that Mars is often calle",
+    "ok": true
+   },
+   "Write a Python one-liner that returns the sum of squares of 1..10. Just the expression.": {
+    "answer": "We are to compute the sum of squares from 1 to 10.\n The formula for the sum of squares is: n(n+1)(2n+1)/6\n For n=10, we can plug in: 10*11*21/6\n But note: the p",
+    "ok": true
+   },
+   "Who wrote 'Pride and Prejudice'? Just the name.": {
+    "answer": "Okay, the user is asking about who wrote 'Pride & Prejudice' andand specifically mentions \"just the name.\" Hmm, that phrasing feels intentionally vague or playf",
+    "ok": false
+   },
+   "tool_call": {
+    "ok": false,
+    "finish": "length",
+    "calls": null
+   }
+  }
+ },
+ "v0516-r2": {
+  "tag": "v0516-r2",
+  "model": "/home/letsrtfm/AI/models/GLM-4.5-Air-REAP-AWQ-native",
+  "factual": 3,
+  "tool_call": false,
+  "detail": {
+   "What is the capital of France? Answer with one word.": {
+    "answer": "</think>Paris",
+    "ok": true
+   },
+   "What is 17 * 23? Answer with just the number.": {
+    "answer": "",
+    "ok": false
+   },
+   "Which planet is known as the Red Planet? One word.": {
+    "answer": "Okay, the user is asking which planet is known as the Red Planet and wants a one-word answer. Let me think about this.\n\nFirst, I recall that Mars is often calle",
+    "ok": true
+   },
+   "Write a Python one-liner that returns the sum of squares of 1..10. Just the expression.": {
+    "answer": "We are to compute the sum of squares from 1 to 10.\n The formula for the sum of squares is: n(n+1)(2n+1)/6\n For n=10, we can plug in: 10*11*21/6\n But note: the p",
+    "ok": true
+   },
+   "Who wrote 'Pride and Prejudice'? Just the name.": {
+    "answer": "Okay, the user is asking about who wrote 'Pride & Prejudice' andand specifically mentions \"just the name.\" Hmm, that phrasing feels intentionally vague or playf",
+    "ok": false
+   },
+   "tool_call": {
+    "ok": false,
+    "finish": "length",
+    "calls": null
+   }
+  }
+ },
+ "v0518-r1": {
+  "tag": "v0518-r1",
+  "model": "/home/letsrtfm/AI/models/GLM-4.5-Air-REAP-AWQ-native",
+  "factual": 3,
+  "tool_call": false,
+  "detail": {
+   "What is the capital of France? Answer with one word.": {
+    "answer": "</think>Paris",
+    "ok": true
+   },
+   "What is 17 * 23? Answer with just the number.": {
+    "answer": "390",
+    "ok": false
+   },
+   "Which planet is known as the Red Planet? One word.": {
+    "answer": "Okay, the user is asking which planet is known as the Red Planet and wants a one-word answer. Let me think about this.\n\nFirst, I recall that Mars is often calle",
+    "ok": true
+   },
+   "Write a Python one-liner that returns the sum of squares of 1..10. Just the expression.": {
+    "answer": "We are to compute the sum of squares from 1 to 10.\n The formula for the sum of squares is: n(n+1)(2n+1)/6\n For n=10, we can plug in: 10*11*21/6\n But note: the p",
+    "ok": true
+   },
+   "Who wrote 'Pride and Prejudice'? Just the name.": {
+    "answer": "Okay, the user is asking about who wrote 'Pride & Prejudice' andand specifically mentions \"just the name.\" Hmm, that phrasing feels intentionally vague or playf",
+    "ok": false
+   },
+   "tool_call": {
+    "ok": false,
+    "finish": "length",
+    "calls": null
+   }
+  }
+ },
+ "v0518-r2": {
+  "tag": "v0518-r2",
+  "model": "/home/letsrtfm/AI/models/GLM-4.5-Air-REAP-AWQ-native",
+  "factual": 3,
+  "tool_call": false,
+  "detail": {
+   "What is the capital of France? Answer with one word.": {
+    "answer": "</think>Paris",
+    "ok": true
+   },
+   "What is 17 * 23? Answer with just the number.": {
+    "answer": "",
+    "ok": false
+   },
+   "Which planet is known as the Red Planet? One word.": {
+    "answer": "Okay, the user is asking which planet is known as the Red Planet and wants a one-word answer. Let me think about this.\n\nFirst, I recall that Mars is often calle",
+    "ok": true
+   },
+   "Write a Python one-liner that returns the sum of squares of 1..10. Just the expression.": {
+    "answer": "We are to compute the sum of squares from 1 to 10.\n The formula for the sum of squares is: n(n+1)(2n+1)/6\n For n=10, we can plug in: 10*11*21/6\n But note: the p",
+    "ok": true
+   },
+   "Who wrote 'Pride and Prejudice'? Just the name.": {
+    "answer": "Okay, the user is asking about who wrote 'Pride & Prejudice' andand specifically mentions \"just the name.\" Hmm, that phrasing feels intentionally vague or playf",
+    "ok": false
+   },
+   "tool_call": {
+    "ok": false,
+    "finish": "length",
+    "calls": null
+   }
+  }
+ }
+}
