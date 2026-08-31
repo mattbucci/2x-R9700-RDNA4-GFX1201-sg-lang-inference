@@ -46,6 +46,11 @@ SCAFFOLDS="${SCAFFOLDS:-opencode opencode-dcp little-coder little-coder-rtk omp 
 INSTANCES="${INSTANCES:-0}"
 TIMEOUT="${TIMEOUT:-1800}"
 SERVER_TIMEOUT="${SERVER_TIMEOUT:-720}"
+# Rollouts/audit/reroll need swebench + datasets: never trust ambient `python`
+# (a detached chain inherited /usr/bin/python once — 300 instant ModuleNotFoundError
+# "predictions" per scaffold, 2026-08-30). Scaffold CLIs + uv + rtk need these PATHs.
+ROLLOUT_PY="${ROLLOUT_PY:-$HOME/miniforge3/envs/sglang-triton36-v0518/bin/python}"
+export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 LOG_DIR="${LOG_DIR:-/tmp/run-model-cycle-logs/$PRESET}"
 
 mkdir -p "$LOG_DIR"
@@ -126,7 +131,7 @@ for SCAFFOLD in $SCAFFOLDS; do
   [ "$INSTANCES" -gt 0 ] && N_FLAG=(--instances "$INSTANCES")
 
   log "rollout $SCAFFOLD (out=$OUT instances=${INSTANCES:-300} timeout=$TIMEOUT)"
-  python "$REPO_DIR/evals/swebench/run_rollouts.py" \
+  "$ROLLOUT_PY" "$REPO_DIR/evals/swebench/run_rollouts.py" \
     --model "sglang/$PRESET" \
     --served-name "$SERVED" \
     --scaffold "$SCAFFOLD" \
@@ -149,7 +154,7 @@ stop_server
 for SCAFFOLD in "${NEED_RESCORE[@]}"; do
   OUT="$REPO_DIR/evals/swebench/runs/${PRESET}-${SCAFFOLD}-v2"
   log "audit $SCAFFOLD"
-  python "$REPO_DIR/evals/swebench/audit_predictions.py" \
+  "$ROLLOUT_PY" "$REPO_DIR/evals/swebench/audit_predictions.py" \
     --predictions "$OUT/predictions.jsonl" \
     --write-reroll-list "$LOG_DIR/reroll-list-$SCAFFOLD.txt" \
     > "$LOG_DIR/audit-$SCAFFOLD.log" 2>&1 || true
@@ -167,7 +172,7 @@ if [ "${#NEED_RESCORE_AFTER_REROLL[@]}" -gt 0 ]; then
   for SCAFFOLD in "${NEED_RESCORE_AFTER_REROLL[@]}"; do
     OUT="$REPO_DIR/evals/swebench/runs/${PRESET}-${SCAFFOLD}-v2"
     log "reroll $SCAFFOLD"
-    python "$REPO_DIR/evals/swebench/reroll_infra_failures.py" \
+    "$ROLLOUT_PY" "$REPO_DIR/evals/swebench/reroll_infra_failures.py" \
       --cell "$OUT" \
       --model "sglang/$PRESET" \
       --served-name "$SERVED" \
@@ -185,6 +190,7 @@ for SCAFFOLD in "${NEED_RESCORE[@]}"; do
   log "score $SCAFFOLD"
   rm -f "$OUT/scores-docker-summary.json"
   rm -rf "$OUT/scores-docker"
+  mkdir -p /tmp/loop-bakeoff-logs
   flock -x /tmp/loop-bakeoff-logs/score.lock \
     "${SWEBENCH_PY:-/data/swebench-harness-env/bin/python}" "$REPO_DIR/evals/swebench/score_docker.py" \
       --predictions "$OUT/predictions.jsonl" \
@@ -202,7 +208,7 @@ print(f'  {\"$PRESET\":15s} x {\"$SCAFFOLD\":12s}: {d[\"resolved\"]}/{d[\"total_
 done
 
 # --- Phase 6: refresh cell JSONs ---
-python "$REPO_DIR/evals/swebench/aggregate_bakeoff.py" \
+"$ROLLOUT_PY" "$REPO_DIR/evals/swebench/aggregate_bakeoff.py" \
   > "$LOG_DIR/aggregate.log" 2>&1
 log "wrote cell JSONs"
 

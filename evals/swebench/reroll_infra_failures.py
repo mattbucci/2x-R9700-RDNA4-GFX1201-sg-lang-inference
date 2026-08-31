@@ -48,7 +48,7 @@ def main():
     ap.add_argument("--served-name", required=True,
                     help="docker_rollout --served-name value")
     ap.add_argument("--scaffold", required=True,
-                    choices=["opencode", "little-coder", "claw-code"])
+                    choices=["opencode", "opencode-dcp", "little-coder", "little-coder-rtk", "claw-code", "omp", "prime", "dcode"])
     ap.add_argument("--timeout", type=int, default=1800)
     ap.add_argument("--dry-run", action="store_true",
                     help="Print what would be re-rolled, don't actually do it")
