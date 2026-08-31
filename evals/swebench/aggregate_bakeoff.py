@@ -351,8 +351,8 @@ def main(argv=None):
             "predictions remain under `/data/bakeoff/runs` for later resumption."
         )
         lines.append("")
-    lines.append("| Model preset | opencode | little-coder | claw-code |")
-    lines.append("|--------------|:--------:|:------------:|:---------:|")
+    lines.append("| Model preset | " + " | ".join(SCAFFOLDS) + " |")
+    lines.append("|" + "---|" * 1 + ":---:|" * len(SCAFFOLDS))
     for cells in rows:
         lines.append("| `" + cells[0] + "` | " + " | ".join(cells[1:]) + " |")
     lines.append("")
@@ -375,8 +375,8 @@ def main(argv=None):
     if disagreements:
         lines.append(f"{len(disagreements)} disagreements found.")
         lines.append("")
-        lines.append("| Model | Instance | opencode | little-coder | claw-code |")
-        lines.append("|-------|----------|:--------:|:------------:|:---------:|")
+        lines.append("| Model | Instance | " + " | ".join(SCAFFOLDS) + " |")
+        lines.append("|" + "---|" * 2 + ":---:|" * len(SCAFFOLDS))
         for preset, iid, by_sc_label in disagreements[:50]:
             cells = [preset, iid]
             for sc in SCAFFOLDS:
