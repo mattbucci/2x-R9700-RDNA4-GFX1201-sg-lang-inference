@@ -245,6 +245,17 @@ def read_server_info(port: int):
                     return info
         except Exception:
             continue
+    # v0.5.18 hardening: /get_server_info can return {"error": "Forbidden"}.
+    # Synthesize the one field the depth ladder needs from /v1/models, which
+    # still exposes max_model_len (verified 2026-08-30 on the qwen38 preset).
+    if not fallback.get("context_length"):
+        try:
+            models = requests.get(f"http://localhost:{port}/v1/models", timeout=10).json()
+            mml = (models.get("data") or [{}])[0].get("max_model_len")
+            if mml:
+                fallback = dict(fallback, context_length=int(mml))
+        except Exception:
+            pass
     return fallback
 
 
