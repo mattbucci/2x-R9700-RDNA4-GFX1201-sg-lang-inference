@@ -6,13 +6,18 @@ The current optimization focus is FP8 coding MoE inference, especially Cohere No
 
 ## What we are working on next
 
-The Laguna native-Triton block-FP8 lane is now the measured default: matching-completion-count controls at
-62, 7.4K, and 220K input tokens improve single-user decode by 36.8–47.8% over the dequantize-to-BF16
-`auto` path. The 58.8K point is also faster but remains observational because the two arms returned
-different completion counts. The next step is not another unqualified kernel change. We first need to
-prove that the faster stack preserves the agent behavior that matters for coding—structured tool calls,
-multi-turn tool-result use, and correct actions at true long-context depth—then resume performance work
-inside that measured quality envelope.
+The live stack is SGLang v0.5.18 + 70 patches (rebased 2026-08-29; strict replay gate, byte-identical
+trees) across the full preset fleet. Qwen3.8-27B-FP8 is the new quality flagship: fleet-best LAB-Bench
+42.3% (no-think multiple choice — see `benchmarks/FINDINGS.md` for the think-budget artifact this
+corrects), 7/7 agentic tool-use rungs to 245,150 actual tokens, MMLU 84.2% / HumanEval 93.3%, and
+dead-flat 16.6–16.7 tok/s single-user decode from 24 to 197K input on the repaired RDNA4 Triton
+block-FP8 dispatch (patch 005). A seven-scaffold SWE-bench Lite bakeoff (opencode ± DCP,
+little-coder ± RTK, oh-my-pi, prime-agent, deepagents; 300 instances per cell, Docker-scored) is in
+flight for it — expect days per lane at `MAX_RUNNING=1`. Laguna's native-Triton block-FP8 lane remains
+the measured fleet-speed default (36.8–47.8% over dequant-to-BF16), with its agent-quality envelope
+proven by the 42/42 three-seed ladder. Next levers: tune the gfx1201 Triton W8A8 block-GEMM configs for
+the dense FP8 path (the `N=17408,K=5120` analogue of 078's MoE tuning) and re-measure the suppressed
+Qwen3.5/Gemma4 LAB-Bench cells with `--mc-no-think`.
 
 The easiest-to-hardest queue is tracked in [`experiments/queue.json`](experiments/queue.json). Four local
 gates are complete: R97-E's default-on structured-tool validator passes eight focused tests; R97-G Phase A
