@@ -12,6 +12,26 @@ each model under its production launch preset (quant, graph policy, and KV dtype
 decode table is in the [top-level README](../README.md#current-performance); each `<model>/` directory
 here holds that model's `results.json` and regenerated `context_vs_toks.png` / `concurrency_vs_toks.png`.
 
+### Qwen3.8-27B-FP8 (2026-08-30, v0.5.18 + 70 patches)
+
+Official vendor block-FP8 ship under the `qwen38` preset (TP=2, FP8-e4m3 KV, `MAX_RUNNING=1`,
+graphs off). Canonical decode sweep (`decode_ab`, 3-run streaming-TPOT median, think-off,
+[qwen38-27b-fp8/results.json](qwen38-27b-fp8/results.json)):
+
+| Actual input tokens | 24 | 7,331 | 58,483 | 197,326 |
+|---|---:|---:|---:|---:|
+| Decode tok/s | 16.698 | 16.684 | 16.555 | **16.611** |
+
+Fully flat decode to 197K — the strongest dense-class deep rate on the fleet.
+[Quality receipt](quality/Qwen3.8-27B-FP8.json): MMLU **84.2%** (100), HumanEval **93.3%** (30),
+Needle 2/2, LAB-Bench **42.3%** overall (25/benchmark, fleet-best; measured with
+`--mc-no-think`, i.e. `chat_template_kwargs.enable_thinking=false`). The earlier think-mode
+LAB-Bench pass scored 5.1% because the 1024-token MC budget was consumed inside `<think>`
+(empty content scored wrong); it is preserved in the receipt as `labbench_think_budget1024`, and
+`mc_mode` records the per-benchmark condition. The
+[single-profile 256K agentic ladder receipt](quality/tooluse256k-qwen38-27b-fp8-v0518-r9700.json)
+passes 7/7 rungs valid+correct to 245,150 actual tokens (`valid_toolcall` 1.0, `correct_action` 1.0).
+
 North-Mini and Laguna additionally have a historical 074–082 A/B optimization campaign with correctness
 scoring. North's row predates patch 090 and is retained for performance provenance, not current quality:
 

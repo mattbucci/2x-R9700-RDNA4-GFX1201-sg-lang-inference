@@ -195,6 +195,7 @@ MODELS = {
     "north-mini":               {"label": "North-Mini-Code FP8 (cohere2_moe)", "color": "#ff7b72"},
     "laguna-xs2":               {"label": "Laguna XS.2 FP8 (MoE)",            "color": "#ffa657"},
     "glm45-air-awq":            {"label": "GLM-4.5-Air-REAP AWQ (glm4_moe)",   "color": "#a371f7"},
+    "qwen38-27b-fp8":           {"label": "Qwen3.8-27B FP8 (Dense DeltaNet VL)", "color": "#f85149"},
 }
 
 # (no current models have OOM concurrency levels)

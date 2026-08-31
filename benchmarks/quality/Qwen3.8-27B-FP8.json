@@ -1,0 +1,117 @@
+{
+  "tag": "Qwen3.8-27B-FP8",
+  "timestamp": "2026-08-30 17:10",
+  "max_context": 262144,
+  "mmlu": {
+    "correct": 48,
+    "total": 57,
+    "accuracy": 0.8421052631578947
+  },
+  "humaneval": {
+    "passed": 28,
+    "total": 30,
+    "pass_rate": 0.9333333333333333
+  },
+  "needle": {
+    "results": [
+      {
+        "context": 1024,
+        "found": true
+      },
+      {
+        "context": 4096,
+        "found": true
+      }
+    ],
+    "score": 1.0
+  },
+  "labbench_think_budget1024": {
+    "LitQA2": {
+      "correct": 2,
+      "total": 25,
+      "accuracy": 0.08
+    },
+    "DbQA": {
+      "correct": 1,
+      "total": 25,
+      "accuracy": 0.04
+    },
+    "SuppQA": {
+      "correct": 5,
+      "total": 25,
+      "accuracy": 0.2
+    },
+    "TableQA": {
+      "correct": 0,
+      "total": 25,
+      "accuracy": 0.0
+    },
+    "ProtocolQA": {
+      "correct": 0,
+      "total": 25,
+      "accuracy": 0.0
+    },
+    "SeqQA": {
+      "correct": 1,
+      "total": 25,
+      "accuracy": 0.04
+    },
+    "CloningScenarios": {
+      "correct": 0,
+      "total": 25,
+      "accuracy": 0.0
+    },
+    "_overall": {
+      "correct": 9,
+      "total": 175,
+      "accuracy": 0.05142857142857143
+    }
+  },
+  "mc_mode": {
+    "mmlu": "think",
+    "labbench": "no_think",
+    "needle": "think"
+  },
+  "labbench": {
+    "LitQA2": {
+      "correct": 14,
+      "total": 25,
+      "accuracy": 0.56
+    },
+    "DbQA": {
+      "correct": 11,
+      "total": 25,
+      "accuracy": 0.44
+    },
+    "SuppQA": {
+      "correct": 9,
+      "total": 25,
+      "accuracy": 0.36
+    },
+    "TableQA": {
+      "correct": 10,
+      "total": 25,
+      "accuracy": 0.4
+    },
+    "ProtocolQA": {
+      "correct": 8,
+      "total": 25,
+      "accuracy": 0.32
+    },
+    "SeqQA": {
+      "correct": 15,
+      "total": 25,
+      "accuracy": 0.6
+    },
+    "CloningScenarios": {
+      "correct": 7,
+      "total": 25,
+      "accuracy": 0.28
+    },
+    "_overall": {
+      "correct": 74,
+      "total": 175,
+      "accuracy": 0.4228571428571429
+    }
+  }
+}

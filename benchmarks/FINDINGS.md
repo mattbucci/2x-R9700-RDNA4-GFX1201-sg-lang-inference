@@ -353,3 +353,20 @@ Reproducible harnesses: [p2p_allreduce_bw.py](../scripts/bench/p2p_allreduce_bw.
 - Do not abort a deep TP=2 prefill while a collective is active. A timed-out deep-prefill client left one
   rank in uninterruptible state and required a GPU reset. Use a timeout longer than cold prefill or warm the
   radix cache before collecting deep-decode measurements.
+
+## Evaluation methodology
+
+### LAB-Bench think-budget artifact on thinking models (fixed 2026-08-30)
+
+`eval_and_chart.py` scores the last standalone capital letter in `message.content` under a
+1024-token multiple-choice budget. Heavy thinkers spend the entire budget inside `<think>` on hard
+LAB-Bench items (driver-exact probe on Qwen3.8: `finish_reason=length`, 15,063 reasoning chars,
+empty content), so every such item scores 0 regardless of knowledge. Qwen3.8-27B-FP8 measured
+0.051 under think mode and **0.423** with `--mc-no-think`
+(`chat_template_kwargs: {"enable_thinking": false}`), the fleet's best LAB-Bench. Non-thinking
+peers (Coder-30B 0.383, Devstral 0.257) always answered directly, so no-think is the
+apples-to-apples condition and their historical cells are unaffected. The near-zero
+Qwen3.5 (0.029 / 0.000) and Gemma4 (0.034 / 0.086) LAB-Bench cells predate the flag and are
+suspect until re-measured; MMLU was not visibly affected (Qwen3.8: 0.842 think-mode). Results
+JSONs record the condition in `mc_mode`. The MC budget "matches the 3090 sister repo", so the
+same artifact likely applies there.

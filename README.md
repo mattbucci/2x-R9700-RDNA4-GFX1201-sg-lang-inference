@@ -86,6 +86,12 @@ terminal invalid or missing primary tool call. Per model the prompts are byte-id
 (matching `filler_sha256` and actual token counts), so sampling is the only variable, and the loader
 fails closed if that identity does not hold.
 
+Qwen3.8-27B-FP8 has a first single-profile ladder receipt on the same schema
+([JSON](benchmarks/quality/tooluse256k-qwen38-27b-fp8-v0518-r9700.json)): 7/7 rungs valid **and**
+correct from 16K to 245,150 actual prompt tokens (256,000 capped by the 16,896-token completion
+reserve), repeated filler, 8,192-token budgets. It is one profile, not the three-seed chart contract,
+so it is reported here rather than plotted.
+
 Both GPU-free maintenance items are complete. [R97-G](experiments/06-north-laguna-canonical-eval-ngram-rows.md)
 now publishes the seven existing Docker-scored cells without redirecting outputs outside the repository.
 [R97-C](experiments/01-calib-source-fixes-and-drift-check.md) adopted `fp8-quant`, restored the live audio
@@ -306,7 +312,7 @@ tokens (five runs, decode-only). Every row reports actual input-token counts. "S
 | Devstral-Small-2-24B | AWQ dense + vision | 52.7 (15) | 17.0 (198K) |
 | Qwen3.5-27B | AWQ dense + DeltaNet | 24.5 (22) | 11.2 (197K) |
 | Qwen3.6-27B | AWQ dense + vision | 24.9 (22) | 11.5 (197K) |
-| Qwen3.8-27B (2026-08-30, decode_ab) | official FP8 dense + DeltaNet (VL+video) | 16.6 (24) | **16.3 (175K)** |
+| Qwen3.8-27B (2026-08-30, decode_ab) | official FP8 dense + DeltaNet (VL+video) | 16.7 (24) | **16.6 (197K)** |
 | Qwen3-VL-32B | AWQ dense + vision | 23.4 (20) | 16.5 (27K) |
 | Gemma 4 31B | AWQ dense + SWA | 29.4 (25) | 10.5 (110K) |
 | Gemma 4 12B | AWQ omni + SWA | 38.6 (25) | 10.9 (198K) |
