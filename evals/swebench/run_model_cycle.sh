@@ -51,6 +51,11 @@ SERVER_TIMEOUT="${SERVER_TIMEOUT:-720}"
 # "predictions" per scaffold, 2026-08-30). Scaffold CLIs + uv + rtk need these PATHs.
 ROLLOUT_PY="${ROLLOUT_PY:-$HOME/miniforge3/envs/sglang-triton36-v0518/bin/python}"
 export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+# tmpfs /tmp (31G) filled at qwen38 rollout #17 (2026-08-30: git add rc=128, every
+# later clone failed, python exited 120 flushing a full-stdout log). Work trees and
+# venv cache go to nvme; run_rollouts also notes rmtree-on-tmpfs can SIGSEGV.
+export SWEBENCH_WORKDIR="${SWEBENCH_WORKDIR:-/data/swebench-work}"
+export SWEBENCH_VENVDIR="${SWEBENCH_VENVDIR:-/data/swebench-venvs}"
 LOG_DIR="${LOG_DIR:-/tmp/run-model-cycle-logs/$PRESET}"
 
 mkdir -p "$LOG_DIR"

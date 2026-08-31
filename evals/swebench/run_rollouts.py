@@ -46,7 +46,7 @@ def parse_args():
     p.add_argument("--out", required=True, help="Output dir for predictions + logs")
     p.add_argument("--timeout", type=int, default=600,
                    help="Per-instance opencode timeout (seconds)")
-    p.add_argument("--workdir", default="/tmp/swebench-work",
+    p.add_argument("--workdir", default=os.environ.get("SWEBENCH_WORKDIR", "/tmp/swebench-work"),
                    help="Where to clone task repos")
     p.add_argument("--skip-existing", action="store_true",
                    help="Skip instances that already have a prediction")
@@ -56,7 +56,7 @@ def parse_args():
                    help="Served model name on the server (defaults to model id after slash)")
     p.add_argument("--max-empty-streak", type=int, default=10,
                    help="Abort if this many consecutive instances produce empty diffs")
-    p.add_argument("--venvdir", default="/tmp/swebench-venvs",
+    p.add_argument("--venvdir", default=os.environ.get("SWEBENCH_VENVDIR", "/tmp/swebench-venvs"),
                    help="Where to cache per-instance uv venvs (shared with score_local)")
     p.add_argument("--no-venv", action="store_true",
                    help="Skip pre-rollout venv setup — agent runs read-edit-pray "
