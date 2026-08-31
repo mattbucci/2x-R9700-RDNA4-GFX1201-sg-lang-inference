@@ -33,6 +33,16 @@ from datasets import load_dataset
 RESULTS_DIR = Path("benchmarks/quality")
 
 
+# When True, multiple-choice evals (MMLU, LAB-Bench) ask the server to disable
+# thinking via chat_template_kwargs (qwen3-family templates honor enable_thinking).
+# Rationale: with a 1024-token MC budget, heavy thinkers burn the whole budget
+# inside <think> and return empty content -> scored 0 (observed: Qwen3.8 LAB-Bench
+# 0.05 with 15k-char truncated reasoning; MMLU unaffected at 0.84). Non-thinking
+# peers (Coder-30B 0.38, Devstral 0.26) already answer directly, so no-think is
+# the apples-to-apples condition. Set by --mc-no-think.
+MC_NO_THINK = False
+
+
 def get_max_tokens(base_url, default=4096):
     """Query model server for max context length."""
     try:
@@ -63,7 +73,8 @@ def mmlu_eval(url, n_samples=200, max_workers=8, max_tokens=4096):
         try:
             r = requests.post(url, json={"model": "default", "messages": [
                 {"role": "user", "content": prompt}
-            ], "max_tokens": max_tokens, "temperature": 0}, timeout=300).json()
+            ], "max_tokens": max_tokens, "temperature": 0,
+                **({"chat_template_kwargs": {"enable_thinking": False}} if MC_NO_THINK else {})}, timeout=300).json()
             content = r["choices"][0]["message"]["content"] or ""
             # Strip thinking tags and free-form reasoning preambles
             content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
@@ -137,7 +148,8 @@ def labbench_eval(url, bench_name, n_samples=50, max_workers=1, max_tokens=4096)
         try:
             r = requests.post(url, json={"model": "default", "messages": [
                 {"role": "user", "content": prompt}
-            ], "max_tokens": max_tokens, "temperature": 0}, timeout=300).json()
+            ], "max_tokens": max_tokens, "temperature": 0,
+                **({"chat_template_kwargs": {"enable_thinking": False}} if MC_NO_THINK else {})}, timeout=300).json()
             content = r["choices"][0]["message"]["content"] or ""
             content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
             matches = re.findall(r"\b[A-Z]\b", content)
@@ -215,6 +227,8 @@ def run_eval(port, tag, mmlu_n=200, he_n=30, labbench_n=50, needle_lengths=[1024
         results["timestamp"] = time.strftime("%Y-%m-%d %H:%M")
     else:
         results = {"tag": tag, "timestamp": time.strftime("%Y-%m-%d %H:%M"), "max_context": max_ctx}
+
+    results["mc_mode"] = "no_think" if MC_NO_THINK else "think"
 
     def save():
         with open(outfile, "w") as f:
@@ -379,7 +393,10 @@ if __name__ == "__main__":
     parser.add_argument("--labbench-samples", type=int, default=50, help="Samples per LAB-Bench benchmark")
     parser.add_argument("--needle-lengths", type=str, default="1024,4096,16384,65536")
     parser.add_argument("--workers", type=int, default=1, help="Concurrent requests (1 for single-user models)")
+    parser.add_argument("--mc-no-think", action="store_true",
+                        help="Disable model thinking for MMLU/LAB-Bench via chat_template_kwargs (qwen3-family)")
     args = parser.parse_args()
+    MC_NO_THINK = args.mc_no_think
 
     if args.run:
         lengths = [int(x) for x in args.needle_lengths.split(",")]
