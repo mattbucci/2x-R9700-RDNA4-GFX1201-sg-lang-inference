@@ -25,7 +25,8 @@
 #   SCAFFOLDS       space-separated list (default: "opencode opencode-dcp little-coder little-coder-rtk omp prime dcode")
 #   INSTANCES       per-scaffold instance count (default: 0 = full 300)
 #   TIMEOUT         per-instance rollout timeout in seconds (default: 1800)
-#   LOG_DIR         where to write per-phase logs (default: /tmp/run-model-cycle-logs/<preset>)
+#   LOG_DIR         where to write per-phase logs (default: /data/logs/run-model-cycle-logs/<preset>;
+#                   NOT /tmp -- the 31 GB tmpfs is too small for a multi-day server.log)
 #   SERVER_TIMEOUT  max seconds to wait for server /health=200 (default: 720)
 
 set -uo pipefail
@@ -56,7 +57,7 @@ export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 # venv cache go to nvme; run_rollouts also notes rmtree-on-tmpfs can SIGSEGV.
 export SWEBENCH_WORKDIR="${SWEBENCH_WORKDIR:-/data/swebench-work}"
 export SWEBENCH_VENVDIR="${SWEBENCH_VENVDIR:-/data/swebench-venvs}"
-LOG_DIR="${LOG_DIR:-/tmp/run-model-cycle-logs/$PRESET}"
+LOG_DIR="${LOG_DIR:-/data/logs/run-model-cycle-logs/$PRESET}"
 
 mkdir -p "$LOG_DIR"
 START=$(date +%s)
@@ -149,6 +150,14 @@ for SCAFFOLD in $SCAFFOLDS; do
   rc=$?
   preds=$(wc -l < "$OUT/predictions.jsonl" 2>/dev/null || echo 0)
   log "rollout $SCAFFOLD rc=$rc preds=$preds"
+  if [ "$rc" -eq 75 ]; then
+    # EX_TEMPFAIL from run_rollouts: a host filesystem is (nearly) full. Every
+    # further lane would run degraded, so stop the whole cycle here and leave
+    # the predictions as they are for a --skip-existing resume after cleanup.
+    log "ABORT cycle: rollout $SCAFFOLD reported a full filesystem (rc=75); fix disk and resume"
+    stop_server
+    exit 75
+  fi
   NEED_RESCORE+=("$SCAFFOLD")
 done
 

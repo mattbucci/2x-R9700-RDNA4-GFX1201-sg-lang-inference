@@ -62,6 +62,10 @@ INFRA_PATTERNS = [
     (r"Read timed out", "client_timeout"),
     (r"socket hang up", "connection_error"),
     (r"NetworkError", "connection_error"),
+    # Host filesystem full: scaffolds fail to load extensions / write session
+    # state, the agent's every tool call errors, and the diff comes back
+    # empty (or is the harness's own pre_install edit). Never a model verdict.
+    (r"ENOSPC|No space left on device", "disk_full"),
 ]
 
 

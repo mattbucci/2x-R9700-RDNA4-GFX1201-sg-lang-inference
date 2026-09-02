@@ -2,8 +2,8 @@
 # run_all_cycles.sh — chain run_model_cycle.sh across the bake-off queue.
 #
 # Single user invocation kicks off all pending model cycles back-to-back.
-# Per-cycle log: /tmp/run-model-cycle-logs/<preset>/wrapper.log
-# Queue log:    /tmp/run-model-cycle-logs/queue.log
+# Per-cycle log: /data/logs/run-model-cycle-logs/<preset>/wrapper.log
+# Queue log:    /data/logs/run-model-cycle-logs/queue.log
 #
 # Each cycle: ~6-18h (launch server + 3 rollouts + audit + reroll + score).
 # A failed cycle (server boot timeout, model OOM, etc.) is logged and skipped;
@@ -20,10 +20,10 @@
 #   POLL_SECS      WAIT_FOR_PID poll interval in seconds (default: 60)
 #
 # Detach pattern (recommended — survives session interrupts):
-#   mkdir -p /tmp/run-model-cycle-logs
+#   mkdir -p /data/logs/run-model-cycle-logs
 #   setsid bash -c './evals/swebench/run_all_cycles.sh \
-#       > /tmp/run-model-cycle-logs/queue.log 2>&1 \
-#       & echo $! > /tmp/run-model-cycle-logs/queue.pid; disown' \
+#       > /data/logs/run-model-cycle-logs/queue.log 2>&1 \
+#       & echo $! > /data/logs/run-model-cycle-logs/queue.pid; disown' \
 #       </dev/null >/dev/null 2>&1 & disown
 
 set -uo pipefail
@@ -39,7 +39,7 @@ QUEUE="${QUEUE:-coder-30b-eval qwen36 coder-reap-25b qwen36-ream qwen35-moe code
 POLL_SECS="${POLL_SECS:-60}"
 WAIT_FOR_PID="${WAIT_FOR_PID:-}"
 
-LOG_ROOT="/tmp/run-model-cycle-logs"
+LOG_ROOT="${LOG_ROOT:-/data/logs/run-model-cycle-logs}"
 mkdir -p "$LOG_ROOT"
 
 log() { echo "[run-all-cycles $(date +%F\ %H:%M:%S)] $*"; }

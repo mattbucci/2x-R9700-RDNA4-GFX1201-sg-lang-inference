@@ -99,8 +99,14 @@ setup_rdna4_env() {
     # spawn from working. Instead, individual @torch.compile calls are disabled
     # via disable=_is_hip in topk.py and other files.
 
-    # RCCL debug — INFO so we can see transport selection
-    export NCCL_DEBUG=${NCCL_DEBUG:-INFO}
+    # RCCL log level. Default WARN: at INFO, RCCL 2.27 (ROCm 7.2) prints three
+    # "pre-adjustment threadThreshold / minNChannels / post-adjustment" lines per
+    # collective whenever a preset runs without CUDA graphs (e.g. qwen38's
+    # DeltaNet decode) -- ~4 GB/h of server log at 16 tok/s, which filled the
+    # 31 GB /tmp tmpfs in ~8 h and silently poisoned a SWE-bench cycle
+    # (2026-08-31). Opt in for transport inspection at boot:
+    #   NCCL_DEBUG=INFO ./scripts/launch.sh <preset>
+    export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
     export NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-INIT,P2P}
 
     export TOKENIZERS_PARALLELISM=false

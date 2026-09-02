@@ -447,6 +447,61 @@ def capture_diff(repo_dir: Path) -> str:
     return res.stdout
 
 
+def _commit_harness_prep(repo_dir: Path) -> None:
+    """Fold harness-made edits into HEAD so capture_diff() returns only what the agent did.
+
+    eval_env.install_deps runs SWE-bench's own `pre_install` commands in the work
+    tree (e.g. astropy's `sed ... setuptools==68.0.0 ... pyproject.toml`) and
+    `pip install -e .` can leave build artefacts. Left in the tree they end up in
+    `git diff`, and in the scoring container -- where the same pre_install has
+    already been applied -- that hunk fails `git apply` and gets reverse-applied by
+    the `patch --batch` fallback right before the harness re-runs `install`.
+    Committing them first makes the agent's tree start clean and keeps the patch
+    to the model's edits. No-op when the tree is already clean (e.g. --no-venv).
+    """
+    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=repo_dir,
+                           capture_output=True, text=True).stdout.strip()
+    if not dirty:
+        return
+    subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["git", "-c", "user.name=swebench-harness", "-c", "user.email=harness@localhost",
+                    "-c", "commit.gpgsign=false", "commit", "-q", "--no-verify",
+                    "-m", "[swebench harness] pre_install env prep (not part of the model patch)"],
+                   cwd=repo_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+MIN_FREE_BYTES = 2 * 1024 ** 3
+EX_TEMPFAIL = 75
+
+
+def _disk_guard(*paths) -> str | None:
+    """Return a message naming the first filesystem under `paths` (plus the temp dir)
+    with < MIN_FREE_BYTES free, else None.
+
+    A full host filesystem does not stop a rollout -- it degrades it: scaffolds fail
+    to load extensions or write session state, every agent tool call errors, and the
+    lane keeps producing empty diffs for days (2026-08-31: RCCL INFO logging filled
+    the 31 GB /tmp tmpfs ~8 h into a 7-lane cycle). Fail loudly instead.
+    """
+    seen: set[int] = set()
+    for raw in (tempfile.gettempdir(), *paths):
+        p = Path(raw)
+        while not p.exists():
+            p = p.parent
+        try:
+            dev = os.stat(p).st_dev
+            if dev in seen:
+                continue
+            seen.add(dev)
+            free = shutil.disk_usage(p).free
+        except OSError:
+            continue
+        if free < MIN_FREE_BYTES:
+            return f"{p} has only {free / 1024**3:.2f} GiB free (< {MIN_FREE_BYTES / 1024**3:.0f} GiB)"
+    return None
+
+
 def _wait_server_healthy(server_url: str, max_wait: int = 1200, poll: int = 10) -> bool:
     """Poll <server_url>/health until it responds 200 or max_wait elapses. RDNA4 servers
     HSAIL-crash periodically under load; the orchestrator watchdog restarts them, so a shard
@@ -527,6 +582,12 @@ def main():
                 continue
 
             print(f"[{i+1}/{len(ds)}] {iid}  repo={row['repo']}  base={row['base_commit'][:8]}", flush=True)
+            low = _disk_guard(workdir, args.venvdir, out)
+            if low:
+                print(f"\nABORT: {low} -- a full filesystem degrades every following rollout; "
+                      f"free space and resume with --skip-existing (no prediction written for {iid}).",
+                      flush=True)
+                sys.exit(EX_TEMPFAIL)
             t0 = time.time()
             try:
                 try:
@@ -554,6 +615,9 @@ def main():
                                 print(f"  env: install FAILED — falling back to no-venv prompt", flush=True)
                         except subprocess.CalledProcessError as e:
                             print(f"  env: venv setup crashed: {e} — falling back", flush=True)
+
+                # Harness edits (pre_install seds, build artefacts) must not reach the patch.
+                _commit_harness_prep(inst_dir)
 
                 prompt = (PROMPT_TEMPLATE if venv else PROMPT_NO_VENV).format(
                     problem_statement=row["problem_statement"],
