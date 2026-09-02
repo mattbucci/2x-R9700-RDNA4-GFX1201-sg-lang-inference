@@ -44,6 +44,8 @@ Never overlap model serving with calibration, pruning, large checkpoint conversi
 
 Use the repository watchdog for long-running servers. If one TP rank stalls, capture process stacks before cleanup when possible.
 
+Write multi-day server and job logs under `/data/logs`, never under `/tmp` (a 31 GB tmpfs). Keep `NCCL_DEBUG` at its `WARN` default for anything that runs longer than a boot check: at `INFO`, RCCL logs per collective on graph-free decode paths (~4 GB/h), and a full `/tmp` does not stop dependent jobs — it degrades them silently (agent scaffolds fail with `ENOSPC` and keep emitting empty results). Check `df -h /tmp /data` before and during long unattended runs.
+
 ## SGLang changes
 
 - Edit the live v0.5.15 tree only for experiments intended for that stack.

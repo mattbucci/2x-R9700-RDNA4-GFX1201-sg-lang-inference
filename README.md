@@ -13,7 +13,10 @@ corrects), 7/7 agentic tool-use rungs to 245,150 actual tokens, MMLU 84.2% / Hum
 dead-flat 16.6–16.7 tok/s single-user decode from 24 to 197K input on the repaired RDNA4 Triton
 block-FP8 dispatch (patch 005). A seven-scaffold SWE-bench Lite bakeoff (opencode ± DCP,
 little-coder ± RTK, oh-my-pi, prime-agent, deepagents; 300 instances per cell, Docker-scored) is in
-flight for it — expect days per lane at `MAX_RUNNING=1`. Laguna's native-Triton block-FP8 lane remains
+flight for it — expect days per lane at `MAX_RUNNING=1`. Its first attempt was discarded: an RCCL
+`NCCL_DEBUG=INFO` default filled the `/tmp` tmpfs ~8 h in and every lane ran degraded from then on
+(`ENOSPC` inside the scaffolds); the cycle restarted 2026-09-02 on a `WARN` default with a disk guard,
+logs under `/data`, and harness `pre_install` edits kept out of captured patches. Laguna's native-Triton block-FP8 lane remains
 the measured fleet-speed default (36.8–47.8% over dequant-to-BF16), with its agent-quality envelope
 proven by the 42/42 three-seed ladder. Next levers: tune the gfx1201 Triton W8A8 block-GEMM configs for
 the dense FP8 path (the `N=17408,K=5120` analogue of 078's MoE tuning) and re-measure the suppressed
