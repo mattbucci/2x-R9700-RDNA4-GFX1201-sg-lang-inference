@@ -32,7 +32,7 @@ if [[ -z "$MODEL_KEY" ]]; then
 fi
 
 MODELS_DIR="${MODELS_DIR:-$HOME/AI/models}"
-LOG_DIR=/tmp/pipeline_logs
+LOG_DIR="${LOG_DIR:-/data/logs/pipeline-logs}"
 mkdir -p "$LOG_DIR"
 
 case "$MODEL_KEY" in

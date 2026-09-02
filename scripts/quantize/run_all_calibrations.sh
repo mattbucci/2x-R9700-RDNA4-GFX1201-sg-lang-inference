@@ -11,7 +11,8 @@
 #   7. If validator passes → push to HF (in-place upgrade)
 #   8. If validator fails → log + skip HF push, continue to next
 #
-# Survives session restart via setsid (PPID=1).  Logs in /tmp/recal-logs/.
+# Survives session restart via setsid (PPID=1).  Logs in $LOG_DIR (default
+# /data/logs/recal-logs -- multi-hour jobs must not log to the 31 GB /tmp tmpfs).
 # Env vars:
 #   HF_TOKEN_FILE=~/.secrets/hf_token  (defaults shown)
 #   SKIP=qwen36,gemma4-26b              (comma-sep keys to skip)
@@ -38,7 +39,7 @@ cd "$REPO_DIR"
 source "$REPO_DIR/scripts/common.sh"
 
 MODELS_DIR="${MODELS_DIR:-$HOME/AI/models}"
-LOG_DIR=/tmp/recal-logs
+LOG_DIR="${LOG_DIR:-/data/logs/recal-logs}"
 mkdir -p "$LOG_DIR"
 HF_TOKEN_FILE="${HF_TOKEN_FILE:-$HOME/.secrets/hf_token}"
 # Export HF_TOKEN early so dataset downloads (gated: bigcode/the-stack-smol,

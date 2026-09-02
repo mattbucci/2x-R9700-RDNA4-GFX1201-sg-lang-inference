@@ -41,7 +41,8 @@ run_job() {
             ;;
     esac
 
-    local log="/tmp/calib_${name}_$(date +%Y%m%d_%H%M%S).log"
+    local log="${LOG_DIR:-/data/logs/calib}/calib_${name}_$(date +%Y%m%d_%H%M%S).log"
+    mkdir -p "$(dirname "$log")"
     echo ""
     echo "=============================================="
     echo "Calibration: $name"
