@@ -16,7 +16,11 @@ little-coder ± RTK, oh-my-pi, prime-agent, deepagents; 300 instances per cell, 
 flight for it — expect days per lane at `MAX_RUNNING=1`. Its first attempt was discarded: an RCCL
 `NCCL_DEBUG=INFO` default filled the `/tmp` tmpfs ~8 h in and every lane ran degraded from then on
 (`ENOSPC` inside the scaffolds); the cycle restarted 2026-09-02 on a `WARN` default with a disk guard,
-logs under `/data`, and harness `pre_install` edits kept out of captured patches. Laguna's native-Triton block-FP8 lane remains
+logs under `/data`, and harness `pre_install` edits kept out of captured patches. A second
+measurement defect surfaced mid-cycle: 28 instances (scikit-learn 0.20–0.22 and 1.3, astropy 1.3, pylint
+2.15) could not build their test venv on the host toolchain and the agent ran blind; `eval_env` now
+builds those on the spec's own Python with scoped pins, and the audit re-rolls any no-venv prediction as
+`infra_no_venv` before scoring (see [`FP8_BAKEOFF_SETUP.md`](evals/swebench/FP8_BAKEOFF_SETUP.md)). Laguna's native-Triton block-FP8 lane remains
 the measured fleet-speed default (36.8–47.8% over dequant-to-BF16), with its agent-quality envelope
 proven by the 42/42 three-seed ladder. Next levers: tune the gfx1201 Triton W8A8 block-GEMM configs for
 the dense FP8 path (the `N=17408,K=5120` analogue of 078's MoE tuning) and re-measure the suppressed

@@ -48,45 +48,166 @@ def ensure_repo(repo: str, base_commit: str, work_root: Path, instance_id: str) 
         except Exception:
             pass
 
-    sh(["git", "clone", str(mirror), str(inst_dir)], check=True,
-       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    sh(["git", "checkout", base_commit], cwd=inst_dir, check=True,
-       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    sh(["git", "clone", str(mirror), str(inst_dir)], check=True)
+    sh(["git", "checkout", base_commit], cwd=inst_dir, check=True)
     sh(["git", "config", "user.email", "eval@local"], cwd=inst_dir, check=True)
     sh(["git", "config", "user.name", "eval"], cwd=inst_dir, check=True)
     return inst_dir
 
 
-def make_venv(venv_root: Path, instance_id: str, python_ver: str) -> Path:
-    """Create a uv-managed venv with the SWE-bench-specified Python (or close).
+# Per-(repo, version) corrections to the SWE-bench spec for a host uv venv. The official
+# images solve these under conda on the spec's Python; a uv venv on the nearest managed
+# Python plus an unpinned `-U setuptools` bootstrap lands a toolchain years newer than the
+# code expects. Keep this to instances whose install otherwise fails outright: anything
+# broader also changes the environment of instances that already succeed, which is a
+# methodology change that needs a full re-roll to keep lanes comparable.
+SPEC_OVERRIDES: dict[tuple[str, str], dict] = {}
 
-    Python 3.6 is EOL and unavailable from uv — bump to 3.8.
+# numpy.distutils-era scikit-learn (spec python 3.6; 19 Lite instances):
+#   - 3.8 (uv's floor) breaks 0.21's vendored joblib/cloudpickle (pre-3.8 CodeType
+#     signature) -> the spec's own 3.6, conda-provisioned; uv can drive it.
+#   - setuptools>=61 auto-discovery rejects the flat layout at egg_info, >=65 drops
+#     distutils.msvccompiler (imported by numpy 1.19's numpy.distutils), and Cython 3
+#     cannot compile the 0.2x .pyx sources.
+#   - pandas/matplotlib are the spec's conda `packages` (they also bring `six`, which
+#     sklearn.neighbors imports directly at these commits); joblib<1.2 keeps
+#     Memory.cachedir; pytest 7 still accepts pytest.warns(None), and 0.20's tests use
+#     pytest.raises(message=) (gone in 5) so that line gets 4.6. numpy/scipy restate the
+#     spec pins after the build-deps block's oldest-supported-numpy downgrade.
+#   These are the ceilings a py3.6 conda solve reaches, i.e. what the official image has.
+for _v, _pytest in (("0.20", "pytest==4.6.11"), ("0.21", "pytest==7.0.1"), ("0.22", "pytest==7.0.1")):
+    SPEC_OVERRIDES[("scikit-learn/scikit-learn", _v)] = {
+        "python": "conda:3.6",
+        "pins": ["setuptools<60", "cython<3", "numpy==1.19.2", "scipy==1.5.2",
+                 "pandas==1.1.5", "matplotlib==3.3.4", "joblib<1.2", _pytest],
+    }
+
+# astropy 1.3 (spec python 3.6; 2 Lite instances): numpy==1.16.0 has no 3.8 wheel, and
+# on 3.7+ astropy's test plugin turns the new collections-ABC DeprecationWarning into a
+# collection error for anything importing io.fits, so this one needs the spec's 3.6.
+# MarkupSafe==1.0 imports setuptools.Feature (removed in 46) from inside an isolated build,
+# so it cannot be built on any modern toolchain; 1.1.1 is the oldest release that avoids it
+# and satisfies jinja2 2.10's >=0.23.
+SPEC_OVERRIDES[("astropy/astropy", "1.3")] = {
+    "python": "conda:3.6",
+    "replace": {"MarkupSafe==1.0": "MarkupSafe==1.1.1"},
+}
+
+# scikit-learn 1.3 (spec python 3.9; 4 Lite instances): the spec leaves numpy/scipy unpinned,
+# which now resolves to numpy 2 (1.3 predates numpy-2 support), and the build-deps block's
+# oldest-supported-numpy then leaves the compiled extensions and the runtime numpy on
+# different ABIs. Pin the last 1.x pair that supports 3.9, restated after that block.
+SPEC_OVERRIDES[("scikit-learn/scikit-learn", "1.3")] = {
+    "pins": ["numpy==1.26.4", "scipy==1.11.4"],
+}
+
+# Install-command repairs, tried in order after a failed install when the failure text
+# contains the needle. Each is a drift between the pip the official image was built with
+# and the one `-U pip` bootstraps here, not a spec change.
+INSTALL_RETRIES: list[tuple[str, str, str]] = [
+    # (needle in pip output, description, transform) -- transform is a python expression on `cmd`
+    # setuptools~=62 pins predate PEP 660 and current pip no longer falls back to
+    # `setup.py develop` (pylint 2.15): build against the venv's setuptools instead.
+    ("missing the 'build_editable' hook", "no-build-isolation", "cmd + ' --no-build-isolation'"),
+    # pip 24.1 removed --no-use-pep517 (scikit-learn 1.3's install line still passes it).
+    ("no such option: --no-use-pep517", "drop --no-use-pep517", "cmd.replace(' --no-use-pep517', '')"),
+]
+
+
+def spec_overrides(repo: str, version: str) -> dict:
+    return SPEC_OVERRIDES.get((repo, str(version)), {})
+
+
+def venv_python(spec: dict, repo: str = "", version: str = "") -> str:
+    """Python for the venv: the override's ("X.Y", or "conda:X.Y" for a conda-provisioned
+    interpreter below uv's managed floor), else the spec's (default 3.11)."""
+    return spec_overrides(repo, version).get("python") or spec.get("python", "3.11")
+
+
+CONDA = os.environ.get("CONDA_EXE") or str(Path.home() / "miniforge3" / "bin" / "conda")
+
+
+def _conda_python(venv_root: Path, python_ver: str) -> str | None:
+    """Interpreter for a Python uv cannot download (3.7), provisioned once via conda under
+    venv_root/.conda-py<ver>. None when conda is missing or the solve fails."""
+    env_dir = venv_root / f".conda-py{python_ver}"
+    py = env_dir / "bin" / "python"
+    if py.exists():
+        return str(py)
+    if not Path(CONDA).exists():
+        return None
+    env_dir.parent.mkdir(parents=True, exist_ok=True)
+    r = sh([CONDA, "create", "-y", "-q", "-p", str(env_dir), f"python={python_ver}"], timeout=900)
+    if r.returncode != 0 or not py.exists():
+        shutil.rmtree(env_dir, ignore_errors=True)
+        return None
+    return str(py)
+
+
+def _venv_version(venv: Path) -> str:
+    """'3.9' etc. from pyvenv.cfg's version_info; '' if unreadable."""
+    try:
+        for line in (venv / "pyvenv.cfg").read_text().splitlines():
+            key, _, val = line.partition("=")
+            if key.strip() == "version_info":
+                return ".".join(val.strip().split(".")[:2])
+    except OSError:
+        pass
+    return ""
+
+
+def make_venv(venv_root: Path, instance_id: str, python_ver: str) -> Path:
+    """Create a uv-managed venv on the requested Python (see venv_python()).
+
+    Reused across runs when the cached venv already has that Python; rebuilt when it does
+    not (an earlier attempt on another version). uv's managed builds start at 3.8: a spec
+    "3.6" maps to 3.8 (django 3.x builds there), and "conda:X.Y" from SPEC_OVERRIDES asks
+    conda for the exact interpreter (_conda_python), falling back to 3.8 if it cannot.
     """
+    want = python = python_ver
     if python_ver == "3.6":
-        python_ver = "3.8"
+        want = python = "3.8"
+    elif python_ver.startswith("conda:"):
+        want = python_ver.split(":", 1)[1]
+        python = _conda_python(venv_root, want)
+        if python is None:
+            print(f"  env: conda could not provide python {want} -- using 3.8", flush=True)
+            want = python = "3.8"
     venv = venv_root / instance_id
-    if venv.exists() and (venv / "bin" / "python").exists():
+    if venv.exists() and (venv / "bin" / "python").exists() and _venv_version(venv) == want:
         return venv
     venv.parent.mkdir(parents=True, exist_ok=True)
     if venv.exists():
         shutil.rmtree(venv, ignore_errors=True)
-    sh(["uv", "venv", "--python", python_ver, str(venv)], check=True, timeout=300)
+    sh(["uv", "venv", "--python", python, str(venv)], check=True, timeout=300)
     return venv
 
 
-def install_deps(venv: Path, repo_dir: Path, spec: dict, log_path: Path) -> bool:
+def install_deps(venv: Path, repo_dir: Path, spec: dict, log_path: Path,
+                 overrides: dict | None = None) -> bool:
     """Run swebench's pre_install + pinned pip_packages + install_cmd in the venv.
 
-    spec = MAP_REPO_VERSION_TO_SPECS[repo][version]. Returns True on success.
+    spec = MAP_REPO_VERSION_TO_SPECS[repo][version]; overrides = spec_overrides(repo, version):
+    `replace` rewrites entries of pip_packages, `pins` are installed last so they win.
+    Returns True on success. The env log is append-only, so on a re-roll the last
+    `# install` block is the one that produced the prediction (audit_predictions.py relies
+    on this).
+
+    Build isolation stays at pip's default: only install commands that pass
+    --no-build-isolation themselves (scikit-learn, astropy, ...) build against the venv's
+    toolchain; everything else builds against its own [build-system].requires. (An earlier
+    PIP_NO_BUILD_ISOLATION=1 here never disabled it -- pip stores strtobool(value) straight
+    into `build_isolation`, so 1 means isolated -- and flipping it now would change the
+    environment of every instance mid-bakeoff.)
     """
     env = {**os.environ,
            "VIRTUAL_ENV": str(venv),
            "PATH": f"{venv}/bin:" + os.environ.get("PATH", ""),
-           # PIP_NO_BUILD_ISOLATION=1 forces the venv's Python (and our pinned
-           # numpy etc.) during sdist build. Without it, pip spawns a fresh
-           # build env with the host Python — venv compiles with wrong-version
-           # numpy headers and C extensions blow up.
-           "PIP_NO_BUILD_ISOLATION": "1",
+           # numpy.distutils honours the first for a parallel build_ext (scikit-learn 0.2x:
+           # ~50 Cython extensions, 2-3 min at 8 jobs vs past the 900 s budget serially);
+           # scikit-learn >=0.23's own setup.py honours the second.
+           "NPY_NUM_BUILD_JOBS": str(min(8, os.cpu_count() or 1)),
+           "SKLEARN_BUILD_PARALLEL": str(min(8, os.cpu_count() or 1)),
            # gcc 14+ defaults to C23 (`nullptr` is a keyword) and promotes
            # -Wimplicit-*/-Wincompatible-pointer-types to hard errors. SWE-bench's old C
            # extensions (astropy's bundled cfitsio, etc.) only built on gcc <14 — pin C17
@@ -107,16 +228,22 @@ def install_deps(venv: Path, repo_dir: Path, spec: dict, log_path: Path) -> bool
         r = sh(["bash", "-c", cmd], cwd=repo_dir, env=env, timeout=120)
         _log(f"# pre_install: {cmd}\nrc={r.returncode}\n{r.stdout}\n{r.stderr}")
 
-    # Bootstrap pip/wheel/setuptools via uv (fast)
+    # Bootstrap pip/wheel/setuptools via uv (fast). `env` on every pip step: uv hands
+    # CFLAGS/CXXFLAGS to the build backend, and old sdists in pip_packages (PyYAML 3.x,
+    # MarkupSafe 1.x) need the same gcc-14+ relaxations as the install line.
     r = sh(["uv", "pip", "install", "--python", str(venv / "bin" / "python"),
-            "--quiet", "-U", "pip", "wheel", "setuptools"], timeout=120)
+            "--quiet", "-U", "pip", "wheel", "setuptools"], env=env, timeout=120)
     _log(f"# bootstrap rc={r.returncode}\n{r.stdout}\n{r.stderr}")
 
+    overrides = overrides or {}
+    pins = overrides.get("pins") or []
+    replace = overrides.get("replace") or {}
+
     # Pinned dependencies (pip_packages — list of "name==ver")
-    pkgs = spec.get("pip_packages", []) or []
+    pkgs = [replace.get(p, p) for p in (spec.get("pip_packages", []) or [])]
     if pkgs:
         r = sh(["uv", "pip", "install", "--python", str(venv / "bin" / "python"), "--quiet"] + pkgs,
-               timeout=300)
+               env=env, timeout=300)
         _log(f"# pip_packages rc={r.returncode}\n{r.stdout}\n{r.stderr}")
         if r.returncode != 0:
             return False
@@ -128,18 +255,32 @@ def install_deps(venv: Path, repo_dir: Path, spec: dict, log_path: Path) -> bool
     # the common set into the venv so the no-isolation build can find them.
     sh(["uv", "pip", "install", "--python", str(venv / "bin" / "python"), "--quiet",
         "cython", "extension-helpers", "setuptools_scm", "oldest-supported-numpy",
-        "meson-python", "pybind11", "ninja"], timeout=300)
+        "meson-python", "pybind11", "ninja"], env=env, timeout=300)
+
+    # Override pins go last so they win over the spec's unpinned names and the block above.
+    if pins:
+        r = sh(["uv", "pip", "install", "--python", str(venv / "bin" / "python"), "--quiet"]
+               + list(pins), env=env, timeout=300)
+        _log(f"# pins rc={r.returncode}\n{r.stdout}\n{r.stderr}")
+        if r.returncode != 0:
+            return False
 
     # Main install command (e.g. "python -m pip install -e .[test] --verbose")
     install_cmd = spec.get("install", "pip install -e .")
     r = sh(["bash", "-c", install_cmd], cwd=repo_dir, env=env, timeout=900)
     _log(f"# install: {install_cmd}\nrc={r.returncode}\n{r.stdout}\n{r.stderr}")
+    for needle, what, transform in INSTALL_RETRIES:
+        if r.returncode == 0 or needle not in r.stdout + r.stderr:
+            continue
+        install_cmd = eval(transform, {}, {"cmd": install_cmd})
+        r = sh(["bash", "-c", install_cmd], cwd=repo_dir, env=env, timeout=900)
+        _log(f"# install (retry: {what}): {install_cmd}\nrc={r.returncode}\n{r.stdout}\n{r.stderr}")
     if r.returncode != 0:
         return False
 
     # pytest is needed by some test_cmds (and by the model when iterating)
     sh(["uv", "pip", "install", "--python", str(venv / "bin" / "python"), "--quiet", "pytest"],
-       timeout=120)
+       env=env, timeout=120)
     return True
 
 
@@ -156,13 +297,15 @@ def prepare_instance(instance: dict, work_root: Path, venv_root: Path, log_path:
     if not spec:
         return repo_dir, None
 
+    ov = spec_overrides(instance["repo"], instance["version"])
     try:
-        venv = make_venv(venv_root, instance["instance_id"], spec.get("python", "3.11"))
+        venv = make_venv(venv_root, instance["instance_id"],
+                         venv_python(spec, instance["repo"], instance["version"]))
     except subprocess.CalledProcessError as e:
         log_path.write_text(f"# venv creation failed: {e}\n")
         return repo_dir, None
 
-    if install_deps(venv, repo_dir, spec, log_path):
+    if install_deps(venv, repo_dir, spec, log_path, overrides=ov):
         return repo_dir, venv
     return repo_dir, None
 

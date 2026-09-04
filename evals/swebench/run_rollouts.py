@@ -600,21 +600,25 @@ def main():
                 # If install fails we still attempt the rollout (read-edit-pray fallback),
                 # but the prompt warns the model that tests aren't available.
                 venv = None
+                venv_ok = None  # None: no env attempted; True/False: install result
                 if not args.no_venv:
-                    from eval_env import make_venv, install_deps
+                    from eval_env import make_venv, install_deps, spec_overrides, venv_python
                     from swebench.harness.constants import MAP_REPO_VERSION_TO_SPECS
                     spec = MAP_REPO_VERSION_TO_SPECS.get(row["repo"], {}).get(row["version"])
                     if spec:
                         env_log = out / "logs" / f"{iid}.env.log"
+                        ov = spec_overrides(row["repo"], row["version"])
+                        pyver = venv_python(spec, row["repo"], row["version"])
                         try:
-                            v = make_venv(Path(args.venvdir), iid, spec.get("python", "3.11"))
-                            if install_deps(v, inst_dir, spec, env_log):
+                            v = make_venv(Path(args.venvdir), iid, pyver)
+                            if install_deps(v, inst_dir, spec, env_log, overrides=ov):
                                 venv = v
-                                print(f"  env: venv ready ({spec.get('python', '3.11')}, {len(spec.get('pip_packages', []))} pkgs)", flush=True)
+                                print(f"  env: venv ready ({pyver}, {len(spec.get('pip_packages', []))} pkgs)", flush=True)
                             else:
                                 print(f"  env: install FAILED — falling back to no-venv prompt", flush=True)
                         except subprocess.CalledProcessError as e:
                             print(f"  env: venv setup crashed: {e} — falling back", flush=True)
+                        venv_ok = venv is not None
 
                 # Harness edits (pre_install seds, build artefacts) must not reach the patch.
                 _commit_harness_prep(inst_dir)
@@ -678,6 +682,8 @@ def main():
                     "model_patch": diff,
                     "rollout_returncode": rc,
                     "rollout_seconds": round(time.time() - t0, 1),
+                    # audit_predictions.py re-rolls venv=False as infra_no_venv
+                    "venv": venv_ok,
                 }
                 fp.write(json.dumps(entry) + "\n")
                 fp.flush()

@@ -20,6 +20,13 @@ Infrastructure failure patterns:
   - `Internal Server Error` / `5\\d\\d ` HTTP errors
     → SGLang returning 5xx
   - Exit code != 0 from rollout subprocess
+  - `infra_no_venv`: the pre-rollout env install failed and the agent ran
+    under the read-edit-pray no-venv prompt. Judged from the prediction's
+    `venv` field (run_rollouts.py >= 2026-09-04) or, for older entries,
+    from the last `# install` block in `logs/<iid>.env.log`. This is an
+    environment verdict, not a model verdict, and it breaks within-matrix
+    comparability (other lanes may get a working venv for the same
+    instance), so it is re-rolled even when the patch is non-empty.
 
 Output:
   - `audit-report.json` next to predictions.jsonl
@@ -69,7 +76,35 @@ INFRA_PATTERNS = [
 ]
 
 
-def classify_log(log_text: str, rollout_rc: int, patch: str, elapsed: float) -> tuple[str, str | None]:
+_INSTALL_RC = re.compile(r"^# install(?: \(retry[^)]*\))?:.*?\nrc=(-?\d+)", re.MULTILINE | re.DOTALL)
+
+
+def venv_state(pred: dict, env_log: Path) -> bool | None:
+    """True = rollout had a working venv, False = install failed (no-venv
+    fallback), None = no env was attempted (--no-venv, no harness spec, or a
+    pre-2026-09 run with no env log). Prefers the explicit `venv` field the
+    rollout writes; falls back to the last `# install` block of the env log
+    (the log is append-only across re-rolls, so the last block is the one
+    that produced this prediction)."""
+    if "venv" in pred:
+        return pred["venv"]
+    if not env_log.exists():
+        return None
+    try:
+        text = env_log.read_text(errors="replace")
+    except OSError:
+        return None
+    if not text.strip():
+        return None
+    hits = _INSTALL_RC.findall(text)
+    if not hits:
+        # pre_install / pip_packages / pins failed before the install step ran
+        return False
+    return hits[-1] == "0"
+
+
+def classify_log(log_text: str, rollout_rc: int, patch: str, elapsed: float,
+                 venv: bool | None = None) -> tuple[str, str | None]:
     """Return (category, matched_pattern_or_None).
 
     Categories:
@@ -85,8 +120,13 @@ def classify_log(log_text: str, rollout_rc: int, patch: str, elapsed: float) -> 
         runs, distributed by instance count per repo. Counts toward the
         denominator as "model couldn't converge in 1800s" — matrix
         accuracy preserved.
+      - infra_no_venv: env install failed, rollout ran without a venv.
+        Checked BEFORE the patch short-circuit: a patch written blind is
+        not the same measurement as one the model could test.
       - infra_<sub>: matched an infrastructure failure pattern
     """
+    if venv is False:
+        return ("infra_no_venv", "env install failed -- no-venv fallback")
     has_patch = bool((patch or "").strip())
     if has_patch:
         return ("real_diff", None)
@@ -164,12 +204,14 @@ def main():
                 except OSError:
                     pass
 
-            category, match = classify_log(log_text, rollout_rc, patch, elapsed)
+            venv = venv_state(d, logs_dir / f"{iid}.env.log")
+            category, match = classify_log(log_text, rollout_rc, patch, elapsed, venv)
             entry = {
                 "instance_id": iid,
                 "patch_len": len(patch),
                 "rollout_seconds": elapsed,
                 "rollout_rc": rollout_rc,
+                "venv": venv,
                 "matched": match,
             }
             by_category.setdefault(category, []).append(entry)
@@ -187,6 +229,9 @@ def main():
     for k, v in sorted(by_category.items()):
         if k.startswith("infra_"):
             print(f"    {k:40s} {len(v)}")
+    no_venv = len(by_category.get("infra_no_venv", []))
+    if no_venv:
+        print(f"  (infra_no_venv={no_venv}: env install failed -> agent ran blind; re-rolled for lane consistency)")
     print(f"\n  → re-roll list size: {len(reroll_ids)} (these are NOT model verdicts; re-roll before scoring)")
 
     if reroll_ids[:5]:
